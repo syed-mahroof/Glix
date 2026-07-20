@@ -14,13 +14,13 @@
         "buildType": "apk"
       },
       "env": {
-        "EXPO_PUBLIC_API_URL": "https://REPLACE-WITH-YOUR-RENDER-URL.onrender.com/api/v1"
+        "EXPO_PUBLIC_API_URL": "https://glix-backend-j23l.onrender.com/api/v1"
       }
     },
     "production": {
       "autoIncrement": true,
       "env": {
-        "EXPO_PUBLIC_API_URL": "https://REPLACE-WITH-YOUR-RENDER-URL.onrender.com/api/v1"
+        "EXPO_PUBLIC_API_URL": "https://glix-backend-j23l.onrender.com/api/v1"
       }
     }
   },
