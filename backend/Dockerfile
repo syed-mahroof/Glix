@@ -18,3 +18,9 @@ RUN pip install --upgrade pip && pip install -r requirements.txt
 
 # Copy the rest of the application codebase
 COPY . /app/
+
+# Make the startup script executable
+RUN chmod +x /app/render-start.sh
+
+# Start the application
+CMD ["/app/render-start.sh"]
