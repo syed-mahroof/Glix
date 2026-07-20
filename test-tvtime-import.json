@@ -1,0 +1,50 @@
+[
+  {
+    "title": "Breaking Bad",
+    "id": { "imdb": "tt0903747" },
+    "seasons": [
+      {
+        "season_number": 1,
+        "episodes": [
+          { "episode_number": 1, "is_watched": true, "watched_at": "2024-03-10" },
+          { "episode_number": 2, "is_watched": true, "watched_at": "2024-03-11" },
+          { "episode_number": 3, "is_watched": false }
+        ]
+      },
+      {
+        "season_number": 2,
+        "episodes": [
+          { "episode_number": 1, "is_watched": true, "watched_at": "2024-03-15" },
+          { "episode_number": 2, "is_watched": false }
+        ]
+      }
+    ]
+  },
+  {
+    "title": "Game of Thrones",
+    "id": { "imdb": "tt0944947" },
+    "seasons": [
+      {
+        "season_number": 1,
+        "episodes": [
+          { "episode_number": 1, "is_watched": true },
+          { "episode_number": 2, "is_watched": true },
+          { "episode_number": 3, "is_watched": true }
+        ]
+      }
+    ]
+  },
+  {
+    "title": "The Office",
+    "id": { "imdb": "tt0386676" },
+    "seasons": [
+      {
+        "season_number": 1,
+        "episodes": [
+          { "episode_number": 1, "is_watched": true },
+          { "episode_number": 2, "is_watched": true }
+        ]
+      }
+    ]
+  }
+]

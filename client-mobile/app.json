@@ -1,0 +1,125 @@
+{
+  "expo": {
+    "name": "Glix",
+    "slug": "glix",
+    "scheme": "watchtracker",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "light",
+    "newArchEnabled": true,
+    "splash": {
+      "backgroundColor": "#000000"
+    },
+    "ios": {
+      "bundleIdentifier": "com.watchtracker.app",
+      "supportsTablet": true,
+      "usesAppleSignIn": true,
+      "entitlements": {
+        "com.apple.security.application-groups": [
+          "group.com.watchtracker"
+        ]
+      }
+    },
+    "android": {
+      "package": "com.watchtracker.app",
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#ffffff"
+      },
+      "edgeToEdgeEnabled": true,
+      "predictiveBackGestureEnabled": false
+    },
+    "web": {
+      "favicon": "./assets/favicon.png"
+    },
+    "plugins": [
+      "expo-router",
+      "expo-secure-store",
+      "expo-apple-authentication",
+      "./plugins/withExcludeLegacySupportLibs",
+      [
+        "@react-native-google-signin/google-signin",
+        {
+          "iosUrlScheme": "com.googleusercontent.apps.374430247793-cq07307q5hfs1bri177livsfffqbqhhs"
+        }
+      ],
+      [
+        "react-native-android-widget",
+        {
+          "widgets": [
+            {
+              "name": "WatchlistWidget",
+              "label": "Watchlist",
+              "minWidth": "100dp",
+              "minHeight": "100dp",
+              "description": "Watchlist Widget"
+            },
+            {
+              "name": "UpcomingWidget",
+              "label": "Upcoming",
+              "minWidth": "100dp",
+              "minHeight": "100dp",
+              "description": "Upcoming Widget"
+            }
+          ]
+        }
+      ],
+      [
+        "expo-widgets",
+        {
+          "groupIdentifier": "group.com.watchtracker",
+          "enableAndroid": false,
+          "widgets": [
+            {
+              "name": "Watchlist",
+              "displayName": "Watchlist",
+              "description": "See the next episode in your watchlist.",
+              "ios": {
+                "supportedFamilies": [
+                  "systemSmall",
+                  "systemMedium"
+                ]
+              }
+            },
+            {
+              "name": "Upcoming",
+              "displayName": "Upcoming",
+              "description": "Countdown to the next airing show.",
+              "ios": {
+                "supportedFamilies": [
+                  "systemSmall",
+                  "systemMedium"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    ],
+    "extra": {
+      "router": {},
+      "eas": {
+        "build": {
+          "experimental": {
+            "ios": {
+              "appExtensions": [
+                {
+                  "targetName": "ExpoWidgetsTarget",
+                  "bundleIdentifier": "com.watchtracker.app.ExpoWidgetsTarget",
+                  "entitlements": {
+                    "com.apple.security.application-groups": [
+                      "group.com.watchtracker"
+                    ]
+                  }
+                }
+              ]
+            }
+          }
+        },
+        "projectId": "dc895a3e-62d1-432e-985e-53250e3d0e7f"
+      }
+    },
+    "owner": "ogus-gambheera"
+  }
+}

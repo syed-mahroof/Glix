@@ -1,0 +1,56 @@
+# =========================
+# Secrets
+# =========================
+backend/.env
+backend/.env.*
+!backend/.env.prod
+
+client-mobile/.env.local
+client-mobile/.env.production.local
+
+# =========================
+# Python
+# =========================
+backend/venv/
+backend/.venv/
+**/__pycache__/
+*.py[cod]
+*$py.class
+
+# =========================
+# Django
+# =========================
+backend/staticfiles/
+backend/media/
+backend/celerybeat-schedule
+backend/.pytest_cache/
+
+# =========================
+# Node / Expo
+# =========================
+**/node_modules/
+**/dist/
+.expo/
+.expo-shared/
+
+# =========================
+# Logs
+# =========================
+*.log
+
+# =========================
+# IDE
+# =========================
+.vscode/settings.json
+.idea/
+
+# =========================
+# OS
+# =========================
+.DS_Store
+Thumbs.db
+
+
+# Expo
+.expo/
+.expo-shared/

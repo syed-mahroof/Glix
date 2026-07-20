@@ -1,0 +1,58 @@
+
+# WatchTracker backend requirements
+# Versions above the "--- verified installed ---" line are pinned exactly,
+# matching the current venv per context.md (pip freeze). Everything below
+# is newly requested tooling left as a version floor (>=) rather than a
+# guessed exact pin. After installing, run:
+#   pip freeze > requirements.txt
+# to lock the real resolved versions for reproducible deploys.
+
+# --- Verified installed (pin exact) ---
+Django==6.0.7
+djangorestframework==3.17.1
+djangorestframework-simplejwt==5.5.1
+django-cors-headers==4.9.0
+django-unfold==0.100.0
+psycopg2-binary==2.9.12
+requests==2.34.2
+PyJWT==2.13.0
+# RS256 backend for PyJWT's PyJWKClient — needed to verify Google/Apple
+# "Sign in with" ID tokens (core/social_auth.py). Not a new auth
+# framework, just PyJWT's own optional crypto extra; PyJWT silently has
+# no RS256 support without it (jwt.algorithms.has_crypto == False).
+cryptography==49.0.0
+
+# --- Async task queue (core/tasks.py) ---
+celery>=5.4
+redis>=5.0
+
+# --- Media / config / API docs / filtering / dev tooling ---
+Pillow>=11.0
+python-dotenv>=1.0
+drf-spectacular>=0.28
+django-filter>=24.3
+django-extensions>=3.2
+
+# --- Production serving ---
+gunicorn>=23.0
+whitenoise>=6.7
+uvicorn[standard]>=0.32
+
+# --- Testing ---
+# pytest capped below 9.0: pytest-django 4.12 (latest at time of writing)
+# doesn't yet support pytest 9's fixture-teardown internals — every test
+# errored at setup with `assert not self._finalizers` (_pytest/fixtures.py)
+# before any test body ran, with an open '>=8.3' floor letting pip resolve
+# to 9.1.1. Revisit the ceiling once pytest-django ships pytest 9 support.
+pytest>=8.3,<9.0
+pytest-django>=4.9
+factory-boy>=3.3
+
+# --- Code quality ---
+black>=24.10
+isort>=5.13
+flake8>=7.1
+mypy>=1.13
+django-stubs>=5.1
+djangorestframework-stubs>=3.15
+pre-commit>=4.0
