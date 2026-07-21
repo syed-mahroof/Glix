@@ -134,6 +134,12 @@
         "projectId": "c2fbe23e-0540-421a-b445-e42dcf8b488c"
       }
     },
-    "owner": "ogus-gambheera"
+    "owner": "ogus-gambheera",
+    "runtimeVersion": {
+      "policy": "appVersion"
+    },
+    "updates": {
+      "url": "https://u.expo.dev/c2fbe23e-0540-421a-b445-e42dcf8b488c"
+    }
   }
 }

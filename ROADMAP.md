@@ -57,7 +57,8 @@ User (relaying a real-world test by their brother, the app's first outside user)
 - ✅ Real navigation-lag bug found and fixed: 6 files subscribed to the entire Zustand store with no selector, `app/_layout.tsx` worst of all since it wraps the whole app.
 - 🟡 Google Sign-In's most likely real-world blocker (Android OAuth client's SHA-1 in Google Cloud Console) is outside the repo — flagged with exact next step, not something code alone can fix.
 - 🟡 Not verifiable this session: no Android device/emulator attached, so widget resize/scroll/tap-through and the navigation-perf improvement are unconfirmed on real hardware.
-- 🔴 Found, flagged, not touched: `backend/.env.prod` is tracked in git with real production secrets in plaintext — a credential-rotation decision for the user, not a silent fix.
+- ✅ `backend/.env.prod` untracked from git per the user's decision (secrets in git history still need rotating by hand, on the user's own schedule).
+- ✅ EAS Update (OTA) configured (`expo-updates` + `eas update:configure`) so future JS-only fixes can ship instantly without a full APK rebuild — takes effect starting with the next build after this one, not the in-flight `preview` build.
 
 ---
 
