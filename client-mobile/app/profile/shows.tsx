@@ -139,14 +139,13 @@ export default function ProfileShowsScreen() {
   const router = useRouter();
   const { theme } = useAppTheme();
   const c = theme.colors;
-  const {
-    watchlist,
-    isLoadingWatchlist,
-    fetchWatchlist,
-    preferredLayout,
-    selectedLanguage,
-    setLanguageFilter,
-  } = useWatchStore();
+  // Scoped selectors, not a bare useWatchStore() — see app/_layout.tsx's note.
+  const watchlist = useWatchStore((s) => s.watchlist);
+  const isLoadingWatchlist = useWatchStore((s) => s.isLoadingWatchlist);
+  const fetchWatchlist = useWatchStore((s) => s.fetchWatchlist);
+  const preferredLayout = useWatchStore((s) => s.preferredLayout);
+  const selectedLanguage = useWatchStore((s) => s.selectedLanguage);
+  const setLanguageFilter = useWatchStore((s) => s.setLanguageFilter);
   const [filter, setFilter] = useState<FilterKey>('ALL');
   const [query, setQuery] = useState('');
   const [isLanguageModalVisible, setIsLanguageModalVisible] = useState(false);

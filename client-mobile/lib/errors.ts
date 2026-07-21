@@ -27,5 +27,16 @@ export function extractErrorMessage(error: unknown): string {
     }
     return error.message || 'Something went wrong. Please try again.';
   }
+  // Non-axios errors (native-module errors — GoogleSignin, file pickers,
+  // etc. — or a plain `throw new Error('...')` elsewhere in the app) used
+  // to fall straight through to the generic string below, discarding
+  // whatever specific message the throw site had already worked out. That
+  // made every non-network failure equally uninformative — e.g. Google
+  // Sign-In's own "Google did not return an ID token." never reached the
+  // user, always replaced with "An unexpected error occurred." Preserve a
+  // real message when one exists; only fall back when there truly isn't one.
+  if (error instanceof Error && error.message) {
+    return error.message;
+  }
   return 'An unexpected error occurred.';
 }

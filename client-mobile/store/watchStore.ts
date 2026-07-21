@@ -959,6 +959,7 @@ export const useWatchStore = create<WatchStoreState>()(
       const upcoming = buildUpcomingItems(entries)
         .slice(0, 5)
         .map((item) => ({
+          id: item.tmdbShowId,
           title: item.showTitle,
           poster_path: item.posterPath,
           next_episode: `S${item.seasonNumber} E${item.episodeNumber}`,

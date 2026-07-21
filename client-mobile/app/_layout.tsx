@@ -46,7 +46,16 @@ function RootLayoutInner() {
   const router = useRouter();
   const [isAuthChecked, setIsAuthChecked] = useState(false);
   const [isAuthenticated, setIsAuthenticated] = useState(false);
-  const { unlockedBadges, popUnlockedBadge } = useWatchStore();
+  // Scoped selectors, not a bare useWatchStore() — this root layout wraps
+  // the entire app, so a bare call would re-render literally every screen
+  // on every store mutation anywhere (toggling an episode, a background
+  // widget sync, etc.). Same fix applied to the tab/profile screens below
+  // that had the same pattern (index.tsx, movies.tsx, profile/shows.tsx,
+  // profile/movies.tsx, community.tsx) — user-reported general navigation
+  // lag (2026-07-21) traced to this being the single highest-leverage
+  // instance of it, since it sits above every other screen in the tree.
+  const unlockedBadges = useWatchStore((s) => s.unlockedBadges);
+  const popUnlockedBadge = useWatchStore((s) => s.popUnlockedBadge);
 
   useEffect(() => {
     SplashScreen.hideAsync().catch(() => {});

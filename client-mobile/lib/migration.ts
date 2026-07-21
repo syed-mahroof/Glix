@@ -232,6 +232,17 @@ export async function fetchImportJob(jobId: string): Promise<ImportResult> {
  * Resolves with the terminal job state (SUCCESS or FAILED) — a FAILED
  * job is a resolved result carrying `detail`, not a thrown error, so the
  * UI can render the same summary either way.
+ *
+ * The backend keeps running a 5-10 minute import regardless of whether
+ * this client is still listening — a single dropped poll request (one
+ * Render cold-start hiccup, one wifi blip) must not read as "the import
+ * failed" when it actually kept succeeding server-side the whole time.
+ * User-reported bug (2026-07-21): a real import completed successfully
+ * server-side (backend logs: SUCCESS, 361 shows) while the app showed
+ * "Import Failed — Network Error", because the old version let any single
+ * failed GET reject the whole poll loop. Consecutive failures (not total
+ * failures) are what should end it — one blip retries, a genuinely dead
+ * connection still gives up in reasonable time.
  */
 export async function pollImportJob(
   jobId: string,
@@ -241,15 +252,31 @@ export async function pollImportJob(
   // A 200-series export is minutes of TMDB round-trips; this ceiling
   // (~20 min) exists only so a wedged worker can't poll forever.
   const maxAttempts = Math.ceil((20 * 60 * 1000) / intervalMs);
+  // ~8 consecutive misses at 1.5s apart (plus each fetch's own up-to-15s
+  // axios timeout) comfortably absorbs a transient network blip or a
+  // Render free-tier cold start without giving up on a healthy import.
+  const maxConsecutiveFailures = 8;
+  let consecutiveFailures = 0;
+  let lastError: unknown = null;
 
   for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
-    const job = await fetchImportJob(jobId);
-    onProgress?.(job);
-    if (job.status === 'SUCCESS' || job.status === 'FAILED') {
-      return job;
+    try {
+      const job = await fetchImportJob(jobId);
+      consecutiveFailures = 0;
+      onProgress?.(job);
+      if (job.status === 'SUCCESS' || job.status === 'FAILED') {
+        return job;
+      }
+    } catch (err) {
+      consecutiveFailures += 1;
+      lastError = err;
+      if (consecutiveFailures >= maxConsecutiveFailures) {
+        throw err;
+      }
     }
     await new Promise((resolve) => setTimeout(resolve, intervalMs));
   }
+  if (lastError) throw lastError;
   throw new Error('Import is taking longer than expected. Check back shortly.');
 }
 

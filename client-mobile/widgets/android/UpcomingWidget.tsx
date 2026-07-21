@@ -1,10 +1,64 @@
 import React from 'react';
-import { FlexWidget, TextWidget, ImageWidget } from 'react-native-android-widget';
+import { FlexWidget, TextWidget, ImageWidget, ListWidget } from 'react-native-android-widget';
+
+interface UpcomingWidgetItem {
+  id?: number;
+  title: string;
+  poster_path: string | null;
+  next_episode: string;
+  air_date: string;
+}
+
+// Each row deep-links straight to that show via the app's own `watchtracker://`
+// scheme (app.json) into the `app/show/[id].tsx` route — the same path
+// router.push(`/show/${id}`) uses everywhere else in the app. `id` is only
+// missing for stale cached widget data written before this field existed;
+// falls back to just opening the app rather than a broken link.
+function UpcomingRow({ show }: { show: UpcomingWidgetItem }) {
+  return (
+    <FlexWidget
+      clickAction={show.id != null ? 'OPEN_URI' : 'OPEN_APP'}
+      clickActionData={show.id != null ? { uri: `watchtracker://show/${show.id}` } : undefined}
+      style={{
+        height: 64,
+        width: 'match_parent',
+        flexDirection: 'row',
+        alignItems: 'center',
+        paddingLeft: 16,
+        paddingRight: 16,
+        paddingTop: 8,
+        paddingBottom: 8,
+      }}
+    >
+      {show.poster_path ? (
+        <ImageWidget
+          image={`https://image.tmdb.org/t/p/w200${show.poster_path}`}
+          imageWidth={36}
+          imageHeight={52}
+          radius={4}
+          resizeMode="cover"
+          style={{ marginRight: 12 }}
+        />
+      ) : null}
+      <FlexWidget style={{ flexDirection: 'column', flex: 1 }}>
+        <TextWidget text={show.title} style={{ fontSize: 15, color: '#FFFFFF', fontWeight: 'bold' }} maxLines={1} />
+        <TextWidget
+          text={`${show.next_episode} • ${new Date(show.air_date).toLocaleDateString()}`}
+          style={{ fontSize: 12, color: '#B3B3B3', marginTop: 2 }}
+          maxLines={1}
+        />
+      </FlexWidget>
+    </FlexWidget>
+  );
+}
 
 export function UpcomingWidget({ data }: { data: any }) {
-  if (!data || !data.upcoming || data.upcoming.length === 0) {
+  const items: UpcomingWidgetItem[] = data?.upcoming ?? [];
+
+  if (items.length === 0) {
     return (
       <FlexWidget
+        clickAction="OPEN_APP"
         style={{
           height: 'match_parent',
           width: 'match_parent',
@@ -21,36 +75,29 @@ export function UpcomingWidget({ data }: { data: any }) {
     );
   }
 
-  const show = data.upcoming[0];
-
   return (
     <FlexWidget
       style={{
         height: 'match_parent',
         width: 'match_parent',
         backgroundColor: '#000000',
-        padding: 16,
         borderRadius: 16,
         flexDirection: 'column',
       }}
     >
-      <TextWidget text="AIRING SOON" style={{ fontSize: 12, color: '#E4FA1A', fontWeight: 'bold', marginBottom: 8 }} />
-      <FlexWidget style={{ flexDirection: 'row', alignItems: 'center' }}>
-        {show.poster_path ? (
-          <ImageWidget
-            image={`https://image.tmdb.org/t/p/w200${show.poster_path}`}
-            imageWidth={40}
-            imageHeight={60}
-            radius={4}
-            resizeMode="cover"
-            style={{ marginRight: 12 }}
-          />
-        ) : null}
-        <FlexWidget style={{ flexDirection: 'column', flex: 1 }}>
-          <TextWidget text={show.title} style={{ fontSize: 16, color: '#FFFFFF', fontWeight: 'bold' }} maxLines={1} />
-          <TextWidget text={`${show.next_episode} • ${new Date(show.air_date).toLocaleDateString()}`} style={{ fontSize: 14, color: '#B3B3B3', marginTop: 4 }} />
-        </FlexWidget>
-      </FlexWidget>
+      <TextWidget
+        text="AIRING SOON"
+        style={{ fontSize: 12, color: '#E4FA1A', fontWeight: 'bold', marginLeft: 16, marginTop: 12, marginBottom: 4 }}
+      />
+      {/* Scrollable — up to 5 upcoming episodes (store/watchStore.ts's
+          syncWidgetData caps it there). At the widget's default 4x2 size
+          only ~1.5 rows are visible; the list itself scrolls, and the
+          widget can also be resized taller from the home screen. */}
+      <ListWidget style={{ height: 'match_parent', width: 'match_parent' }}>
+        {items.map((show, idx) => (
+          <UpcomingRow key={show.id ?? idx} show={show} />
+        ))}
+      </ListWidget>
     </FlexWidget>
   );
 }

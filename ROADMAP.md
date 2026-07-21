@@ -1,5 +1,5 @@
 # Glix — Roadmap & Feature Checklist
-**Last Updated:** 2026-07-20 (Phase 33 — Final pre-deployment sweep + Render deployment readiness: whitenoise/static files wired, `SECURE_PROXY_SSL_HEADER` fixed, single-free-instance Celery start script, `.gitignore` added, `eas.json` APK/env scaffolding. See Phase 32 below for the premium animated splash)
+**Last Updated:** 2026-07-21 (Phase 34 — Import reliability + duplicate-job guard, Android widget resize/scroll/tap-through, Google Sign-In error diagnostics, real navigation-lag fix (unscoped Zustand selectors). See Phase 33 below for the pre-deployment Render sweep)
 Legend: ✅ Complete · 🟨 Partial · ⬜ Not Started
 
 ---
@@ -42,6 +42,22 @@ Legend: ✅ Complete · 🟨 Partial · ⬜ Not Started
 | 31 | Push Notifications Actually Wired End-to-End | 2026-07 🟨 |
 | 32 | Premium Animated Splash | 2026-07 🟨 |
 | 33 | Final Pre-Deployment Sweep + Render Deployment Readiness | 2026-07-20 ✅ |
+| 34 | Import Reliability + Widget/Google-Sign-In/Navigation-Perf Fixes | 2026-07-21 🟨 |
+
+---
+
+## Phase 34 — Import Reliability, Android Widget, Google Sign-In Diagnostics, Navigation Perf
+
+User (relaying a real-world test by their brother, the app's first outside user) reported the TV Time import undercounting/showing "Import Failed" despite the backend actually succeeding, the Android home-screen widget stuck at a tiny 2x2 with no tap-through, Google Sign-In failing with a generic error, general intermittent "Network Error" banners, and laggy navigation between tabs/screens. Full root-cause writeup in `AUDIT.md`.
+
+### Done
+- ✅ Import poll resilience (`pollImportJob`), idempotent import-job creation (`TVTimeImportView`), orphaned-job self-healing (`ImportJob.updated_at`, migration `0009`), bounded worker time (`soft_time_limit`), negative TMDB-404 caching (`get_season_episodes`), and always-refetch-on-settle in `profile.tsx`.
+- ✅ Android widget resized (resizable 4x2 default), background auto-refresh (`updatePeriodMillis`), scrollable multi-row list, tap-through deep link to the specific show (`watchtracker://show/<id>`), missing `id` on the Upcoming widget payload added.
+- ✅ `extractErrorMessage` no longer discards real error messages; GoogleSignin native error codes mapped to plain explanations.
+- ✅ Real navigation-lag bug found and fixed: 6 files subscribed to the entire Zustand store with no selector, `app/_layout.tsx` worst of all since it wraps the whole app.
+- 🟡 Google Sign-In's most likely real-world blocker (Android OAuth client's SHA-1 in Google Cloud Console) is outside the repo — flagged with exact next step, not something code alone can fix.
+- 🟡 Not verifiable this session: no Android device/emulator attached, so widget resize/scroll/tap-through and the navigation-perf improvement are unconfirmed on real hardware.
+- 🔴 Found, flagged, not touched: `backend/.env.prod` is tracked in git with real production secrets in plaintext — a credential-rotation decision for the user, not a silent fix.
 
 ---
 

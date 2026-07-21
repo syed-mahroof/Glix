@@ -53,16 +53,28 @@
             {
               "name": "WatchlistWidget",
               "label": "Watchlist",
-              "minWidth": "100dp",
-              "minHeight": "100dp",
-              "description": "Watchlist Widget"
+              "description": "Your next-up shows, tap one to jump right in.",
+              "minWidth": "250dp",
+              "minHeight": "110dp",
+              "targetCellWidth": 4,
+              "targetCellHeight": 2,
+              "maxResizeWidth": "400dp",
+              "maxResizeHeight": "350dp",
+              "resizeMode": "horizontal|vertical",
+              "updatePeriodMillis": 1800000
             },
             {
               "name": "UpcomingWidget",
               "label": "Upcoming",
-              "minWidth": "100dp",
-              "minHeight": "100dp",
-              "description": "Upcoming Widget"
+              "description": "What's airing soon, tap one to jump right in.",
+              "minWidth": "250dp",
+              "minHeight": "110dp",
+              "targetCellWidth": 4,
+              "targetCellHeight": 2,
+              "maxResizeWidth": "400dp",
+              "maxResizeHeight": "350dp",
+              "resizeMode": "horizontal|vertical",
+              "updatePeriodMillis": 1800000
             }
           ]
         }

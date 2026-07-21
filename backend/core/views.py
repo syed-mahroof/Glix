@@ -7,6 +7,8 @@ whole point of the local cache tables is to keep the hot mobile paths
 fast and TMDB-rate-limit-free.
 """
 
+from datetime import timedelta
+
 from django.core.cache import cache
 from django.db import transaction
 from django.db.models import Count, F, Max, Prefetch, Q
@@ -1179,9 +1181,24 @@ class TVTimeImportView(APIView):
 
     Response: 202 Accepted
     { "job_id": str, "total": int, "status": "PENDING" }
+
+    Idempotent against duplicate submissions: if the user already has a
+    PENDING/RUNNING job, that job's handle is returned instead of starting
+    a second one. A full export is ~1,100 sequential TMDB calls on a
+    single-concurrency Celery worker (render-start.sh runs worker
+    --concurrency=1); without this guard, a client that resubmits after a
+    dropped poll request (see lib/migration.ts's pollImportJob) would queue
+    a second full reprocessing run behind the first, doubling the wait and
+    hammering TMDB for nothing since the DB writes are idempotent anyway.
     """
 
     permission_classes = [IsAuthenticated]
+
+    # Generous vs. the ~5-10 min a full export actually takes (see
+    # run_tvtime_import's docstring), tight enough to recover promptly from
+    # a genuinely orphaned job — e.g. the whole container restarting mid-run,
+    # which render-start.sh's `wait -n` does for the worker on any crash.
+    STALE_JOB_AFTER = timedelta(minutes=15)
 
     def post(self, request):
         shows_data = request.data.get("shows", [])
@@ -1198,6 +1215,28 @@ class TVTimeImportView(APIView):
                 {"detail": "Nothing to import — the file contained no shows or movies."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
+
+        in_flight = (
+            ImportJob.objects.filter(
+                user=request.user,
+                status__in=[ImportJob.Status.PENDING, ImportJob.Status.RUNNING],
+            )
+            .order_by("-created_at")
+            .first()
+        )
+        if in_flight is not None:
+            if timezone.now() - in_flight.updated_at <= self.STALE_JOB_AFTER:
+                return Response(
+                    {"job_id": str(in_flight.id), "total": in_flight.total, "status": in_flight.status},
+                    status=status.HTTP_202_ACCEPTED,
+                )
+            # Orphaned: the worker/container almost certainly died mid-run.
+            # Close it out so it stops masking new attempts forever.
+            in_flight.status = ImportJob.Status.FAILED
+            in_flight.detail = "Import stalled and was abandoned (worker restarted mid-run). Please try again."
+            in_flight.finished_at = timezone.now()
+            in_flight.payload = {}
+            in_flight.save(update_fields=["status", "detail", "finished_at", "payload", "updated_at"])
 
         job = ImportJob.objects.create(
             user=request.user,

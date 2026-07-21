@@ -27,7 +27,9 @@ export default function CommunityScreen() {
   const router = useRouter();
   const { theme } = useAppTheme();
   const c = theme.colors;
-  const { watchlist, fetchWatchlist } = useWatchStore();
+  // Scoped selectors, not a bare useWatchStore() — see app/_layout.tsx's note.
+  const watchlist = useWatchStore((s) => s.watchlist);
+  const fetchWatchlist = useWatchStore((s) => s.fetchWatchlist);
 
   const [feed, setFeed] = useState<CommentItem[]>([]);
   const [isLoading, setIsLoading] = useState(true);

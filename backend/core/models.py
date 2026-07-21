@@ -775,6 +775,10 @@ class ImportJob(models.Model):
     )
 
     created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(
+        auto_now=True,
+        help_text="Touched on every progress save. Lets a stuck/orphaned RUNNING row (worker died mid-import) be told apart from one that's genuinely still working.",
+    )
     finished_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:

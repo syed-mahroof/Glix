@@ -590,7 +590,7 @@ def _import_one_movie(tmdb: TMDBService, user, item: dict, errors: list):
     return True, (cached_movie.runtime_minutes or 0) if created else 0
 
 
-@shared_task(bind=True)
+@shared_task(bind=True, soft_time_limit=1500, time_limit=1560)
 def run_tvtime_import(self, job_id: str):
     """
     Resolve a staged TV Time export against TMDB and write watch state.
@@ -600,6 +600,15 @@ def run_tvtime_import(self, job_id: str):
     season) — minutes, not seconds. The DB writes are incidental; the
     HTTP calls are the entire cost, which is why bulk_create alone would
     not have kept this inside a request.
+
+    soft_time_limit=25min/time_limit=26min: render-start.sh's Celery
+    worker runs at --concurrency=1 (Render free tier), so one wedged
+    import (e.g. TMDB degraded well past its own retry/backoff budget)
+    would otherwise block every other user's imports and every other
+    Celery task — badges, streaks, push notifications, cache refresh —
+    indefinitely. SoftTimeLimitExceeded is a normal Exception subclass,
+    so it's caught by the try/except below like any other failure and
+    the job is cleanly marked FAILED rather than left stuck RUNNING.
 
     bulk_create deliberately bypasses WatchState's post_save badge/streak
     signals — firing them thousands of times would be pathological. Both
@@ -620,7 +629,7 @@ def run_tvtime_import(self, job_id: str):
     job.status = ImportJob.Status.RUNNING
     job.total = len(shows) + len(movies)
     job.processed = 0
-    job.save(update_fields=["status", "total", "processed"])
+    job.save(update_fields=["status", "total", "processed", "updated_at"])
 
     tmdb = TMDBService()
     user = job.user
@@ -646,7 +655,7 @@ def run_tvtime_import(self, job_id: str):
                 job.shows_skipped += 1
             processed += 1
             job.processed = processed
-            job.save(update_fields=["processed", "shows_imported", "shows_skipped"])
+            job.save(update_fields=["processed", "shows_imported", "shows_skipped", "updated_at"])
 
         for item in movies:
             try:
@@ -663,7 +672,7 @@ def run_tvtime_import(self, job_id: str):
                 job.movies_skipped += 1
             processed += 1
             job.processed = processed
-            job.save(update_fields=["processed", "movies_imported", "movies_skipped"])
+            job.save(update_fields=["processed", "movies_imported", "movies_skipped", "updated_at"])
 
         if runtime_added:
             UserProfile.objects.filter(user=user).update(

@@ -3,7 +3,12 @@
 # =========================
 backend/.env
 backend/.env.*
-!backend/.env.prod
+# .env.prod was previously force-included here (!backend/.env.prod) on the
+# assumption it only ever held placeholder values as a deploy template —
+# real production secrets ended up committed into it instead. Untracked
+# 2026-07-21 (see AUDIT.md); the committed values in git history are still
+# live until rotated by hand (Render dashboard, Supabase, Upstash, TMDB,
+# Gmail app password) — untracking alone does not invalidate them.
 
 client-mobile/.env.local
 client-mobile/.env.production.local

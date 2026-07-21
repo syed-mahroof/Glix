@@ -39,6 +39,27 @@ export const REFRESH_TOKEN_KEY = 'refresh_token';
 
 interface RetryableConfig extends InternalAxiosRequestConfig {
   _retry?: boolean;
+  _retryCount?: number;
+}
+
+// Transient-failure retry for idempotent reads. User-reported bug
+// (2026-07-21): screens intermittently showed "Can't reach Glix right now"
+// (lib/errors.ts) on a phone with a fine connection — a single dropped
+// request (Render free-tier cold start, one wifi blip) was read as a hard
+// failure with no retry anywhere in the stack. Bounded to GET requests only
+// (safe to repeat) and a couple of short-backoff attempts — enough to
+// absorb a blip without making a genuinely offline user wait a long time
+// for the eventual real error. Same reasoning as pollImportJob's
+// consecutive-failure tolerance in lib/migration.ts.
+const MAX_NETWORK_RETRIES = 2;
+const RETRY_DELAYS_MS = [600, 1500];
+
+function isRetryableFailure(error: AxiosError): boolean {
+  // No `response` at all means the request never got a reply (timeout,
+  // connection refused, DNS hiccup) — worth a retry. A 4xx got a real
+  // answer from the server and will fail the same way again.
+  if (!error.response) return true;
+  return error.response.status >= 500;
 }
 
 export const api: AxiosInstance = axios.create({
@@ -108,6 +129,21 @@ api.interceptors.response.use(
   (response) => response,
   async (error: AxiosError) => {
     const originalRequest = error.config as RetryableConfig | undefined;
+
+    if (
+      originalRequest &&
+      (originalRequest.method ?? 'get').toLowerCase() === 'get' &&
+      isRetryableFailure(error)
+    ) {
+      const retryCount = originalRequest._retryCount ?? 0;
+      if (retryCount < MAX_NETWORK_RETRIES) {
+        originalRequest._retryCount = retryCount + 1;
+        await new Promise((resolve) =>
+          setTimeout(resolve, RETRY_DELAYS_MS[retryCount] ?? 1500)
+        );
+        return api(originalRequest);
+      }
+    }
 
     const isAuthEndpoint =
       originalRequest?.url?.includes('/auth/login/') ||

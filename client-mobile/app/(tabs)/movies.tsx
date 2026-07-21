@@ -81,15 +81,14 @@ function FilterPill({
 
 export default function MoviesScreen() {
   const router = useRouter();
-  const {
-    movieWatchlist,
-    isLoadingMovies,
-    error,
-    clearError,
-    fetchMovieWatchlist,
-    toggleMovieWatchState,
-    preferredLayout,
-  } = useWatchStore();
+  // Scoped selectors, not a bare useWatchStore() — see app/_layout.tsx's note.
+  const movieWatchlist = useWatchStore((s) => s.movieWatchlist);
+  const isLoadingMovies = useWatchStore((s) => s.isLoadingMovies);
+  const error = useWatchStore((s) => s.error);
+  const clearError = useWatchStore((s) => s.clearError);
+  const fetchMovieWatchlist = useWatchStore((s) => s.fetchMovieWatchlist);
+  const toggleMovieWatchState = useWatchStore((s) => s.toggleMovieWatchState);
+  const preferredLayout = useWatchStore((s) => s.preferredLayout);
   const { highlightFilter } = useLocalSearchParams<{ highlightFilter?: string }>();
   const { theme } = useAppTheme();
   const c = theme.colors;

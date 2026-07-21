@@ -140,14 +140,13 @@ export default function ProfileMoviesScreen() {
   const router = useRouter();
   const { theme } = useAppTheme();
   const c = theme.colors;
-  const {
-    movieWatchlist,
-    isLoadingMovies,
-    fetchMovieWatchlist,
-    preferredLayout,
-    selectedLanguage,
-    setLanguageFilter,
-  } = useWatchStore();
+  // Scoped selectors, not a bare useWatchStore() — see app/_layout.tsx's note.
+  const movieWatchlist = useWatchStore((s) => s.movieWatchlist);
+  const isLoadingMovies = useWatchStore((s) => s.isLoadingMovies);
+  const fetchMovieWatchlist = useWatchStore((s) => s.fetchMovieWatchlist);
+  const preferredLayout = useWatchStore((s) => s.preferredLayout);
+  const selectedLanguage = useWatchStore((s) => s.selectedLanguage);
+  const setLanguageFilter = useWatchStore((s) => s.setLanguageFilter);
   const [filter, setFilter] = useState<FilterKey>('ALL');
   const [query, setQuery] = useState('');
   const [isLanguageModalVisible, setIsLanguageModalVisible] = useState(false);

@@ -361,20 +361,23 @@ function UpcomingSectionHeader({ label }: { label: string }) {
 // ─── Screen ───────────────────────────────────────────────────────────────────
 
 export default function ShowsScreen() {
-  const {
-    watchlist,
-    history,
-    isLoadingWatchlist,
-    isLoadingHistory,
-    error,
-    fetchWatchlist,
-    fetchHistory,
-    clearError,
-    toggleWatchState,
-    bulkToggleWatchState,
-    preferredLayout,
-    toggleLayout,
-  } = useWatchStore();
+  // Scoped selectors (not a bare useWatchStore()) — this is the default tab,
+  // mounted for the app's whole lifetime, so a bare call re-rendered this
+  // entire heavy screen (FlashList + posters + progress rings) on every
+  // store mutation anywhere, including ones this screen doesn't render
+  // anything from. See app/_layout.tsx for the full note.
+  const watchlist = useWatchStore((s) => s.watchlist);
+  const history = useWatchStore((s) => s.history);
+  const isLoadingWatchlist = useWatchStore((s) => s.isLoadingWatchlist);
+  const isLoadingHistory = useWatchStore((s) => s.isLoadingHistory);
+  const error = useWatchStore((s) => s.error);
+  const fetchWatchlist = useWatchStore((s) => s.fetchWatchlist);
+  const fetchHistory = useWatchStore((s) => s.fetchHistory);
+  const clearError = useWatchStore((s) => s.clearError);
+  const toggleWatchState = useWatchStore((s) => s.toggleWatchState);
+  const bulkToggleWatchState = useWatchStore((s) => s.bulkToggleWatchState);
+  const preferredLayout = useWatchStore((s) => s.preferredLayout);
+  const toggleLayout = useWatchStore((s) => s.toggleLayout);
   const { highlightFilter } = useLocalSearchParams<{ highlightFilter?: string }>();
   const { theme } = useAppTheme();
   const c = theme.colors;

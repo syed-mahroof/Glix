@@ -35,6 +35,34 @@ export interface SocialAuthResponse {
   created: boolean;
 }
 
+// GoogleSignin only documents 4 status codes (SIGN_IN_CANCELLED,
+// IN_PROGRESS, PLAY_SERVICES_NOT_AVAILABLE, SIGN_IN_REQUIRED) — anything
+// else (most notably native code 10 / "DEVELOPER_ERROR", the classic
+// symptom of the app's release signing certificate's SHA-1 not being
+// registered against the Android OAuth client in Google Cloud Console)
+// used to fall through as a bare native error with no `.message` handling,
+// then get discarded entirely by extractErrorMessage's old catch-all
+// (fixed separately in lib/errors.ts) — so a real, diagnosable failure
+// always displayed as "An unexpected error occurred." with no way to tell
+// misconfigured credentials apart from a flaky network. Map the known
+// codes to plain language and let the rest through with the native code
+// attached so it's at least reportable/debuggable instead of opaque.
+function describeGoogleSignInError(err: any): Error {
+  switch (err?.code) {
+    case statusCodes.PLAY_SERVICES_NOT_AVAILABLE:
+      return new Error('Google Play Services is unavailable or out of date on this device.');
+    case statusCodes.IN_PROGRESS:
+      return new Error('A Google sign-in is already in progress.');
+    case statusCodes.SIGN_IN_REQUIRED:
+      return new Error('Please sign in with Google again.');
+    default:
+      return new Error(
+        `Google sign-in failed (${err?.code ?? err?.message ?? 'unknown error'}). ` +
+          'If this keeps happening, the app’s Google sign-in credentials may need reconfiguring.'
+      );
+  }
+}
+
 export async function signInWithGoogle(): Promise<SocialAuthResponse | null> {
   try {
     await GoogleSignin.hasPlayServices();
@@ -51,7 +79,10 @@ export async function signInWithGoogle(): Promise<SocialAuthResponse | null> {
     if (err?.code === statusCodes.SIGN_IN_CANCELLED) {
       return null; // user backed out — not an error
     }
-    throw err;
+    if (axios.isAxiosError(err)) {
+      throw err; // let extractErrorMessage's axios branch handle backend errors
+    }
+    throw describeGoogleSignInError(err);
   }
 }
 

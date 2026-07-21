@@ -652,7 +652,22 @@ class TMDBService:
         ):
             return list(cached_qs)
 
-        payload = self._request(f"/tv/{tmdb_show_id}/season/{season_number}")
+        # A season TMDB genuinely doesn't have (common on TVDB/TMDB numbering
+        # mismatches — run_tvtime_import hits this constantly, e.g. a show
+        # TVDB numbers as 17 seasons but TMDB only has 1) 404s every time and
+        # leaves nothing in CachedEpisode to short-circuit on next time. Without
+        # this, reimporting the same TV Time export re-probes every dead season
+        # from scratch on every attempt. Negative-cache the miss instead — a
+        # season's existence doesn't change day to day the way episode details do.
+        not_found_key = f"tmdb_season_404_{tmdb_show_id}_{season_number}"
+        if cache.get(not_found_key):
+            raise TMDBNotFoundError(f"Season {season_number} of show {tmdb_show_id} not found on TMDB.")
+
+        try:
+            payload = self._request(f"/tv/{tmdb_show_id}/season/{season_number}")
+        except TMDBNotFoundError:
+            cache.set(not_found_key, True, timeout=7 * 24 * 3600)
+            raise
         if payload is None:
             if cached_qs.exists():
                 logger.info(

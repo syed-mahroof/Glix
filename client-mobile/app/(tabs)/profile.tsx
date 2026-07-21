@@ -169,6 +169,14 @@ export default function ProfileScreen() {
         title: 'Import Failed',
         message: err?.message ?? 'An unexpected error occurred while reading or processing the file.',
       });
+      // The error above can be purely a dropped poll request — the backend
+      // import keeps running/completing on its own regardless of whether
+      // this client is still listening (see pollImportJob's docstring).
+      // Refetch anyway so a real completion shows up instead of the
+      // screen being stuck on stale/zeroed counts that look like data loss.
+      // Best-effort: swallow errors, this is a courtesy refresh, not the
+      // primary error path.
+      Promise.all([fetchProfile(), fetchWatchlist(), fetchMovieWatchlist()]).catch(() => {});
     } finally {
       setIsImporting(false);
       setImportJob(null);
