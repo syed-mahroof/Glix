@@ -3,8 +3,9 @@
 // TV Time Data Import & Glix Export utility.
 // Import: reads a TV Time JSON file (Refract extension format), parses and
 //         maps it, then sends it to /api/import/tvtime/.
-// Export: serializes the Zustand store into a clean JSON and shares it via
-//         the native share sheet.
+// Export: serializes the Zustand store into two clean JSON files (shows,
+//         movies — mirroring the TV Time import's own two-file shape) and
+//         shares each via the native share sheet in turn.
 
 import * as DocumentPicker from 'expo-document-picker';
 import * as FileSystem from 'expo-file-system/legacy';
@@ -283,24 +284,61 @@ export async function pollImportJob(
 // ─── Export Function ──────────────────────────────────────────────────────────
 
 /**
- * Serialises the current Zustand store state into a structured JSON and
- * triggers the native share sheet so the user can save or send the file.
+ * Writes one JSON payload to cache and triggers the native share sheet for
+ * it. Shared helper for exportGlixData()'s two files.
+ */
+async function writeAndShare(
+  fileNameSuffix: string,
+  payload: unknown,
+  dialogTitle: string
+): Promise<void> {
+  const jsonString = JSON.stringify(payload, null, 2);
+  const fileName = `glix-${fileNameSuffix}-${new Date().toISOString().split('T')[0]}.json`;
+  const fileUri = `${FileSystem.cacheDirectory}${fileName}`;
+
+  await FileSystem.writeAsStringAsync(fileUri, jsonString, {
+    encoding: FileSystem.EncodingType.UTF8,
+  });
+
+  const sharingAvailable = await Sharing.isAvailableAsync();
+  if (!sharingAvailable) {
+    Alert.alert(
+      'Sharing not available',
+      `Your export was saved to the app cache at:\n${fileUri}`
+    );
+    return;
+  }
+
+  await Sharing.shareAsync(fileUri, {
+    mimeType: 'application/json',
+    dialogTitle,
+    UTI: 'public.json',
+  });
+}
+
+/**
+ * Serialises the current Zustand store state into two structured JSON
+ * files — shows and movies, mirroring the TV Time GDPR export's own
+ * two-file convention (tvtime-series-*.json / tvtime-movies-*.json) — and
+ * shares each in turn via the native share sheet.
  */
 export async function exportGlixData(): Promise<void> {
   const state = useWatchStore.getState();
+  const exportedAt = new Date().toISOString();
+  const profile = state.profile
+    ? {
+        username: state.profile.username,
+        total_time_watched_minutes: state.profile.total_time_watched,
+        watched_days: state.profile.watched_days,
+        earned_badges: state.profile.earned_badges,
+      }
+    : null;
 
-  const exportPayload = {
-    exported_at: new Date().toISOString(),
+  const showsPayload = {
+    exported_at: exportedAt,
     app: 'Glix',
     version: '2.0',
-    profile: state.profile
-      ? {
-          username: state.profile.username,
-          total_time_watched_minutes: state.profile.total_time_watched,
-          watched_days: state.profile.watched_days,
-          earned_badges: state.profile.earned_badges,
-        }
-      : null,
+    profile,
     shows: [
       ...state.watchlist.to_watch.results,
       ...state.watchlist.up_to_date.results,
@@ -320,6 +358,12 @@ export async function exportGlixData(): Promise<void> {
         is_watched: ep.is_watched,
       })),
     })),
+  };
+
+  const moviesPayload = {
+    exported_at: exportedAt,
+    app: 'Glix',
+    version: '2.0',
     movies: [
       ...state.movieWatchlist.watch_next,
       ...state.movieWatchlist.watched,
@@ -331,28 +375,9 @@ export async function exportGlixData(): Promise<void> {
     })),
   };
 
-  const jsonString = JSON.stringify(exportPayload, null, 2);
-  const fileName = `glix_export_${new Date().toISOString().split('T')[0]}.json`;
-  const fileUri = `${FileSystem.cacheDirectory}${fileName}`;
-
-  // Write to cache
-  await FileSystem.writeAsStringAsync(fileUri, jsonString, {
-    encoding: FileSystem.EncodingType.UTF8,
-  });
-
-  // Check sharing is available (always true on real devices)
-  const sharingAvailable = await Sharing.isAvailableAsync();
-  if (!sharingAvailable) {
-    Alert.alert(
-      'Sharing not available',
-      `Your export was saved to the app cache at:\n${fileUri}`
-    );
-    return;
-  }
-
-  await Sharing.shareAsync(fileUri, {
-    mimeType: 'application/json',
-    dialogTitle: 'Export Glix Data',
-    UTI: 'public.json',
-  });
+  // Sequential, not parallel: shareAsync resolves only once its sheet is
+  // dismissed, so firing both at once would show two overlapping share
+  // sheets. This way the user sees shows, dismisses it, then movies.
+  await writeAndShare('shows', showsPayload, 'Export Glix Shows');
+  await writeAndShare('movies', moviesPayload, 'Export Glix Movies');
 }

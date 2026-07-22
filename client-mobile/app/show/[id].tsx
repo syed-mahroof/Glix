@@ -30,6 +30,7 @@ import { ProviderBadge } from '../../components/ProviderBadge';
 import { SeasonCard } from '../../components/SeasonCard';
 import { api } from '../../lib/api';
 import { extractErrorMessage } from '../../lib/errors';
+import { goBack } from '../../lib/navigation';
 import { useAppTheme } from '../../lib/theme';
 import { Show, useWatchStore } from '../../store/watchStore';
 
@@ -248,7 +249,7 @@ export default function ShowDetailScreen() {
     return (
       <SafeAreaView style={[styles.container, { backgroundColor: c.bg }]}>
         <View style={styles.header}>
-          <PressableScale onPress={() => router.back()} hitSlop={8} style={styles.iconButton}>
+          <PressableScale onPress={() => goBack(router)} hitSlop={8} style={styles.iconButton}>
             <ArrowLeft color={c.textPrimary} size={22} />
           </PressableScale>
         </View>
@@ -284,7 +285,7 @@ export default function ShowDetailScreen() {
           />
           <View style={styles.backdropOverlay} />
           <View style={styles.headerFloating}>
-            <PressableScale onPress={() => router.back()} hitSlop={8} style={styles.iconButton}>
+            <PressableScale onPress={() => goBack(router)} hitSlop={8} style={styles.iconButton}>
               <ArrowLeft color="#FFFFFF" size={22} />
             </PressableScale>
             <View style={styles.headerActions}>

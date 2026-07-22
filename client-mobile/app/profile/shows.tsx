@@ -290,7 +290,13 @@ export default function ProfileShowsScreen() {
             key={`profile-shows-${preferredLayout}`}
             data={filtered}
             keyExtractor={(item) => String(item.id)}
-            estimatedItemSize={preferredLayout === 'grid' ? 260 : 96}
+            // List: 110, not the posterWrap's own 96 — rowContent's padding
+            // (24) + its 4 stacked children (title/status pill/progress
+            // bar/episode count) run slightly taller than the poster, plus
+            // the row's own marginBottom (10). Matches the ShowRow/MovieRow/
+            // UpcomingRow convention elsewhere of poster + margin, not a
+            // bare poster-height guess.
+            estimatedItemSize={preferredLayout === 'grid' ? 260 : 110}
             numColumns={preferredLayout === 'grid' ? 2 : 1}
             extraData={preferredLayout}
             renderItem={({ item }) =>

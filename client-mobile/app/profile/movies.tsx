@@ -284,7 +284,13 @@ export default function ProfileMoviesScreen() {
             key={`profile-movies-${preferredLayout}`}
             data={filtered}
             keyExtractor={(item) => String(item.id)}
-            estimatedItemSize={preferredLayout === 'grid' ? 260 : 104}
+            // List: 138 for the common case where runtime/genre/rating are
+            // all present (true for virtually every real TMDB movie) — the
+            // old 104 was close to just the posterWrap's own height (96),
+            // ignoring rowContent's up-to-5-line stack (title, runtime,
+            // genre, status pill, rating) plus its own padding/gaps and the
+            // row's marginBottom.
+            estimatedItemSize={preferredLayout === 'grid' ? 260 : 138}
             numColumns={preferredLayout === 'grid' ? 2 : 1}
             extraData={preferredLayout}
             renderItem={({ item }) =>

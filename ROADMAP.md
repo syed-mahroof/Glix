@@ -1,5 +1,5 @@
 # Glix — Roadmap & Feature Checklist
-**Last Updated:** 2026-07-21 (Phase 34 — Import reliability + duplicate-job guard, Android widget resize/scroll/tap-through, Google Sign-In error diagnostics, real navigation-lag fix (unscoped Zustand selectors). See Phase 33 below for the pre-deployment Render sweep)
+**Last Updated:** 2026-07-22 (Phase 40 — Google Sign-In final-touches audit found nothing left to fix in-repo (still-open items are external: Apple Developer enrollment, on-device test); the requested overall pre-push verification pass then caught a live Celery worker/beat crash-loop — `config/celery.py` was forcing SSL params unconditionally against local Docker Compose's plain `redis://`, meaning no Celery task had been running locally at all. Fixed and confirmed stable. Backend `pytest` — 33/33 passing. See Phase 39 below for the card-size polish)
 Legend: ✅ Complete · 🟨 Partial · ⬜ Not Started
 
 ---
@@ -43,6 +43,12 @@ Legend: ✅ Complete · 🟨 Partial · ⬜ Not Started
 | 32 | Premium Animated Splash | 2026-07 🟨 |
 | 33 | Final Pre-Deployment Sweep + Render Deployment Readiness | 2026-07-20 ✅ |
 | 34 | Import Reliability + Widget/Google-Sign-In/Navigation-Perf Fixes | 2026-07-21 🟨 |
+| 35 | Watchlist Under-Fetch Fix (`page_size=all`) — Profile/Hub/Upcoming/Widget | 2026-07-22 🟨 |
+| 36 | Deep-Link Back-Nav Dead End Fix + Widget UI/Empty-State Re-Verification | 2026-07-22 🟨 |
+| 37 | Season/Episode Load Latency + Discover Feed TMDB Throughput Fixes | 2026-07-22 🟨 |
+| 38 | Backup/Export Two-File Rework (Shows + Movies, mirroring TV Time import) | 2026-07-22 🟨 |
+| 39 | Card-Size Polish (FlashList `estimatedItemSize` Audit — 2 Fixed, 7 Deferred) | 2026-07-22 🟨 |
+| 40 | Google Sign-In Final Audit (No Code Change) + Overall Pre-Push Verification (Celery SSL Crash-Loop Found & Fixed) | 2026-07-22 ✅ |
 
 ---
 

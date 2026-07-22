@@ -76,11 +76,15 @@ export default function SeasonScreen() {
       // The Catch-Up modal's check (below) is now a server-authoritative
       // call (CatchupCheckView) that reads straight from the DB and
       // eager-caches whatever it needs itself, so it no longer depends on
-      // this refetch for correctness. Still kept: the Zustand watchlist
+      // this refetch for correctness. Still kicked off: the Zustand watchlist
       // (Shows Hub pills, widget data) should reflect this season's
       // freshly-cached episodes too, so navigating back doesn't show stale
-      // "next episode" state for this show.
-      await fetchWatchlist();
+      // "next episode" state for this show. Not awaited — this screen
+      // renders from its own local `episodes`/`show` state, never from the
+      // Zustand watchlist, so blocking the spinner on a full unpaginated
+      // `/watchlist/?page_size=all` refetch (fetchWatchlist already
+      // swallows its own errors into store state) was pure added latency.
+      fetchWatchlist();
     } catch (err) {
       setError(extractErrorMessage(err));
     } finally {

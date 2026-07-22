@@ -1,3 +1,142 @@
+## 🟢 AUDITED, NO CODE CHANGE + 🔴 REAL BUG FOUND & FIXED — Google Sign-In final-touches audit + overall pre-push verification (2026-07-22, fix prompt's Phase 6, P4, plus the closing "test everything before push" pass)
+
+### 🟢 Phase 6 (Google Sign-In, P4): re-audited end-to-end, nothing left to fix in-repo
+Re-verified `lib/socialAuth.ts`, `components/SocialSignInButtons.tsx`, `backend/core/social_auth.py`, `auth_views.py`, `urls.py`, `test_social_auth.py`, both `.env` files, and `app.json`'s plugin/bundle-id config against the live repo (not the stale fix-prompt snapshot). Everything already implemented and hardened across Phase 27 (backend + frontend built), Phase 28 (dev-client build unblocked), and Phase 34/38 (error-message + native-error-code hardening):
+- Backend: JWKS-verified Google/Apple ID-token checks, `SocialAccount` linking with the verified-email-only security guard, unusable-password new-user creation, both endpoints wired, 15 tests — all still correct, all still passing (see verification below).
+- Frontend: `signInWithGoogle`/`signInWithApple` wired into both official provider buttons, native error codes mapped to plain messages, `extractErrorMessage` no longer swallows non-axios error text.
+- Config: `client-mobile/.env`'s `EXPO_PUBLIC_GOOGLE_WEB_CLIENT_ID`, `backend/.env`'s `GOOGLE_OAUTH_CLIENT_IDS`/`APPLE_AUDIENCES`, and `app.json`'s `iosUrlScheme`/bundle identifier (`com.watchtracker.app`, deliberately kept through the Phase 30 Glix rebrand — Google Cloud/Apple provisioning is keyed to it) all cross-checked consistent with each other.
+- No new bug found. Nothing changed in this pass.
+
+### 🔴 Still open, external, not fixable from this repo (unchanged from Phase 27/34)
+- Apple Developer Program enrollment + "Sign In with Apple" capability + a fresh EAS build to pick up the entitlement — needs the user's own paid account.
+- The actual on-device OAuth handshake has still never been run — no device/simulator available in this environment. Acceptance checklist for whoever runs it is in the Phase 27 entry below.
+
+### 🔴 Found and fixed, real bug, unrelated to Google Sign-In — Celery worker + beat were crash-looping in the live local stack
+Running the requested "overall test before push" pass surfaced that `watchtracker_celery` and `watchtracker_celery_beat` were both stuck in a live restart loop (`docker ps` showed `Restarting (1)`), failing with `ValueError: SSL connection parameters have been provided but the specified URL scheme is redis://. A Redis SSL connection URL should use the scheme rediss://.` — meaning **no Celery task had been running locally at all**: no TV Time imports, no badge/streak recalculation, no push notifications, and Celery Beat wasn't firing `sync_active_shows`/`send_weekly_digest` (the exact mechanism Phase 31 built).
+- **Root cause:** `backend/config/celery.py` set `app.conf.broker_use_ssl`/`redis_backend_use_ssl` unconditionally on every process start, intended for Upstash's `rediss://` in production — but `docker-compose.yml`'s local `CELERY_BROKER_URL`/`CELERY_RESULT_BACKEND` are plain `redis://redis:6379/0`, and celery-redis hard-rejects SSL params against a non-`rediss://` scheme.
+- **Fix:** both SSL blocks now only apply when the resolved broker/result-backend URL actually starts with `rediss://`, checked independently since they're two separate settings.
+- **Verified:** rebuilt both containers (`docker compose up -d --build celery celery-beat`) — worker log shows `Connected to redis://redis:6379/0` + `celery@... ready.` with all 8 registered tasks listed; beat log shows a clean `beat: Starting...` with no exception. Both containers confirmed staying up (no further restarts), not just started once.
+
+### 🟢 Overall pre-push verification (all phases this session)
+- **Backend: `pytest -v` inside the live `watchtracker_backend` container (its Postgres has the `CREATEDB` grant the native instance still lacks) — 33/33 passing**, including the full `test_social_auth.py` suite. First time this session the complete current test file set has been run, not just the subset from whenever it was last exercised.
+- `manage.py check` — clean. `manage.py makemigrations --check --dry-run` — no changes detected (no migration drift from any of this session's model-adjacent work).
+- `node --stack-size=8000 tsc --noEmit` — 30 errors, the same pre-existing baseline as Phases 34-39, zero new.
+- 🟡 **Not verifiable this session:** no device to physically exercise the mobile app; the Celery fix is confirmed by clean process logs, not by observing an actual scheduled task fire end-to-end (Beat's own `maxinterval` is 5 minutes).
+
+---
+
+## 🟢 FIXED (DEVICE-VERIFICATION DEFERRED) — Card-size polish (2026-07-22, fix prompt's Phase 5, P3: card-size polish)
+
+### 🟢 Audit: all 9 `FlashList estimatedItemSize` call sites checked against real card heights
+Computed true rendered height from each card component's own `StyleSheet` (padding, gaps, poster dimensions, margins) rather than eyeballing:
+- `app/(tabs)/index.tsx` — `HistoryRow` (108), `ShowRow`/`ShowPosterCard` (list 108 / grid 260), `UpcomingRow`/`ShowPosterCard` (list 110 / grid 260)
+- `app/(tabs)/movies.tsx` — `MovieRow`/`MoviePosterCard` (list 108 / grid 260)
+- `app/(tabs)/discover.tsx` — `SearchResultCard` ×2 call sites (200)
+- `components/HorizontalMediaList.tsx` — horizontal card (142)
+- `app/profile/shows.tsx` — `ShowListRow`/`ShowGridCard` (list 96 / grid 260)
+- `app/profile/movies.tsx` — `MovieListRow`/`MovieGridCard` (list 104 / grid 260)
+
+### 🔴 Found: two profile-screen list rows underestimated their own height
+- **`app/profile/shows.tsx`'s `ShowListRow`:** estimate was `96` — just `posterWrap`'s own height (`64×96`), not the actual row. `rowContent`'s `paddingVertical:12`×2 (24) + its 4 stacked children (title 20, status pill ~19, progress bar 3, episode count ~15 → 57) + 3×`gap:6` (18) = 99, edging past the poster's 96 — and the old estimate also dropped the row's own `marginBottom:10` entirely. True height: **110**.
+- **`app/profile/movies.tsx`'s `MovieListRow`:** estimate was `104`. This row has 3 conditional fields (runtime/genre/rating) on top of 2 unconditional (title/status pill); computed for the common case where all 5 render (true for virtually every real TMDB movie — `runtime_minutes>0`, non-empty genres, `vote_average>0`): `paddingVertical 24 + (20+15+15+21+13=84) + 4×gap:5 (20) = 128`, `+marginBottom:10` = **138**.
+- **Fix:** both corrected in place, each with an inline comment documenting the math — mirrors the existing `ShowRow.tsx`/`MovieRow.tsx` convention of a documented poster-plus-margin constant (`108`), and lines up with `UpcomingRow`'s own already-correct `110`.
+
+### 🟡 Audited, deferred — grid cards' shared `260`/discover's `200` are device-width-dependent
+5 grid call sites (`ShowPosterCard`/`MoviePosterCard` in `index.tsx`, `movies.tsx`, `profile/shows.tsx`, `profile/movies.tsx`) share a hardcoded `estimatedItemSize={260}`; `discover.tsx`'s 2 search/filter grids use `{200}` (`SearchResultCard`). Both card types use `aspectRatio`-based posters, so true height is a function of `SCREEN_WIDTH` — computed ≈300 for the `260` sites and ≈214-230 for discover's `200` sites on a typical ~390-430pt phone, both meaningfully over the hardcoded constants. A true fix needs a `Dimensions.get('window')`-driven computed value — the repo already has this exact pattern (`discover.tsx`'s own `CARD_WIDTH`, `GenreGrid.tsx`, `HeroCarousel.tsx`, `onboarding.tsx`, `movie/[id].tsx`) — but wiring it into 4 more files is a bigger change than this polish pass. Flagged explicitly, not fixed silently and not left unmentioned.
+
+### 🟢 Re-verified correct, no fix needed
+`index.tsx`/`movies.tsx`'s list-mode `108` (`ShowRow`/`MovieRow`, both carry their own documented `ROW_HEIGHT` comment) and `index.tsx`'s Upcoming list-mode `110` (`UpcomingRow`) all check out against their components' real styles. `HorizontalMediaList.tsx`'s `142` is already correct and self-documented (`130 + 12 marginRight`).
+
+### 🟡 Investigated, ruled out as unfixable with the installed FlashList version
+The Upcoming tab's list mode interleaves ~41px section headers (`UpcomingSectionHeaderRow`) with ~110px item rows (`UpcomingRow`) under one shared `estimatedItemSize`. Checked whether `overrideItemLayout` (already used here for the grid layout's column `span`) could also set a per-type `size` — read the installed `@shopify/flash-list`'s `FlashListProps.d.ts` directly: the `layout` param only exposes `span?: number`, no `size` field, in this version. Not a new bug; low severity since it only affects first paint before FlashList v2's own auto-measurement corrects it.
+
+### 🟢 Verification
+- `node --stack-size=8000 tsc --noEmit`: 30 errors total — identical count and categories to the Phase 34-38 baseline. Both edited call sites (`profile/shows.tsx`, `profile/movies.tsx`) appear in the output, confirmed by name to be the already-tracked `estimatedItemSize` typing-gap category, not new errors.
+- 🟡 **Not verifiable this session:** no device to visually confirm the corrected estimates actually reduce initial-paint jank/flash.
+
+---
+
+## 🟢 FIXED (DEVICE-VERIFICATION DEFERRED) — Backup/export two-file rework (2026-07-22, fix prompt's Phase 4, P2: backup/export)
+
+### 🟡 Scope recovery: original Phase 4 wording lost in an earlier compaction
+No master-prompt file exists anywhere in-repo (checked — `find` for `*prompt*`/`*master*` at repo root turned up nothing), so the exact original Phase 4 text couldn't be reread. Asked the user directly rather than guessing; confirmed the ask is to rework `exportGlixData()`'s single combined export into two files, mirroring the TV Time import's own two-file convention.
+
+### 🟢 Audited existing export/backup code first — no correctness bug found
+Before writing the rework, checked whether the export could be silently incomplete the way Phase 35's watchlist bug was:
+- `state.watchlist` (shows/movies buckets consumed by `exportGlixData`) comes from `fetchWatchlist()`, which already requests `?page_size=all` — Phase 35's fix, re-confirmed still correct, not re-touched.
+- `state.movieWatchlist` comes from `GET /movies/watchlist/` → `MovieWatchlistView` (`backend/core/views.py`), a plain `APIView`, not a `generics.ListAPIView` — DRF's `DEFAULT_PAGINATION_CLASS`/`PAGE_SIZE=20` (`config/settings/base.py`) only applies to pagination-aware generic views, so this endpoint's "no pagination for V1 — movie watchlists are typically far shorter than TV show watchlists" docstring claim holds; it really does return every row.
+- `MovieCacheSerializer.get_is_watched` (`backend/core/serializers.py:269`) scopes to `request.user` via `MovieWatchState.objects.filter(user=request.user, movie=obj).exists()` — not a shared/global flag on the cache row — so an exported movie's watched-state can't leak from another user sharing the same cached `MovieCache` entry.
+No bug found in any of the three. Confirmed via `Read`, not Grep alone — this file/`services.py` were both hit by the Grep slash-mangling artifact in Phase 37, so path-like and endpoint-string matches were re-verified directly this time.
+
+### 🔵 Rework: one file → two files
+`lib/migration.ts`'s `exportGlixData()` previously built a single `{ profile, shows, movies }` payload and shared it once as `glix_export_YYYY-MM-DD.json`.
+- **Fix:** split into `showsPayload` (`profile` + `shows`) and `moviesPayload` (`movies`), each serialized and shared independently as `glix-shows-YYYY-MM-DD.json` / `glix-movies-YYYY-MM-DD.json` — matching the TV Time GDPR export's own `tvtime-series-*.json`/`tvtime-movies-*.json` split (already referenced in this same file's `normaliseTVTimePayload()` doc comment). Extracted the write-to-cache + `Sharing.shareAsync` logic into one `writeAndShare(fileNameSuffix, payload, dialogTitle)` helper, called twice.
+- **Sequential, not parallel, by design:** `Sharing.shareAsync`'s promise resolves only once its native share sheet is dismissed — there is no API to present two share sheets simultaneously, so the two `writeAndShare` calls are `await`ed one after the other (shows first, then movies). This matches the single-share UX the feature already had, just twice.
+
+### 🟢 Verification
+- `node --stack-size=8000 tsc --noEmit`: 30 errors total — identical count and categories to the Phase 34-37 baseline. Zero new errors from `lib/migration.ts`.
+- 🟡 **Not verifiable this session:** no device to physically confirm two share sheets present correctly back-to-back on iOS/Android, or that dismissing/cancelling the first sheet doesn't strand the second file in cache (low risk — cache is OS-reclaimable, and this matches the pre-existing single-file behavior on cancel).
+
+---
+
+## 🟢 FIXED (RUNTIME-VERIFICATION DEFERRED) — Season/episode load latency + Discover Feed TMDB throughput (2026-07-22, fix prompt's Phase 3: performance — season/episode load latency, "Can't reach Glix" flakiness, TMDB throughput)
+
+### 🟢 "Can't reach Glix" flakiness — already fixed, re-verified against live code, not redone
+Read `lib/api.ts` and `backend/core/services.py` in full. Both already carry a 2026-07-21-dated fix (Phase 34): `lib/api.ts`'s response interceptor retries GET-only, non-4xx failures twice (600ms/1500ms backoff) before giving up, with a 15s axios timeout tuned against `services.py`'s own tightened `Retry(total=3, status_forcelist=[429,500,502,503,504], backoff_factor=0.5)` (worst case 3.5s backoff, down from a prior 15s). Nothing to fix here.
+
+### 🔴 Root cause 1: season/episode screens blocked their spinner on an unrelated full watchlist refetch
+`app/show/[id]/season/[season].tsx`'s `loadSeason()` and `app/episode/[id].tsx`'s `loadEpisode()` each `await`ed `fetchWatchlist()` — `GET /watchlist/?page_size=all`, the unpaginated, heavily-prefetched query documented in Phase 35's under-fetch fix below — inside the same `try` block whose `finally` calls `setIsLoading(false)`. Neither screen consumes the Zustand watchlist at all (both keep independent local `episodes`/`episode` state); the call exists solely so the Shows Hub/widget reflect this show's episodes after the user navigates back. Every season or episode screen open was paying a full watchlist round trip before the spinner would clear, with zero rendering benefit from waiting on it.
+- **Fix:** both call sites now fire `fetchWatchlist()` without `await`. Confirmed safe unawaited: `fetchWatchlist` (`store/watchStore.ts`) catches its own request errors into `{ error: ... }` store state internally and never rethrows — there was never anything for the caller's `try/catch` to actually catch from it.
+
+### 🔴 Root cause 2: DiscoverFeedView ran its bundled TMDB calls sequentially
+`DiscoverFeedView` (`backend/core/views.py`) exists specifically to bundle multiple TMDB calls into one response ("Minimises frontend network requests by bundling the hero + 3 content sections into a single response" — its own docstring) — 3 calls for the tv feed, 4 for the movie feed. All were plain sequential Python calls. None of them depend on each other's output. On a cache miss (`services.py`'s `use_cache=True` entries expire per their TTL), the view paid the *sum* of every call's worst-case request+retry latency instead of the max — with Phase 34's 3.5s worst-case backoff per call, a fully-cold movie feed could stack up to ~4x that before responding.
+- **Fix:** both branches (`tv` and `movie`) now submit their TMDB calls to a `concurrent.futures.ThreadPoolExecutor` (3 and 4 workers respectively) and collect results via `.result()`. Verified this is safe to parallelize: `TMDBService.__init__` builds one `requests.Session` with an `HTTPAdapter`-mounted retry strategy — `requests.Session`/`urllib3`'s connection pool is safe for concurrent use from multiple threads, and none of the six `get_*` methods touched (`get_trending_shows`, `get_popular_shows`, `get_airing_today_shows`, `get_trending`, `get_popular_movies`, `get_top_rated_movies`, `get_anticipated_movies`) raise on TMDB failure — each returns `{"results": []}`, so no new exception-handling was needed around the thread-pool dispatch.
+
+### 🟢 Verification
+- `python -c "import ast; ast.parse(open('core/views.py', encoding='utf-8').read())"`: clean.
+- `./venv/Scripts/python.exe manage.py check`: clean, 0 issues. (Bare system Python lacks `unfold`, same pre-existing environment gap Phase 35 hit — used the project venv interpreter instead.)
+- `node --stack-size=8000 tsc --noEmit`: 30 errors total — identical count and categories to the Phase 34/35/36 baseline (FlashList v2 `estimatedItemSize` ×8, `@expo/ui` widget prop types in `widgets/ios/*` ×16, `HeroCarousel.tsx` ref type). Zero new errors from either touched screen.
+- 🟡 **Not verifiable this session:** no running backend/device to measure actual wall-clock latency improvement on either fix, or to confirm the Discover Feed's concurrent TMDB calls behave correctly against the live TMDB API under real network conditions (thread-pool concurrency reasoning is sound but unexercised at runtime).
+
+---
+
+## 🟢 FIXED (DEVICE-VERIFICATION DEFERRED) — Deep-link back-navigation dead end (2026-07-22, fix prompt's Phase 2: rebuild widget UI / fix empty state / fix deep-link back-nav dead end)
+
+### 🟢 Two of three asks were already done in Phase 34 — re-verified against live code, not redone
+The fix prompt was authored from a stale snapshot predating Phase 34's widget rewrite (commit `063e143`). Read the live `widgets/android/{Watchlist,Upcoming}Widget.tsx` and `WidgetProvider.tsx` directly: both already have a scrollable `ListWidget`, `clickAction="OPEN_URI"` deep-linking each row to `watchtracker://show/<id>`, and a real empty state ("Your watchlist is empty." / "No upcoming shows."). Nothing to fix there.
+
+### 🔴 Root cause of the real remaining gap: `router.back()` with no back stack to pop
+`app/show/[id].tsx` is the Android widget's only deep-link target. Its two back buttons (the error-state header and the main scroll header) both called bare `router.back()`. `app/_layout.tsx`'s root `<Stack>` mounts whatever screen Expo Router resolves the initial URL to — when that URL comes from a widget tap while the app is cold (killed, not backgrounded), `show/[id]` is the *only* entry in the navigation history. `router.back()` on an empty history silently does nothing — the user is stuck on that screen with no back button, no gesture, nothing but a force-quit.
+- **Fix:** new `lib/navigation.ts` — `goBack(router: Pick<Router, 'back' | 'canGoBack' | 'replace'>)` checks `router.canGoBack()`; if true, `router.back()`; else `router.replace('/(tabs)')`. Both back-button handlers in `show/[id].tsx` now call `goBack(router)` instead of `router.back()` directly.
+- **Confirmed via type defs, not assumed:** `expo-router`'s `Router` type (`node_modules/expo-router/build/imperative-api.d.ts`) exports `canGoBack: () => boolean` alongside `back`/`replace` — real API, not a guess.
+
+### 🟢 iOS widget tap-target gap — investigated further, confirmed correctly out of scope (stronger reason than Phase 34's)
+Phase 34 flagged `widgets/ios/*.tsx` as having the same missing-tap-target gap as Android had, deferred only for "no iOS device in evidence." This session went further: fetched Expo's own live versioned widget docs (`docs.expo.dev/versions/latest/sdk/widgets/`) and grepped `@expo/ui/swift-ui`'s full modifier list (`node_modules/@expo/ui/build/swift-ui/modifiers/index.d.ts`) and `expo-widgets`' own `Widgets.ts`/`Widgets.types.ts`. Finding: `onTapGesture` exists as a modifier, but nothing in the widget API (`createWidget`) documents `widgetURL`, a `Link` component, or any tap-to-open-URL mechanism for home-screen widgets — the only deep-link support that exists anywhere in the package is `createLiveActivity`'s optional `url` param, which is Live-Activity/Dynamic-Island-only, unrelated to home-screen widgets. A widget extension also has no running JS bridge to invoke a JS closure against at tap-time (unlike the main app, where `@expo/ui` components do run live) — so even if `onTapGesture` type-checked in a widget layout, there's no reason to believe it would actually fire. **Verdict: not a fixable gap from this repo right now** — it's a real limitation of the library as currently documented, not a missing device or missing effort. Left as-is; do not attempt a native SwiftUI workaround without direct Apple/WidgetKit documentation and a real iOS device to verify against.
+
+### 🟢 Verification
+- `node --stack-size=8000 tsc --noEmit`: 30 errors total — identical count and categories to the Phase 34/35 baseline (FlashList v2 `estimatedItemSize` ×8 call sites, `@expo/ui` widget prop types in `widgets/ios/*` ×16, `HeroCarousel.tsx` ref type). Zero new errors from `show/[id].tsx` or the new `lib/navigation.ts`.
+- 🟡 **Not verifiable this session:** no Android device/emulator to physically confirm cold-starting the app via a widget tap, then using the back button, actually lands on the Home tab instead of no-opping. The fix follows directly from `expo-router`'s own documented `Router` type, but hasn't been seen running.
+
+---
+
+## 🟡 CODE-VERIFIED (E2E DEFERRED) — Watchlist under-fetch: whole app derived from only the first 20/bucket (2026-07-22, user-reported again: a ~200-show TV Time import shows "My Shows: 40", specific imported shows "not in my watchlist" from the Shows Hub yet correctly marked on their own season screen, and House of the Dragon missing its next episode in Upcoming + widget)
+
+### 🔴 Root cause: `GET /api/watchlist/` paginated every bucket at 20, and the client only ever fetched page 1
+`store/watchStore.ts`'s `fetchWatchlist()` did a bare `api.get('/watchlist/')` — page 1, `page_size=20`, no page walk. The entire app derives its show state from those three in-memory buckets (`to_watch`/`up_to_date`/`archived`): Profile's "My Shows" count is literally `to_watch.results.length + up_to_date.results.length + archived.results.length` (`profile.tsx:94-96`), and the Shows Hub (`profile/shows.tsx`), Home/Upcoming tab (`index.tsx:423` → `buildUpcomingItems`), community screen, and the home-screen widget (`store's syncWidgetData` reads `watchlist.to_watch.results`) all read the same buckets. So a 200-show account was capped at ≤20/bucket everywhere at once — "My Shows: 40" (two non-empty buckets × 20), shows genuinely absent from the client's held set reading as "not in watchlist" from the Hub (while their own season screen fetches that one show's episodes directly, unaffected — exactly the reported asymmetry), and Upcoming/widget under-reporting because they can only build from entries actually in memory. `WatchlistView` (`views.py`) also paginates all three buckets off a **single shared `page` param**, so `?page=2` raised DRF `NotFound` (404) the moment any one bucket had <2 pages — the client could not have walked pages even if it tried.
+- **Confirmed NOT the cause (investigated, ruled out):** the Phase 34 idempotent-job guard (§3a of the fix prompt) — `TVTimeImportView.post`'s `in_flight` lookup is correctly scoped to `status__in=[PENDING, RUNNING]` with a 15-min `updated_at` freshness check, so a stale `SUCCESS` job can't be handed back. And bulk-import not transitioning `Watchlist.status` off `TO_WATCH` is harmless: `WatchlistView` derives `to_watch`/`up_to_date` **live** from aired-vs-watched episode counts (only `ARCHIVED` reads the stored status), so imported shows bucket correctly regardless.
+- **Fix (backend):** `WatchlistView.get` now honours `?page_size=all` — returns every entry per bucket unpaginated (reusing the existing full-list response shape). The full DB work (prefetch of every entry's episodes) already happened before pagination, so this adds only serialization + payload, **no extra queries**.
+- **Fix (client):** `fetchWatchlist()` now requests `/watchlist/?page_size=all`. One request, complete buckets — Profile count, Shows Hub, Upcoming tab, and widget all correct as a cascade, no per-consumer change needed.
+
+### 🟢 §3c (next-episode staleness) — code path verified sound, runtime-only dependency
+`TMDBService` (`services.py:170`) maps TMDB `"Returning Series"` → `CachedShow.Status.RETURNING` (unknown status also falls back to `RETURNING`), writes `next_episode_*` from `next_episode_to_air`; `sync_active_shows` (`tasks.py:190`) sweeps `status=RETURNING`. No code bug — a currently-airing show's countdown staying fresh depends only on Celery Beat actually running in the deployment (a documented past failure mode, unverifiable without a live deploy) plus the per-show 12h detail-screen TTL fallback.
+
+### 🟢 Verification
+- `python -m py_compile core/views.py` clean; full `manage.py check` not run this session (bare system Python lacks the app deps — `ModuleNotFoundError: No module named 'unfold'`; needs the Docker/venv env).
+- `node --stack-size=8000 tsc --noEmit`: zero new errors — same pre-existing baseline only (FlashList v2 `estimatedItemSize` in `HorizontalMediaList`, `@expo/ui` widget prop types in `widgets/ios/*`). The client change is a one-token URL string.
+- 🟡 **Not done this session (no running backend + no device):** the real ~200-show end-to-end re-import, server-log cross-check (`run_tvtime_import: ... SUCCESS - N shows, M episodes`), and a live `sync_active_shows`/Beat trigger against an account with a currently-airing show. These are the remaining Phase-1 items from the fix prompt and require a live Postgres+Redis+Celery stack + an Android device.
+
+---
+
 ## 🟡 PARTIALLY VERIFIED — Import Reliability, Android Widget, Google Sign-In Diagnostics, Navigation Perf (2026-07-21, user-reported: brother's TV Time import undercounted/showed "Import Failed" despite backend success, widget stuck at 2x2 with no tap-through, Google sign-in "unexpected error", general network-error flakiness, and navigation lag)
 
 Four independent user reports investigated together since they share root causes. (Immediately prior in this same session, not separately logged here: the splash-screen `drawable/splashscreen_logo` fix and the first successful EAS `preview` APK build — see commit `c82ec2c` and the delivered `.apk` link.)

@@ -7,6 +7,7 @@ whole point of the local cache tables is to keep the hot mobile paths
 fast and TMDB-rate-limit-free.
 """
 
+from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 
 from django.core.cache import cache
@@ -74,9 +75,19 @@ class DiscoverFeedView(APIView):
         tmdb = TMDBService()
 
         if media_type == "tv":
-            trending = tmdb.get_trending_shows(time_window="week")
-            popular = tmdb.get_popular_shows()
-            airing = tmdb.get_airing_today_shows()
+            # These three TMDB calls are independent of each other but were
+            # run sequentially, so a cold cache (see services.py's use_cache
+            # TTLs) paid the sum of all three request+retry latencies on a
+            # single Discover Feed load. None of them depend on another's
+            # result, so running them on a small thread pool caps this
+            # request's TMDB-bound latency at the slowest single call.
+            with ThreadPoolExecutor(max_workers=3) as pool:
+                trending_future = pool.submit(tmdb.get_trending_shows, time_window="week")
+                popular_future = pool.submit(tmdb.get_popular_shows)
+                airing_future = pool.submit(tmdb.get_airing_today_shows)
+                trending = trending_future.result()
+                popular = popular_future.result()
+                airing = airing_future.result()
 
             # Hero: first 8 trending with backdrop images
             hero = [
@@ -102,10 +113,18 @@ class DiscoverFeedView(APIView):
                 },
             ]
         else:  # movie
-            trending = tmdb.get_trending(media_type="movie", time_window="week")
-            popular = tmdb.get_popular_movies()
-            top_rated = tmdb.get_top_rated_movies()
-            coming_soon = tmdb.get_anticipated_movies()
+            # Same reasoning as the tv branch above — 4 independent TMDB
+            # calls bundled into one response, run concurrently instead of
+            # sequentially.
+            with ThreadPoolExecutor(max_workers=4) as pool:
+                trending_future = pool.submit(tmdb.get_trending, media_type="movie", time_window="week")
+                popular_future = pool.submit(tmdb.get_popular_movies)
+                top_rated_future = pool.submit(tmdb.get_top_rated_movies)
+                coming_soon_future = pool.submit(tmdb.get_anticipated_movies)
+                trending = trending_future.result()
+                popular = popular_future.result()
+                top_rated = top_rated_future.result()
+                coming_soon = coming_soon_future.result()
 
             # Trending results from the 'all' endpoint include backdrop_path
             hero = [
@@ -337,8 +356,35 @@ class WatchlistView(APIView):
                 bucket = "to_watch"
             buckets[bucket].append(entry)
 
+        # `?page_size=all` returns every entry in one shot, unpaginated. The
+        # client holds the full watchlist in memory and derives *everything*
+        # from it — Profile's "My Shows" count, the Shows Hub buckets, the
+        # Home/Upcoming tab, and the home-screen widget (see store's
+        # syncWidgetData + lib/upcoming.ts). Page-paginating the buckets
+        # silently capped all of those at one page (20/bucket): a 200-show
+        # import showed "My Shows: 40" and upcoming/widget under-reported.
+        # The shared page param across all three buckets also made page 2
+        # 404 whenever any bucket had <2 pages, so the client could never
+        # walk past page 1 anyway. Full DB work (prefetch of every entry's
+        # episodes) already happens above regardless of pagination, so this
+        # mode only adds serialization + payload — no extra queries.
+        fetch_all = request.query_params.get("page_size") == "all"
+
         paginated = {}
         for key, items in buckets.items():
+            if fetch_all:
+                paginated[key] = {
+                    "count": len(items),
+                    "total_pages": 1,
+                    "current_page": 1,
+                    "next": None,
+                    "previous": None,
+                    "results": WatchlistSerializer(
+                        items, many=True, context={"request": request}
+                    ).data,
+                }
+                continue
+
             paginator = StandardResultsPagination()
             page = paginator.paginate_queryset(items, request, view=self)
             serialized_results = WatchlistSerializer(

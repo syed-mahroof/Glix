@@ -132,9 +132,14 @@ export default function EpisodeDetailScreen() {
 
       // The Catch-Up modal's check (below) is a server-authoritative call
       // (CatchupCheckView) that no longer depends on the Zustand watchlist
-      // being fresh. Still kept so the store (Shows Hub pills, widget data)
-      // reflects this episode's watched state after navigating back.
-      await fetchWatchlist();
+      // being fresh. Still kicked off so the store (Shows Hub pills, widget
+      // data) reflects this episode's watched state after navigating back.
+      // Not awaited — this screen renders from its own local `episode`
+      // state, never from the Zustand watchlist, so blocking the spinner on
+      // a full unpaginated `/watchlist/?page_size=all` refetch (fetchWatchlist
+      // already swallows its own errors into store state) was pure added
+      // latency on every episode-detail open.
+      fetchWatchlist();
     } catch (err) {
       setError(extractErrorMessage(err));
     } finally {

@@ -464,7 +464,11 @@ export const useWatchStore = create<WatchStoreState>()(
   fetchWatchlist: async () => {
     set({ isLoadingWatchlist: true, error: null });
     try {
-      const response = await api.get<WatchlistBuckets>('/watchlist/');
+      // page_size=all: load every entry unpaginated. The whole app derives
+      // from these in-memory buckets (Profile "My Shows" count, Shows Hub,
+      // Home/Upcoming tab, home-screen widget), so a paginated fetch capped
+      // all of them at 20/bucket — a 200-show import read as "My Shows: 40".
+      const response = await api.get<WatchlistBuckets>('/watchlist/?page_size=all');
       set({ watchlist: response.data, isLoadingWatchlist: false });
       get().syncWidgetData();
     } catch (error) {
