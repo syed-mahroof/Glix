@@ -518,7 +518,34 @@ def _import_one_show(tmdb: TMDBService, user, item: dict, errors: list):
     if not wanted:
         return True, 0, 0
 
-    season_numbers = {s for s, _ in wanted}
+    # Diff against what's already known locally before touching TMDB again:
+    # a (season, episode) already cached from a prior sync/import AND
+    # already marked watched for this user needs no season re-fetch at
+    # all. This is what makes re-importing an already-fully-processed show
+    # (the common case on a retried/resumed import) cost nothing beyond
+    # the one unavoidable id-resolution call above — not a second full
+    # pass of season lookups this show already went through last time.
+    all_season_numbers = {s for s, _ in wanted}
+    cached_episode_ids = {
+        (e.season_number, e.episode_number): e.tmdb_id
+        for e in CachedEpisode.objects.filter(
+            show=cached_show, season_number__in=all_season_numbers
+        )
+    }
+    already = set(
+        WatchState.objects.filter(user=user, episode__show=cached_show).values_list(
+            "episode_id", flat=True
+        )
+    )
+    still_needed = {
+        key: watched_at
+        for key, watched_at in wanted.items()
+        if cached_episode_ids.get(key) not in already
+    }
+    if not still_needed:
+        return True, 0, 0
+
+    season_numbers = {s for s, _ in still_needed}
     for season_num in sorted(season_numbers):
         try:
             tmdb.get_season_episodes(tmdb_id, season_num)
@@ -532,16 +559,11 @@ def _import_one_show(tmdb: TMDBService, user, item: dict, errors: list):
             show=cached_show, season_number__in=season_numbers
         )
     }
-    already = set(
-        WatchState.objects.filter(user=user, episode__show=cached_show).values_list(
-            "episode_id", flat=True
-        )
-    )
 
     today = timezone.now().date()
     rows = []
     runtime = 0
-    for key, watched_at in wanted.items():
+    for key, watched_at in still_needed.items():
         episode = episodes.get(key)
         if episode is None or episode.tmdb_id in already:
             continue
@@ -590,10 +612,14 @@ def _import_one_movie(tmdb: TMDBService, user, item: dict, errors: list):
     return True, (cached_movie.runtime_minutes or 0) if created else 0
 
 
-@shared_task(bind=True, soft_time_limit=1500, time_limit=1560)
+IMPORT_CHUNK_SIZE = 10  # shows+movies processed per invocation, see docstring below
+
+
+@shared_task(bind=True, soft_time_limit=300, time_limit=330)
 def run_tvtime_import(self, job_id: str):
     """
-    Resolve a staged TV Time export against TMDB and write watch state.
+    Resolve a staged TV Time export against TMDB and write watch state,
+    one bounded chunk at a time.
 
     Runs here rather than in the request because a full 200-series export
     is ~1,100 sequential TMDB round-trips (find + details + one per
@@ -601,20 +627,43 @@ def run_tvtime_import(self, job_id: str):
     HTTP calls are the entire cost, which is why bulk_create alone would
     not have kept this inside a request.
 
-    soft_time_limit=25min/time_limit=26min: render-start.sh's Celery
-    worker runs at --concurrency=1 (Render free tier), so one wedged
-    import (e.g. TMDB degraded well past its own retry/backoff budget)
-    would otherwise block every other user's imports and every other
-    Celery task — badges, streaks, push notifications, cache refresh —
-    indefinitely. SoftTimeLimitExceeded is a normal Exception subclass,
-    so it's caught by the try/except below like any other failure and
-    the job is cleanly marked FAILED rather than left stuck RUNNING.
+    Chunked + resumable: each invocation processes at most
+    IMPORT_CHUNK_SIZE items. job.processed is the resume cursor — it's
+    saved to the DB after every single item below, so it survives a
+    soft-time-limit hit, a hard time_limit SIGKILL, or the whole worker
+    container restarting mid-chunk. If work remains after a chunk, this
+    task re-enqueues itself for the rest instead of looping through the
+    whole payload in one invocation. A 300+ show library that used to
+    need one ~25min invocation (routinely hitting SoftTimeLimitExceeded
+    on Render's single-concurrency free-tier worker, per the reported
+    symptom) now runs as many short chunks, none of which come close to
+    the time limit or block every other user's badges/streaks/push
+    notifications for anywhere near as long.
+
+    soft_time_limit=5min/time_limit=5.5min: sized for one chunk, not the
+    whole export. The original 25min budget covered ~1,100 calls across a
+    full ~200-series export (~1.4s/call average); at IMPORT_CHUNK_SIZE=10,
+    5 minutes is a ~30s/item budget — ~20x that average pace, comfortable
+    headroom for a season-heavy outlier show, while still failing (and
+    resuming, see below) fast if something is genuinely stuck, rather
+    than tying up the worker for 25+ minutes as before.
+    SoftTimeLimitExceeded is a normal Exception subclass, caught by the
+    try/except below like any other failure.
+
+    Only a job that finishes all its chunks (status=SUCCESS) clears
+    payload — a FAILED job (this chunk's soft-time-limit hit, or an
+    orphaned job TVTimeImportView closed out) keeps both its payload and
+    its correct `processed` cursor, so the view can resume it on the next
+    matching submission instead of reprocessing already-completed items
+    from zero. _import_one_show's own diff against locally-cached
+    episodes/WatchState additionally makes a resumed *or* freshly
+    resubmitted run cheap even without relying on this cursor.
 
     bulk_create deliberately bypasses WatchState's post_save badge/streak
     signals — firing them thousands of times would be pathological. Both
-    idempotent recalculation tasks run once at the end instead, and
-    total_time_watched is incremented directly, mirroring the F() pattern
-    WatchStateToggleView already uses.
+    idempotent recalculation tasks run once, only when every chunk of the
+    job has completed, and total_time_watched is incremented per chunk,
+    mirroring the F() pattern WatchStateToggleView already uses.
     """
     try:
         job = ImportJob.objects.get(pk=job_id)
@@ -625,78 +674,93 @@ def run_tvtime_import(self, job_id: str):
     payload = job.payload or {}
     shows = payload.get("shows") or []
     movies = payload.get("movies") or []
+    total_items = len(shows) + len(movies)
 
-    job.status = ImportJob.Status.RUNNING
-    job.total = len(shows) + len(movies)
-    job.processed = 0
-    job.save(update_fields=["status", "total", "processed", "updated_at"])
+    if job.status == ImportJob.Status.PENDING:
+        job.status = ImportJob.Status.RUNNING
+        job.save(update_fields=["status", "updated_at"])
 
     tmdb = TMDBService()
     user = job.user
-    errors = []
-    episodes_marked = 0
+    errors = list(job.errors)
+    episodes_marked = job.episodes_marked
     runtime_added = 0
-    processed = 0
+    start = job.processed
+    chunk_end = min(start + IMPORT_CHUNK_SIZE, total_items)
 
     try:
-        for item in shows:
-            try:
-                imported, marked, runtime = _import_one_show(tmdb, user, item, errors)
-                if imported:
-                    job.shows_imported += 1
-                    episodes_marked += marked
-                    runtime_added += runtime
-                else:
+        for idx in range(start, chunk_end):
+            if idx < len(shows):
+                item = shows[idx]
+                try:
+                    imported, marked, runtime = _import_one_show(tmdb, user, item, errors)
+                    if imported:
+                        job.shows_imported += 1
+                        episodes_marked += marked
+                        runtime_added += runtime
+                    else:
+                        job.shows_skipped += 1
+                except Exception as exc:  # one bad show must not kill the run
+                    logger.exception("run_tvtime_import: show failed")
+                    if len(errors) < IMPORT_ERROR_CAP:
+                        errors.append(f"Error importing show '{item.get('title')}': {exc}")
                     job.shows_skipped += 1
-            except Exception as exc:  # one bad show must not kill the run
-                logger.exception("run_tvtime_import: show failed")
-                if len(errors) < IMPORT_ERROR_CAP:
-                    errors.append(f"Error importing show '{item.get('title')}': {exc}")
-                job.shows_skipped += 1
-            processed += 1
-            job.processed = processed
-            job.save(update_fields=["processed", "shows_imported", "shows_skipped", "updated_at"])
-
-        for item in movies:
-            try:
-                imported, runtime = _import_one_movie(tmdb, user, item, errors)
-                if imported:
-                    job.movies_imported += 1
-                    runtime_added += runtime
-                else:
+            else:
+                item = movies[idx - len(shows)]
+                try:
+                    imported, runtime = _import_one_movie(tmdb, user, item, errors)
+                    if imported:
+                        job.movies_imported += 1
+                        runtime_added += runtime
+                    else:
+                        job.movies_skipped += 1
+                except Exception as exc:
+                    logger.exception("run_tvtime_import: movie failed")
+                    if len(errors) < IMPORT_ERROR_CAP:
+                        errors.append(f"Error importing movie '{item.get('title')}': {exc}")
                     job.movies_skipped += 1
-            except Exception as exc:
-                logger.exception("run_tvtime_import: movie failed")
-                if len(errors) < IMPORT_ERROR_CAP:
-                    errors.append(f"Error importing movie '{item.get('title')}': {exc}")
-                job.movies_skipped += 1
-            processed += 1
-            job.processed = processed
-            job.save(update_fields=["processed", "movies_imported", "movies_skipped", "updated_at"])
+
+            job.processed = idx + 1
+            job.save(update_fields=[
+                "processed", "shows_imported", "shows_skipped",
+                "movies_imported", "movies_skipped", "updated_at",
+            ])
+
+        job.episodes_marked = episodes_marked
+        job.errors = errors
+        job.save(update_fields=["episodes_marked", "errors", "updated_at"])
 
         if runtime_added:
             UserProfile.objects.filter(user=user).update(
                 total_time_watched=F("total_time_watched") + runtime_added
             )
 
+        if job.processed < total_items:
+            # More work remains — hand off to a fresh invocation instead of
+            # continuing the loop here, so no single invocation's real
+            # TMDB-bound work can approach the time limit either.
+            run_tvtime_import.apply_async(args=[job_id], countdown=1)
+            return
+
         # bulk_create skipped every post_save badge/streak signal; these
         # two idempotent tasks are the documented safety net for exactly
-        # this. Run inline — we are already off the request path.
+        # this. Run inline, only now that every chunk is done — we are
+        # already off the request path.
         recalculate_user_badges(user.id)
         recalculate_watch_streak(user.id)
 
         job.status = ImportJob.Status.SUCCESS
+        job.payload = {}  # staged input is dead weight once the run is truly over
     except Exception as exc:
         logger.exception("run_tvtime_import: job %s failed", job_id)
         job.status = ImportJob.Status.FAILED
         job.detail = str(exc)
+        # payload and processed are deliberately left intact — see docstring.
 
-    job.episodes_marked = episodes_marked
-    job.errors = errors
     job.finished_at = timezone.now()
-    job.payload = {}  # staged input is dead weight once the run is over
     job.save()
     logger.info(
-        "run_tvtime_import: job %s %s - %d shows, %d movies, %d episodes marked",
-        job_id, job.status, job.shows_imported, job.movies_imported, episodes_marked,
+        "run_tvtime_import: job %s %s - %d/%d processed, %d shows, %d movies, %d episodes marked",
+        job_id, job.status, job.processed, total_items,
+        job.shows_imported, job.movies_imported, episodes_marked,
     )

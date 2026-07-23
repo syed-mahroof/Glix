@@ -33,6 +33,11 @@ export interface UpcomingItem {
   episodeNumber: number;
   airDate: string;
   tmdbShowId: number;
+  /** Real CachedEpisode tmdb_id for deep-linking straight to the episode
+   *  (widget tap-through). Null for the synthetic `next_episode_to_air`
+   *  item below — TMDB's next-episode summary has no locally cached
+   *  episode row yet, so there's nothing to deep-link to but the show. */
+  episodeId: number | null;
 }
 
 export function buildUpcomingItems(entries: WatchlistEntry[]): UpcomingItem[] {
@@ -41,6 +46,38 @@ export function buildUpcomingItems(entries: WatchlistEntry[]): UpcomingItem[] {
   for (const entry of entries) {
     const show = entry.show;
     const seen = new Set<string>();
+
+    // Aired-but-unwatched (Phase G, TV Time-style): previously any episode
+    // whose air_date passed simply fell out of this list forever once
+    // unwatched, even though the user never actually marked it — matching
+    // the "next episode" definition pickNextEpisode() already uses (earliest
+    // aired-unwatched), surface only that ONE episode per show as an
+    // overdue item, not the entire unwatched backlog. Once it's marked
+    // watched (or a later episode becomes the new "next"), it stops
+    // qualifying here on the next recompute — it doesn't need to be tracked
+    // as "dismissed" separately.
+    const overdue = show.episodes
+      .filter((ep) => ep.air_date && ep.air_date < todayIso && !ep.is_watched)
+      .sort((a, b) => {
+        if (a.air_date! !== b.air_date!) return a.air_date! < b.air_date! ? -1 : 1;
+        if (a.season_number !== b.season_number) return a.season_number - b.season_number;
+        return a.episode_number - b.episode_number;
+      })[0];
+    if (overdue) {
+      seen.add(`${overdue.season_number}-${overdue.episode_number}`);
+      items.push({
+        key: String(overdue.tmdb_id),
+        showTitle: show.title,
+        posterPath: show.poster_path,
+        episodeTitle: overdue.title,
+        seasonNumber: overdue.season_number,
+        episodeNumber: overdue.episode_number,
+        airDate: overdue.air_date!,
+        tmdbShowId: show.tmdb_id,
+        episodeId: overdue.tmdb_id,
+      });
+    }
+
     for (const episode of show.episodes) {
       if (!episode.air_date || episode.air_date < todayIso || episode.is_watched) continue;
       seen.add(`${episode.season_number}-${episode.episode_number}`);
@@ -53,6 +90,7 @@ export function buildUpcomingItems(entries: WatchlistEntry[]): UpcomingItem[] {
         episodeNumber: episode.episode_number,
         airDate: episode.air_date,
         tmdbShowId: show.tmdb_id,
+        episodeId: episode.tmdb_id,
       });
     }
     // TMDB's next_episode_to_air (see Show.next_episode_*) surfaces a real
@@ -79,6 +117,7 @@ export function buildUpcomingItems(entries: WatchlistEntry[]): UpcomingItem[] {
         episodeNumber: show.next_episode_number,
         airDate: show.next_episode_air_date,
         tmdbShowId: show.tmdb_id,
+        episodeId: null,
       });
     }
   }

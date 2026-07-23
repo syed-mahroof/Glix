@@ -1,5 +1,6 @@
 # Glix — Roadmap & Feature Checklist
-**Last Updated:** 2026-07-22 (Phase 40 — Google Sign-In final-touches audit found nothing left to fix in-repo (still-open items are external: Apple Developer enrollment, on-device test); the requested overall pre-push verification pass then caught a live Celery worker/beat crash-loop — `config/celery.py` was forcing SSL params unconditionally against local Docker Compose's plain `redis://`, meaning no Celery task had been running locally at all. Fixed and confirmed stable. Backend `pytest` — 33/33 passing. See Phase 39 below for the card-size polish)
+**Last Updated:** 2026-07-23 (Phase 53 — Final performance pass + pre-push audit + docs consolidation (fix prompt's Phase M), closing out the Phase D–M batch. (a) Performance: re-verified fire-and-forget `fetchWatchlist()` (season/episode screens), `DiscoverFeedView`'s `ThreadPoolExecutor` parallelization, the GET-only retry interceptor, and the Redis SSL gating are all still intact — none of Phases D–L touched them. Re-investigated season-screen open latency fresh, not assumed-fixed: traced its exact mount-time calls — unchanged since Phase 37, no phase this session added anything to that screen's critical path. Also traced `app/show/[id].tsx` (heavily edited across Phases D/F/I) and confirmed Phase L's new `RatingReviewCard` loads independently, off the critical path, behind its own local loading state — doesn't block the screen's perceived open time. No regressions found. (b) Pre-push audit: `pytest` 65/65, `manage.py check`/`makemigrations --check` clean; `tsc --noEmit` 2 errors, same baseline as every prior phase this session, zero new; grepped every file touched this session for hardcoded hex colors (2 found, both matching `SeasonCard.tsx`'s own pre-existing photo-overlay convention, not new violations), raw `Pressable` (2 found, both backdrop-dismiss catchers matching `CascadeModal`'s established exception), `estimatedItemSize` (zero — Phase E's removal fully intact), debug scaffolding (none); confirmed every new backend endpoint (`ShowRemoveView`/`MovieRemoveView`/`ShowReviewView`/`MovieReviewView`/`ShowReviewListView`/`MovieReviewListView`) has `IsAuthenticated`; confirmed the Zustand persist key (`watchtracker-store`) untouched, the only new dependency (`expo-font`) was genuinely new (not a float of an existing pinned version — lockfile diff confirmed minimal), and no new `bulk_create` call was added (the two `ShowRemoveView`/`MovieRemoveView` bulk deletes don't implicate the badge/streak signal caveat, which is create-only). (c) Docs: updated `ROADMAP.md`'s completion table (Search & Discovery/Reviews & Ratings rows, removed the now-fixed "paginated endless scroll" future-work line) and closed out this update with the full cross-phase "not verifiable without a device" list in `AUDIT.md`. See Phase 52 below for the review/rating system.)
+
 Legend: ✅ Complete · 🟨 Partial · ⬜ Not Started
 
 ---
@@ -49,6 +50,19 @@ Legend: ✅ Complete · 🟨 Partial · ⬜ Not Started
 | 38 | Backup/Export Two-File Rework (Shows + Movies, mirroring TV Time import) | 2026-07-22 🟨 |
 | 39 | Card-Size Polish (FlashList `estimatedItemSize` Audit — 2 Fixed, 7 Deferred) | 2026-07-22 🟨 |
 | 40 | Google Sign-In Final Audit (No Code Change) + Overall Pre-Push Verification (Celery SSL Crash-Loop Found & Fixed) | 2026-07-22 ✅ |
+| 41 | Shows Hub Status-Pill Correctness (`last_watched_at` recency fix) + Per-Second Re-render Gate | 2026-07-23 ✅ |
+| 42 | TV Time Import: Chunked/Resumable Processing + Diff-Aware Re-Import | 2026-07-23 ✅ |
+| 43 | Home-Screen Widget Reliability, Episode Tap-Through, Countdown, 2-Week Window + iOS Widget Rewrite | 2026-07-23 🟨 |
+| 44 | Outside-Row Mark/Unmark Season Watched (SeasonCard checkmark, reuses Catch-Up cascade) | 2026-07-23 ✅ |
+| 45 | Dynamic FlashList Card Sizing — removed dead `estimatedItemSize` (FlashList v2 auto-sizes), fixed real 2→3 column oversized-card cause | 2026-07-23 ✅ |
+| 46 | Remove/Undo "Add to Watchlist" — full-delete `DELETE` endpoints (show + movie), snapshot-based Undo via `Snackbar` | 2026-07-23 ✅ |
+| 47 | Upcoming Tab Aired-But-Untracked Episodes — "OVERDUE" items stay visible past their air date with inline mark-watched | 2026-07-23 ✅ |
+| 48 | My Shows/My Movies Filter Pill Scroll Fix + Anime Filter — scrollable pill row, shared Animation+`ja` heuristic (`lib/anime.ts`) | 2026-07-23 ✅ |
+| 49 | Add-to-Watchlist No Longer Force-Navigates — in-place pill flip + Snackbar confirmation, onboarding's bulk-add flow intentionally exempted | 2026-07-23 ✅ |
+| 50 | Logout Modal Polish + Login Logo + "Akony" Font Branding — new `LogoutConfirmModal`, `expo-font` infra added, wordmark on login + splash | 2026-07-23 ✅ |
+| 51 | Discover Hub Filters/Sort/Language/Anime/Pagination — Critically Acclaimed sort, language + anime filters, real infinite-scroll | 2026-07-23 ✅ |
+| 52 | Review/Rating System — `ShowReview`/`MovieReview` models, private-by-default 5-star + note, new `RatingReviewCard` on both detail screens | 2026-07-23 ✅ |
+| 53 | Final Performance Pass + Pre-Push Audit + Docs Consolidation — season-screen latency re-confirmed fresh, full color/Pressable/auth/dependency audit, zero regressions | 2026-07-23 ✅ |
 
 ---
 
@@ -602,15 +616,16 @@ Design plan lives in a published artifact ("Glix · Phase 9 · Design System & P
 |------|---|
 | Backend Core | 100% |
 | Movie Features | 100% |
-| Search & Discovery | 100% |
+| Search & Discovery | 100% (Phase K, 2026-07-23: Critically Acclaimed sort, language + anime filters, real infinite-scroll pagination on both the filtered grid and universal search — previously single-page only despite the backend already supporting more) |
 | Frontend UX / Optimistic UI | 100% |
 | Community & Social | 100% |
+| Reviews & Ratings | 100% (Phase L, 2026-07-23: private-by-default 5-star + note per show/movie, new `ShowReview`/`MovieReview` models) |
 | Analytics & Insights | 100% |
 | Widgets | 95% (data bridge + config wiring fixed 2026-07-14; both platforms still need an EAS build for on-device verification) |
 | Infrastructure | 100% |
-| Testing | 95% |
+| Testing | 95% (backend `pytest` suite grew from 33 to 65 across this session's phases; frontend still has no equivalent growth — `__tests__/watchStore.test.ts` remains stale, see the cross-phase not-verifiable list) |
 | Documentation | 100% |
-| **Overall** | **99%** |
+| **Overall** | **99%** (unchanged from before this session's phases — the one real remaining gap, on-device widget/UI confirmation, is unchanged by any of Phases D–M; everything device-independent is now genuinely complete) |
 
 ---
 
@@ -619,6 +634,5 @@ Design plan lives in a published artifact ("Glix · Phase 9 · Design System & P
 | Task | Priority |
 |------|----------|
 | EAS Build for iOS widget testing | High |
-| Paginated endless scroll UI for search | Low |
 | Analytics: per-user streaming provider tracking | Low |
 | Analytics: director charts (requires crew data per WatchState) | Low |

@@ -44,7 +44,7 @@ from core.serializers import (
     NotificationPreferenceSerializer,
     WatchHistorySerializer,
 )
-from core.services import TMDBService, TMDBServiceError
+from core.services import ANIME_GENRE_ID, ANIME_ORIGINAL_LANGUAGE, TMDBService, TMDBServiceError
 from core.tasks import run_tvtime_import
 
 class DiscoverFeedView(APIView):
@@ -164,18 +164,26 @@ class DiscoverFeedView(APIView):
 
 class DiscoverFilterView(APIView):
     """
-    GET /api/discover/filter/?type=tv|movie&genre=<tmdb_genre_id>&sort=trending|popular|top_rated&page=<int>
+    GET /api/discover/filter/?type=tv|movie&genre=<tmdb_genre_id>&sort=trending|popular|top_rated|critically_acclaimed&language=<iso_639_1>&anime=true|false&page=<int>
 
     Backs the Discover Hub's "Filter & Sort" bottom sheet. DiscoverFeedView
     returns a fixed set of curated sections with no genre/sort awareness —
     this hits TMDB's actual /discover/{tv|movie} endpoint (the one that
-    supports with_genres/sort_by) for the Popular/Top Rated sorts.
+    supports with_genres/sort_by/with_original_language) for every sort
+    except Trending.
 
     "Trending" is handled separately: TMDB's /trending endpoint doesn't
-    accept a with_genres filter at all (a TMDB API limitation), so instead
-    of silently degrading "Trending + Genre" to a plain popularity sort,
-    this fetches real trending results (with genre_ids attached) and
-    filters by genre in Python.
+    accept with_genres or with_original_language at all (a TMDB API
+    limitation), so instead of silently degrading "Trending + Genre" (or
+    "+ Language"/"+ Anime") to a plain popularity sort, this fetches real
+    trending results (with genre_ids/original_language attached) and
+    filters in Python.
+
+    `anime=true` ANDs TMDB's Animation genre onto `genre` and forces the
+    language to Japanese (see TMDBService.discover_tv's `require_anime`
+    docstring for why a conflicting `language` param is overridden rather
+    than honored) — same heuristic as client-mobile/lib/anime.ts and the
+    My Shows/My Movies Anime filter (Phase H), not a second definition.
 
     Response shape matches UniversalSearchResponse (page/total_pages/
     total_results/results) so the frontend reuses the same grid rendering
@@ -187,7 +195,15 @@ class DiscoverFilterView(APIView):
     SORT_TO_TMDB = {
         "popular": "popularity.desc",
         "top_rated": "vote_average.desc",
+        "critically_acclaimed": "vote_average.desc",
     }
+    # "Top Rated" already guards against TMDB's single-10/10-vote quirk with
+    # a 100-vote floor (TMDBService.discover_tv/movies' default). "Critically
+    # Acclaimed" reuses the exact same anti-gaming mechanism, just with a
+    # meaningfully higher floor — genuine broad consensus, not merely
+    # "enough votes to clear the basic floor" — rather than a raw
+    # vote_average sort a single vote could game (per the fix prompt).
+    CRITICALLY_ACCLAIMED_MIN_VOTE_COUNT = 1000
 
     def get(self, request):
         media_type = request.query_params.get("type", "tv").lower()
@@ -196,6 +212,15 @@ class DiscoverFilterView(APIView):
 
         genre_param = request.query_params.get("genre")
         genre_id = int(genre_param) if genre_param and genre_param.isdigit() else None
+
+        language = request.query_params.get("language") or None
+        anime = request.query_params.get("anime", "").lower() in ("true", "1")
+        if anime:
+            # Same override reasoning as TMDBService.discover_tv's
+            # require_anime: real anime is Japanese-language by this
+            # heuristic, so a separately-picked language would just zero
+            # out results rather than doing anything the caller likely meant.
+            language = ANIME_ORIGINAL_LANGUAGE
 
         sort_key = request.query_params.get("sort", "trending")
 
@@ -208,13 +233,27 @@ class DiscoverFilterView(APIView):
 
         if sort_key == "trending":
             trending = tmdb.get_trending(
-                media_type=media_type, time_window="week", page=page, include_genre_ids=True
+                media_type=media_type,
+                time_window="week",
+                page=page,
+                include_genre_ids=True,
+                include_original_language=True,
             )
             results = trending.get("results", [])
             if genre_id:
                 results = [r for r in results if genre_id in (r.get("genre_ids") or [])]
+            if anime:
+                results = [
+                    r
+                    for r in results
+                    if ANIME_GENRE_ID in (r.get("genre_ids") or [])
+                    and r.get("original_language") == ANIME_ORIGINAL_LANGUAGE
+                ]
+            elif language:
+                results = [r for r in results if r.get("original_language") == language]
             for r in results:
                 r.pop("genre_ids", None)
+                r.pop("original_language", None)
             data = {
                 "page": trending.get("page", page),
                 "total_pages": trending.get("total_pages", 1),
@@ -223,10 +262,21 @@ class DiscoverFilterView(APIView):
             }
         else:
             sort_by = self.SORT_TO_TMDB.get(sort_key, "popularity.desc")
+            min_vote_count = (
+                self.CRITICALLY_ACCLAIMED_MIN_VOTE_COUNT if sort_key == "critically_acclaimed" else 100
+            )
+            discover_kwargs = dict(
+                genre_id=genre_id,
+                sort_by=sort_by,
+                page=page,
+                min_vote_count=min_vote_count,
+                original_language=language,
+                require_anime=anime,
+            )
             if media_type == "tv":
-                data = tmdb.discover_tv(genre_id=genre_id, sort_by=sort_by, page=page)
+                data = tmdb.discover_tv(**discover_kwargs)
             else:
-                data = tmdb.discover_movies(genre_id=genre_id, sort_by=sort_by, page=page)
+                data = tmdb.discover_movies(**discover_kwargs)
 
         return Response(data, status=status.HTTP_200_OK)
 
@@ -904,6 +954,93 @@ class ShowAddView(APIView):
         )
 
 
+class ShowRemoveView(APIView):
+    """
+    DELETE /api/watchlist/remove/
+    Body: {"show_id": <CachedShow.tmdb_id>}
+
+    Fully removes a show from the user's watchlist: deletes the
+    Watchlist row AND every WatchState the user has for that show's
+    episodes, decrementing total_time_watched by the same amount
+    WatchStateToggleView would have on an equivalent series of
+    individual un-watches (same F()-expression pattern, same
+    non-negative floor). This is a genuine "undo the add" per product
+    decision — episode marks made while the show was tracked are wiped
+    too, not just hidden (Watchlist.status=ARCHIVED already covers the
+    "hide but keep everything" case).
+
+    earned_badges is deliberately left untouched — badges are additive
+    only everywhere else in this codebase (WatchStateToggleView/
+    BulkWatchStateToggleView never revoke a badge on an un-watch
+    either), so a remove shouldn't behave differently.
+
+    Returns exactly what was deleted so the frontend's Snackbar Undo
+    can restore it precisely (re-add the show, re-mark these exact
+    episode ids, restore favorite/status/ignore_catchup) regardless of
+    how much of the show happened to be cached client-side — same
+    "server is the source of truth for what to restore" reasoning as
+    CatchupCheckView.
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def delete(self, request):
+        show_id = request.data.get("show_id")
+        if show_id is None:
+            return Response(
+                {"detail": "show_id is required."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        show = get_object_or_404(CachedShow, pk=show_id)
+        entry = Watchlist.objects.filter(user=request.user, show=show).first()
+        if entry is None:
+            return Response(
+                {"detail": "Show is not in your watchlist."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        with transaction.atomic():
+            profile, _ = UserProfile.objects.select_for_update().get_or_create(
+                user=request.user
+            )
+            watch_states = list(
+                WatchState.objects.filter(user=request.user, episode__show=show).select_related(
+                    "episode"
+                )
+            )
+            watched_episode_ids = [ws.episode.tmdb_id for ws in watch_states]
+            runtime_total = sum(ws.episode.runtime_minutes for ws in watch_states)
+
+            was_favorite = entry.is_favorite
+            was_status = entry.status
+            was_ignore_catchup = entry.ignore_catchup
+
+            WatchState.objects.filter(user=request.user, episode__show=show).delete()
+            entry.delete()
+
+            if runtime_total:
+                UserProfile.objects.filter(pk=profile.pk).update(
+                    total_time_watched=F("total_time_watched") - runtime_total
+                )
+                profile.refresh_from_db(fields=["total_time_watched"])
+                if profile.total_time_watched < 0:
+                    UserProfile.objects.filter(pk=profile.pk).update(total_time_watched=0)
+                    profile.refresh_from_db(fields=["total_time_watched"])
+
+        return Response(
+            {
+                "show_id": show.tmdb_id,
+                "watched_episode_ids": watched_episode_ids,
+                "was_favorite": was_favorite,
+                "was_status": was_status,
+                "was_ignore_catchup": was_ignore_catchup,
+                "total_time_watched": profile.total_time_watched,
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
 class ContinueWatchingView(APIView):
     """
     GET /api/continue-watching/
@@ -1181,6 +1318,65 @@ class MovieAddView(APIView):
         )
 
 
+class MovieRemoveView(APIView):
+    """
+    DELETE /api/movies/watchlist/remove/
+    Body: {"movie_id": <MovieCache.tmdb_id>}
+
+    Mirrors ShowRemoveView for the movie side — MovieWatchlist carries
+    no favorite/status/ignore_catchup fields, so the only thing worth
+    returning for Undo besides the id is whether it was marked watched.
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def delete(self, request):
+        movie_id = request.data.get("movie_id")
+        if movie_id is None:
+            return Response(
+                {"detail": "movie_id is required."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        movie = get_object_or_404(MovieCache, pk=movie_id)
+        entry = MovieWatchlist.objects.filter(user=request.user, movie=movie).first()
+        if entry is None:
+            return Response(
+                {"detail": "Movie is not in your watchlist."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        with transaction.atomic():
+            profile, _ = UserProfile.objects.select_for_update().get_or_create(
+                user=request.user
+            )
+            was_watched = MovieWatchState.objects.filter(
+                user=request.user, movie=movie
+            ).exists()
+            runtime_total = movie.runtime_minutes if was_watched else 0
+
+            MovieWatchState.objects.filter(user=request.user, movie=movie).delete()
+            entry.delete()
+
+            if runtime_total:
+                UserProfile.objects.filter(pk=profile.pk).update(
+                    total_time_watched=F("total_time_watched") - runtime_total
+                )
+                profile.refresh_from_db(fields=["total_time_watched"])
+                if profile.total_time_watched < 0:
+                    UserProfile.objects.filter(pk=profile.pk).update(total_time_watched=0)
+                    profile.refresh_from_db(fields=["total_time_watched"])
+
+        return Response(
+            {
+                "movie_id": movie.tmdb_id,
+                "was_watched": was_watched,
+                "total_time_watched": profile.total_time_watched,
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
 class TVTimeImportView(APIView):
     """
     POST /api/import/tvtime/
@@ -1236,6 +1432,12 @@ class TVTimeImportView(APIView):
     dropped poll request (see lib/migration.ts's pollImportJob) would queue
     a second full reprocessing run behind the first, doubling the wait and
     hammering TMDB for nothing since the DB writes are idempotent anyway.
+
+    Resumable against a byte-identical resubmission of a FAILED job (see
+    run_tvtime_import's chunking docstring): rather than reprocessing from
+    item 0, the existing job is put back to RUNNING and continues from its
+    saved `processed` cursor. A different payload, or a job with no
+    resumable state, still starts a fresh job as above.
     """
 
     permission_classes = [IsAuthenticated]
@@ -1277,16 +1479,48 @@ class TVTimeImportView(APIView):
                     status=status.HTTP_202_ACCEPTED,
                 )
             # Orphaned: the worker/container almost certainly died mid-run.
-            # Close it out so it stops masking new attempts forever.
+            # Close it out so it stops masking new attempts forever. Payload
+            # and the processed cursor are left intact — the resume check
+            # below is exactly what a same-file resubmission needs them for.
             in_flight.status = ImportJob.Status.FAILED
             in_flight.detail = "Import stalled and was abandoned (worker restarted mid-run). Please try again."
             in_flight.finished_at = timezone.now()
-            in_flight.payload = {}
-            in_flight.save(update_fields=["status", "detail", "finished_at", "payload", "updated_at"])
+            in_flight.save(update_fields=["status", "detail", "finished_at", "updated_at"])
+
+        submitted_payload = {"shows": shows_data, "movies": movies_data}
+
+        # Resume rather than restart: a FAILED job (a chunk's soft time
+        # limit hit — see run_tvtime_import's chunking docstring — or the
+        # orphan close-out just above) that still holds its original
+        # payload and a partial `processed` cursor can pick up exactly
+        # where it left off, skipping every already-completed item
+        # outright. Only resume when the resubmitted export is provably
+        # the same one though — resuming a different payload under the
+        # old cursor would silently skip real, unprocessed items.
+        resumable = (
+            ImportJob.objects.filter(user=request.user, status=ImportJob.Status.FAILED)
+            .exclude(payload={})
+            .order_by("-created_at")
+            .first()
+        )
+        if (
+            resumable is not None
+            and resumable.processed > 0
+            and resumable.payload == submitted_payload
+        ):
+            resumable.status = ImportJob.Status.RUNNING
+            resumable.detail = ""
+            resumable.finished_at = None
+            resumable.save(update_fields=["status", "detail", "finished_at", "updated_at"])
+            run_tvtime_import.delay(str(resumable.id))
+            return Response(
+                {"job_id": str(resumable.id), "total": resumable.total, "status": resumable.status},
+                status=status.HTTP_202_ACCEPTED,
+            )
 
         job = ImportJob.objects.create(
             user=request.user,
-            payload={"shows": shows_data, "movies": movies_data},
+            payload=submitted_payload,
             total=len(shows_data) + len(movies_data),
         )
         run_tvtime_import.delay(str(job.id))

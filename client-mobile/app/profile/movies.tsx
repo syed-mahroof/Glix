@@ -4,15 +4,16 @@
 import { FlashList } from '@shopify/flash-list';
 import { Image } from 'expo-image';
 import { useRouter } from 'expo-router';
-import { ArrowLeft, Clapperboard, Film, Languages, Search, X } from 'lucide-react-native';
+import { ArrowLeft, Clapperboard, Film, Languages, Search, Sparkles, X } from 'lucide-react-native';
 import React, { useEffect, useMemo, useState } from 'react';
-import { StyleSheet, Text, TextInput, View } from 'react-native';
+import { ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 import LanguageFilterModal, { languageDisplayName } from '../../components/LanguageFilterModal';
 import LayoutToggle from '../../components/LayoutToggle';
 import MoviePosterCard from '../../components/MoviePosterCard';
 import PressableScale from '../../components/PressableScale';
+import { isAnimeByGenreStringAndLanguage } from '../../lib/anime';
 import { useAppTheme } from '../../lib/theme';
 import { MovieWatchlistItem } from '../../store/watchStore';
 import { useWatchStore } from '../../store/watchStore';
@@ -150,6 +151,7 @@ export default function ProfileMoviesScreen() {
   const [filter, setFilter] = useState<FilterKey>('ALL');
   const [query, setQuery] = useState('');
   const [isLanguageModalVisible, setIsLanguageModalVisible] = useState(false);
+  const [animeOnly, setAnimeOnly] = useState(false);
 
   useEffect(() => {
     fetchMovieWatchlist();
@@ -177,12 +179,18 @@ export default function ProfileMoviesScreen() {
       result = result.filter((item) => item.movie.original_language === selectedLanguage);
     }
 
+    if (animeOnly) {
+      result = result.filter((item) =>
+        isAnimeByGenreStringAndLanguage(item.movie.genres_string, item.movie.original_language)
+      );
+    }
+
     const trimmedQuery = query.trim().toLowerCase();
     if (trimmedQuery) {
       result = result.filter((item) => item.movie.title.toLowerCase().includes(trimmedQuery));
     }
     return result;
-  }, [allItems, filter, selectedLanguage, movieWatchlist, query]);
+  }, [allItems, filter, selectedLanguage, animeOnly, movieWatchlist, query]);
 
   return (
     <SafeAreaView style={[styles.container, { backgroundColor: c.bg }]} edges={['top']}>
@@ -222,8 +230,13 @@ export default function ProfileMoviesScreen() {
         </View>
       </View>
 
-      {/* Filter Pills */}
-      <View style={styles.pillRow}>
+      {/* Filter Pills — horizontally scrollable (Phase H): see profile/shows.tsx
+          for the identical fix and the reason it was needed. */}
+      <ScrollView
+        horizontal
+        showsHorizontalScrollIndicator={false}
+        contentContainerStyle={styles.pillRow}
+      >
         {FILTERS.map(({ key, label }) => (
           <PressableScale
             key={key}
@@ -253,7 +266,23 @@ export default function ProfileMoviesScreen() {
             {selectedLanguage ? languageDisplayName(selectedLanguage) : 'Language'}
           </Text>
         </PressableScale>
-      </View>
+        <PressableScale
+          style={[
+            styles.pill,
+            styles.languagePill,
+            { backgroundColor: c.glassFill, borderColor: c.hairline },
+            animeOnly && { backgroundColor: c.accentFill, borderColor: c.accentFill },
+          ]}
+          onPress={() => setAnimeOnly((prev) => !prev)}
+          accessibilityRole="button"
+          accessibilityState={{ selected: animeOnly }}
+        >
+          <Sparkles color={animeOnly ? c.onAccent : c.textSecondary} size={14} />
+          <Text style={[styles.pillText, { color: c.textSecondary }, animeOnly && { color: c.onAccent }]}>
+            Anime
+          </Text>
+        </PressableScale>
+      </ScrollView>
 
       <LanguageFilterModal
         visible={isLanguageModalVisible}
@@ -284,14 +313,7 @@ export default function ProfileMoviesScreen() {
             key={`profile-movies-${preferredLayout}`}
             data={filtered}
             keyExtractor={(item) => String(item.id)}
-            // List: 138 for the common case where runtime/genre/rating are
-            // all present (true for virtually every real TMDB movie) — the
-            // old 104 was close to just the posterWrap's own height (96),
-            // ignoring rowContent's up-to-5-line stack (title, runtime,
-            // genre, status pill, rating) plus its own padding/gaps and the
-            // row's marginBottom.
-            estimatedItemSize={preferredLayout === 'grid' ? 260 : 138}
-            numColumns={preferredLayout === 'grid' ? 2 : 1}
+            numColumns={preferredLayout === 'grid' ? 3 : 1}
             extraData={preferredLayout}
             renderItem={({ item }) =>
               preferredLayout === 'grid' ? <MovieGridCard item={item} /> : <MovieListRow item={item} />

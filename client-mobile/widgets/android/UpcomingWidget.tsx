@@ -3,22 +3,36 @@ import { FlexWidget, TextWidget, ImageWidget, ListWidget } from 'react-native-an
 
 interface UpcomingWidgetItem {
   id?: number;
+  episode_id?: number | null;
   title: string;
   poster_path: string | null;
   next_episode: string;
   air_date: string;
+  /** Precomputed via lib/dateFormat.ts's formatCountdown() at sync time —
+   *  "3d 05h 12m (Monday)", the exact format the in-app Upcoming tab uses.
+   *  Optional: absent on stale cached widget data written before this
+   *  field existed, falls back to a plain date. */
+  countdown?: string;
 }
 
-// Each row deep-links straight to that show via the app's own `watchtracker://`
-// scheme (app.json) into the `app/show/[id].tsx` route — the same path
-// router.push(`/show/${id}`) uses everywhere else in the app. `id` is only
-// missing for stale cached widget data written before this field existed;
-// falls back to just opening the app rather than a broken link.
+// Each row deep-links via the app's own `watchtracker://` scheme (app.json)
+// straight to the specific upcoming episode (`app/episode/[id].tsx`) when
+// one's known, falling back to the show's general page (`app/show/[id].tsx`
+// — the same path router.push(`/show/${id}`) uses everywhere else), falling
+// back to just opening the app. `episode_id`/`id` are only missing for
+// stale cached widget data written before those fields existed.
+function widgetUri(show: UpcomingWidgetItem): string | undefined {
+  if (show.episode_id != null) return `watchtracker://episode/${show.episode_id}`;
+  if (show.id != null) return `watchtracker://show/${show.id}`;
+  return undefined;
+}
+
 function UpcomingRow({ show }: { show: UpcomingWidgetItem }) {
+  const uri = widgetUri(show);
   return (
     <FlexWidget
-      clickAction={show.id != null ? 'OPEN_URI' : 'OPEN_APP'}
-      clickActionData={show.id != null ? { uri: `watchtracker://show/${show.id}` } : undefined}
+      clickAction={uri ? 'OPEN_URI' : 'OPEN_APP'}
+      clickActionData={uri ? { uri } : undefined}
       style={{
         height: 64,
         width: 'match_parent',
@@ -43,7 +57,7 @@ function UpcomingRow({ show }: { show: UpcomingWidgetItem }) {
       <FlexWidget style={{ flexDirection: 'column', flex: 1 }}>
         <TextWidget text={show.title} style={{ fontSize: 15, color: '#FFFFFF', fontWeight: 'bold' }} maxLines={1} />
         <TextWidget
-          text={`${show.next_episode} • ${new Date(show.air_date).toLocaleDateString()}`}
+          text={`${show.next_episode} • ${show.countdown ?? new Date(show.air_date).toLocaleDateString()}`}
           style={{ fontSize: 12, color: '#B3B3B3', marginTop: 2 }}
           maxLines={1}
         />
@@ -89,10 +103,10 @@ export function UpcomingWidget({ data }: { data: any }) {
         text="AIRING SOON"
         style={{ fontSize: 12, color: '#E4FA1A', fontWeight: 'bold', marginLeft: 16, marginTop: 12, marginBottom: 4 }}
       />
-      {/* Scrollable — up to 5 upcoming episodes (store/watchStore.ts's
-          syncWidgetData caps it there). At the widget's default 4x2 size
-          only ~1.5 rows are visible; the list itself scrolls, and the
-          widget can also be resized taller from the home screen. */}
+      {/* Scrollable — everything airing in the next 14 days, capped at 30
+          (store/watchStore.ts's syncWidgetData). At the widget's default
+          4x2 size only ~1.5 rows are visible; the list itself scrolls to
+          reach the rest, and the widget can also be resized taller. */}
       <ListWidget style={{ height: 'match_parent', width: 'match_parent' }}>
         {items.map((show, idx) => (
           <UpcomingRow key={show.id ?? idx} show={show} />

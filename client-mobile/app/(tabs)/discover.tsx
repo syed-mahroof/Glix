@@ -166,6 +166,24 @@ const seg = StyleSheet.create({
   },
 });
 
+// ─── Pagination footer (Phase K) ───────────────────────────────────────────────
+// Shared by both the universal-search grid and the filtered/browse grid —
+// both already had `page`/`total_pages` available from the backend but
+// only ever fetched page 1, so "some titles only shown" (the fix prompt's
+// own phrasing) traced to a genuinely missing load-more, not a TMDB result
+// ceiling. A small inline spinner row, not a full-screen loader — the
+// existing grid stays on screen while the tail request runs.
+
+function LoadMoreFooter({ visible }: { visible: boolean }) {
+  const { theme } = useAppTheme();
+  if (!visible) return null;
+  return (
+    <View style={styles.loadMoreFooter}>
+      <ActivityIndicator color={theme.colors.accentInk} />
+    </View>
+  );
+}
+
 // ─── Search Result Card ────────────────────────────────────────────────────────
 
 function SearchResultCard({ item }: { item: DiscoverMediaItem }) {
@@ -305,10 +323,14 @@ export default function DiscoverScreen() {
     fetchFeed,
     searchResults,
     isSearching,
+    isLoadingMoreSearch,
+    loadMoreSearchResults,
     runSearch,
     clearSearch,
     filteredResults,
     isLoadingFiltered,
+    isLoadingMoreFiltered,
+    loadMoreFilteredResults,
     filteredError,
     isFilterActive,
     setSelectedGenreId,
@@ -497,9 +519,11 @@ export default function DiscoverScreen() {
               data={searchResults}
               keyExtractor={(item) => `${item.media_type}-${item.tmdb_id}`}
               numColumns={3}
-              estimatedItemSize={200}
               contentContainerStyle={styles.searchGrid}
               renderItem={({ item }) => <SearchResultCard item={item} />}
+              onEndReached={loadMoreSearchResults}
+              onEndReachedThreshold={0.5}
+              ListFooterComponent={<LoadMoreFooter visible={isLoadingMoreSearch} />}
             />
           ) : debouncedQuery.length > 0 ? (
             <View style={styles.centerState}>
@@ -540,9 +564,11 @@ export default function DiscoverScreen() {
               data={filteredResults}
               keyExtractor={(item) => `${item.media_type}-${item.tmdb_id}`}
               numColumns={3}
-              estimatedItemSize={200}
               contentContainerStyle={styles.searchGrid}
               renderItem={({ item }) => <SearchResultCard item={item} />}
+              onEndReached={loadMoreFilteredResults}
+              onEndReachedThreshold={0.5}
+              ListFooterComponent={<LoadMoreFooter visible={isLoadingMoreFiltered} />}
             />
           ) : (
             <View style={styles.centerState}>
@@ -717,6 +743,10 @@ const styles = StyleSheet.create({
     paddingHorizontal: 16,
     paddingTop: 8,
     paddingBottom: 120,
+  },
+  loadMoreFooter: {
+    paddingVertical: 24,
+    alignItems: 'center',
   },
   centerState: {
     flex: 1,

@@ -1,6 +1,7 @@
 // client-mobile/app/login.tsx
 import axios from 'axios';
 import { Link, useRouter } from 'expo-router';
+import { Image } from 'expo-image';
 import * as SecureStore from 'expo-secure-store';
 import { Eye, EyeOff, Lock, User } from 'lucide-react-native';
 import React, { useState } from 'react';
@@ -77,6 +78,9 @@ export default function LoginScreen() {
         behavior={Platform.OS === 'ios' ? 'padding' : undefined}
       >
         <View style={styles.content}>
+          {/* Reuses the real logo asset already shipped for the app
+              icon/splash (Phase 30 rebrand) — not a new/generated mark. */}
+          <Image source={require('../assets/Glix.png')} style={styles.logo} contentFit="contain" />
           <Text style={[styles.wordmark, { color: c.textPrimary }]}>Glix</Text>
           <Text style={[styles.subtitle, { color: c.textSecondary }]}>Sign in to keep tracking.</Text>
 
@@ -172,9 +176,22 @@ const styles = StyleSheet.create({
     paddingHorizontal: 28,
     gap: 14,
   },
+  logo: {
+    width: 72,
+    height: 72,
+    alignSelf: 'center',
+    marginBottom: 4,
+  },
   wordmark: {
+    fontFamily: 'Akony',
+    // Akony ships as a single Bold weight (no separate regular/other
+    // weights) — leaving a numeric fontWeight here makes iOS try to
+    // synthesize a "bolder" variant of a family the system doesn't
+    // recognize, which silently falls back to the system font instead of
+    // rendering Akony at all. 'normal' lets the font's own baked-in
+    // weight render as-is.
+    fontWeight: 'normal',
     fontSize: 34,
-    fontWeight: '800',
     letterSpacing: -0.5,
     textAlign: 'center',
   },

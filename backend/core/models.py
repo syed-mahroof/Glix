@@ -10,6 +10,7 @@ import uuid
 
 from django.conf import settings
 from django.contrib.postgres.fields import ArrayField
+from django.core.validators import MaxValueValidator, MinValueValidator
 from django.db import models
 from django.utils import timezone
 
@@ -715,6 +716,82 @@ class MovieWatchlist(models.Model):
         return f"{self.user.username} → {self.movie.title}"
 
 
+class ShowReview(models.Model):
+    """
+    A user's personal 1-5 star rating + optional note for a show
+    (Phase L). Private-by-default — deliberately NOT wired into the
+    Comment/CommentLike/CommentReport community system: Comment is a
+    public, moderatable discussion thread, while a rating is closer to
+    a personal log entry (same reasoning Letterboxd/Trakt/TV Time use).
+    A user can freely rate something 2 stars without that becoming a
+    public post. One review per (user, show) — POSTing again updates
+    it in place rather than creating a second row, mirroring
+    MovieWatchlist/Watchlist's own get_or_create upsert convention.
+    """
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="show_reviews",
+    )
+    show = models.ForeignKey(
+        CachedShow,
+        on_delete=models.CASCADE,
+        related_name="reviews",
+    )
+    rating = models.PositiveSmallIntegerField(validators=[MinValueValidator(1), MaxValueValidator(5)])
+    note = models.TextField(blank=True, max_length=2000)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "show_review"
+        constraints = [
+            models.UniqueConstraint(fields=["user", "show"], name="unique_user_show_review"),
+        ]
+        indexes = [
+            models.Index(fields=["show"], name="idx_show_review_show"),
+            models.Index(fields=["user", "-updated_at"], name="idx_show_review_user"),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.user.username} rated {self.show.title}: {self.rating}/5"
+
+
+class MovieReview(models.Model):
+    """Movie counterpart to ShowReview — same private-by-default reasoning."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="movie_reviews",
+    )
+    movie = models.ForeignKey(
+        MovieCache,
+        on_delete=models.CASCADE,
+        related_name="reviews",
+    )
+    rating = models.PositiveSmallIntegerField(validators=[MinValueValidator(1), MaxValueValidator(5)])
+    note = models.TextField(blank=True, max_length=2000)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "movie_review"
+        constraints = [
+            models.UniqueConstraint(fields=["user", "movie"], name="unique_user_movie_review"),
+        ]
+        indexes = [
+            models.Index(fields=["movie"], name="idx_movie_review_movie"),
+            models.Index(fields=["user", "-updated_at"], name="idx_movie_review_user"),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.user.username} rated {self.movie.title}: {self.rating}/5"
+
+
 class ImportJob(models.Model):
     """
     Tracks one TV Time import run. The import resolves every entry
@@ -750,7 +827,9 @@ class ImportJob(models.Model):
         help_text=(
             "Normalised export, staged here rather than passed as a Celery "
             "argument — a full series export is ~3MB and the broker is the "
-            "wrong place to put it. Cleared once the run finishes."
+            "wrong place to put it. Cleared once the run SUCCEEDS; kept on "
+            "FAILED (alongside `processed`) so TVTimeImportView can resume "
+            "a byte-identical resubmission instead of restarting from zero."
         ),
     )
 

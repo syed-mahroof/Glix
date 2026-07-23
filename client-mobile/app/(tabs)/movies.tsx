@@ -272,9 +272,8 @@ export default function MoviesScreen() {
           data={rows}
           keyExtractor={(item) => String(item.movie.tmdb_id)}
           renderItem={preferredLayout === 'grid' ? renderGridItem : renderItem}
-          numColumns={preferredLayout === 'grid' ? 2 : 1}
+          numColumns={preferredLayout === 'grid' ? 3 : 1}
           extraData={preferredLayout}
-          estimatedItemSize={preferredLayout === 'grid' ? 260 : 108}
           contentContainerStyle={styles.listContent}
           refreshControl={
             <RefreshControl

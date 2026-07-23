@@ -3,21 +3,30 @@ import { FlexWidget, TextWidget, ImageWidget, ListWidget } from 'react-native-an
 
 interface WatchlistWidgetItem {
   id?: number;
+  episode_id?: number | null;
   title: string;
   poster_path: string | null;
   next_episode: string;
 }
 
-// Each row deep-links straight to that show via the app's own `watchtracker://`
-// scheme (app.json) into the `app/show/[id].tsx` route — the same path
-// router.push(`/show/${id}`) uses everywhere else in the app. `id` is only
-// missing for stale cached widget data written before this field existed;
-// falls back to just opening the app rather than a broken link.
+// Each row deep-links via the app's own `watchtracker://` scheme (app.json)
+// straight to the specific next episode (`app/episode/[id].tsx`) when one's
+// known, falling back to the show's general page (`app/show/[id].tsx` — the
+// same path router.push(`/show/${id}`) uses everywhere else), falling back
+// to just opening the app. `episode_id`/`id` are only missing for stale
+// cached widget data written before those fields existed.
+function widgetUri(show: WatchlistWidgetItem): string | undefined {
+  if (show.episode_id != null) return `watchtracker://episode/${show.episode_id}`;
+  if (show.id != null) return `watchtracker://show/${show.id}`;
+  return undefined;
+}
+
 function WatchlistRow({ show }: { show: WatchlistWidgetItem }) {
+  const uri = widgetUri(show);
   return (
     <FlexWidget
-      clickAction={show.id != null ? 'OPEN_URI' : 'OPEN_APP'}
-      clickActionData={show.id != null ? { uri: `watchtracker://show/${show.id}` } : undefined}
+      clickAction={uri ? 'OPEN_URI' : 'OPEN_APP'}
+      clickActionData={uri ? { uri } : undefined}
       style={{
         height: 64,
         width: 'match_parent',

@@ -43,9 +43,11 @@ from core.views import (
     FavoriteToggleView,
     ImportJobStatusView,
     MovieAddView,
+    MovieRemoveView,
     MovieWatchlistView,
     MovieWatchStateToggleView,
     ShowAddView,
+    ShowRemoveView,
     TVTimeImportView,
     WatchlistView,
     WatchStateToggleView,
@@ -68,6 +70,7 @@ urlpatterns = [
     # Watchlist / tracking
     path("watchlist/", WatchlistView.as_view(), name="watchlist"),
     path("watchlist/add/", ShowAddView.as_view(), name="watchlist-add"),
+    path("watchlist/remove/", ShowRemoveView.as_view(), name="watchlist-remove"),
     path("watchlist/favorite/", FavoriteToggleView.as_view(), name="watchlist-favorite"),
     path(
         "watchlist/catchup-preference/",
@@ -87,6 +90,7 @@ urlpatterns = [
     path("notifications/preferences/", NotificationPreferenceView.as_view(), name="notification-preferences"),
     # Movies
     path("movies/watchlist/", MovieWatchlistView.as_view(), name="movies-watchlist"),
+    path("movies/watchlist/remove/", MovieRemoveView.as_view(), name="movies-watchlist-remove"),
     path("movies/watch-state/toggle/", MovieWatchStateToggleView.as_view(), name="movies-toggle"),
     path("movies/add/", MovieAddView.as_view(), name="movies-add"),
     # Data Import/Export
@@ -127,6 +131,8 @@ urlpatterns = [
     ),
     # Community & Social
     path("", include("core.comment_urls")),
+    # Reviews & Ratings (Phase L)
+    path("", include("core.review_urls")),
     # Analytics & Insights
     path("", include("core.analytics_urls")),
     # Movie Detail Suite (TMDB proxy)

@@ -1,3 +1,303 @@
+## 🟢 FINAL PERFORMANCE PASS + PRE-PUSH AUDIT + CONSOLIDATED DEVICE-VERIFICATION GAP LIST (2026-07-23, fix prompt's Phase M — closing phase of the Phase A–M batch)
+
+### 🟢 (a) Performance — re-verified fresh, not assumed
+Confirmed intact, untouched by any of Phases D–L: fire-and-forget `fetchWatchlist()` on the season/episode screens (Phase 37's fix), `DiscoverFeedView`'s `ThreadPoolExecutor` parallelization, `lib/api.ts`'s GET-only retry interceptor, the Celery Redis SSL gating. Re-investigated season-screen open latency as a genuinely fresh report (not assumed-already-fixed, per the fix prompt's own instruction): traced `loadSeason()`'s exact mount-time calls — identical to the Phase 37 fix, and no phase this session touched `season/[season].tsx` at all. Separately traced `app/show/[id].tsx` — the single most-edited file this session (Phases D/F/I) — and confirmed Phase L's new `RatingReviewCard` loads independently, behind its own local loading state, off the screen's critical path. No regression found.
+
+### 🟢 (b) Pre-push audit — every checklist item, all clean
+`pytest` 65/65 (33 baseline at session start + 32 new across Phases B/F/K/L); `manage.py check`/`makemigrations --check --dry-run` clean; `tsc --noEmit` — 2 errors, the same pre-existing baseline every phase this session confirmed, zero new. Hardcoded-color grep across every touched file found 2 new instances (`SeasonCard.tsx`'s Phase D checkmark) — confirmed via `git show HEAD:...` the file already had the identical pattern before this session (established photo-overlay convention), so these extend rather than violate it; same for 2 new `Trash2` icons in the show/movie header photo-overlay rows (Phase F), matching sibling icons exactly. Raw-`Pressable` grep found 2, both full-screen backdrop-dismiss catchers matching `CascadeModal.tsx`'s own established exception. `estimatedItemSize` grep: zero matches anywhere — Phase E's removal fully intact, nothing since reintroduced it. Debug-scaffolding grep (`console.log`/`TODO`/`FIXME`/`XXX`): none found. Every new backend endpoint this session confirmed `IsAuthenticated`. Zustand persist key (`watchtracker-store`) confirmed byte-identical to before this session. The one new dependency (`expo-font`, Phase J, explicitly authorized) confirmed via lockfile diff to be the only version touched — nothing else floated. No new `bulk_create` call introduced — the two new bulk deletes (`ShowRemoveView`/`MovieRemoveView`) are queryset `.delete()`, which doesn't implicate the create-only signal caveat.
+
+### 📋 CONSOLIDATED — everything not verifiable without a real device/emulator, across the entire Phase A–M batch
+This project's single biggest standing gap, kept visible here in one place per the fix prompt's own explicit closing instruction, rather than scattered across 13 separate phase reports:
+
+- **Phase A** (Shows Hub speed/correctness): the actual on-device speed improvement.
+- **Phase B** (TV Time import chunking): a real 300+ show end-to-end re-import against live TMDB.
+- **Phase C** (widget reliability): actual widget render reliability, real tap-through on both platforms, the corrected countdown/2-week window as they'd actually look on a home screen, the iOS rewrite's real visual output (SF Symbol glyph instead of poster, the `systemMedium` two-row layout).
+- **Phase D** (outside-row mark-season-watched): real tap behavior/animation, the checkmark's legibility against an arbitrary poster photo in both themes, the Catch-Up modal's on-screen appearance from this new entry point.
+- **Phase E** (dynamic card sizing): real on-screen card density/size at 3 columns across actual phone widths.
+- **Phase F** (remove/undo watchlist): real tap behavior on both detail screens, the new Snackbar message's on-screen timing/appearance, physically reproducing a network failure mid-remove to watch the rollback path fire live.
+- **Phase G** (Upcoming aired-but-untracked): the OVERDUE badge/red-text treatment's real on-screen appearance, tap feedback on both List/Grid rows, actual widget rendering of the new overdue items.
+- **Phase H** (language scroll fix + Anime filter): real scroll-reachability/gesture feel on an actual narrow screen, the Anime pill's legibility at its small on-screen size.
+- **Phase I** (no auto-redirect on add): real pill-flip timing/feel, the new Snackbar's appearance without a redirect happening alongside it.
+- **Phase J** (logout modal/login logo/Akony font): the modal's real entrance/backdrop-dismiss feel, the login logo's visual balance above the wordmark, and — the one that matters most for this specific phase — whether Akony actually renders as the custom font on a real device rather than silently falling back to the system font.
+- **Phase K** (Discover Hub filters/pagination): real infinite-scroll feel/threshold tuning, the new sort/language/anime pills' visual fit in the filter sheet, genuine live TMDB response shapes for the new filter combinations (all traced/tested against constructed data this session, never a live TMDB call).
+- **Phase L** (review/rating system): real star-tap feel (no custom animation was built beyond `PressableScale`'s existing press-scale, deliberately, per the "lightweight" instruction), the note field's on-screen keyboard/blur-save UX, genuine visual placement of the new card on both detail screens.
+- **Phase M** (this phase): by nature an audit-only phase — every finding in (a)/(b) above was verified via code tracing, `grep`, and test-suite proxies only, never a live running app build.
+
+No physical device or emulator was available at any point across this entire multi-phase session. Every fix across Phases A–M was verified by the strongest available proxy (`tsc --noEmit`, `manage.py check`, `pytest` inside Docker, and manual code tracing) — this list is the complete, itemized record of what that proxy verification could not reach.
+
+### Files (Phase M itself)
+`ROADMAP.md`, `context.md`, `PROJECT_STATUS.md`, `AUDIT.md` only — no code changes this phase.
+
+---
+
+## 🟢 NEW FEATURE — Review/rating system for shows and movies, private-by-default by design decision (2026-07-23, fix prompt's Phase L)
+
+### 🟢 Checked for overlap before building
+Read `MVPVotingSheet.tsx` (per-episode cast MVP voting) and `EmotionPicker.tsx` (per-episode reaction emoji, mirrors `EpisodeInteraction.Emotion`) live first, per the fix prompt's own instruction not to build a third parallel system. Both are genuinely episode-scoped, neither is a show/movie-level rating — the gap was real.
+
+### 🟡 Real decision made and documented — private vs. wired into Comment
+The fix prompt asked explicitly whether a written review should also become a `Comment` or stay separate. `Comment` is public/threaded/moderatable (likes, reports, soft-delete) — a fundamentally different object than a personal rating a user might want to leave privately. Decided **private-by-default, not wired into Comment** — the convention every comparable tracker (Letterboxd, Trakt, TV Time) uses, documented in `ShowReview`'s own model docstring. Low-stakes and easily reversible later (unlike Phase F's remove-semantics decision, which risked real data loss), so made directly rather than blocking on it.
+
+### ✅ RESOLVED — built
+New `ShowReview`/`MovieReview` models (1-5 validated rating, optional note, unique per user+title — `POST` upserts via `update_or_create` rather than accumulating duplicate rows), migration `0011`. Self-contained `core/review_serializers.py`/`review_views.py`/`review_urls.py`, included via the same pattern `comment_urls.py` already established, rather than growing the already-large `views.py`/`serializers.py`. `ShowReviewView`/`MovieReviewView` mirror `FavoriteToggleView`'s get-or-create-then-update convention; added list endpoints (paginated, matching `WatchHistoryView`) for the fix prompt's explicit "list" verb even though no frontend screen consumes them yet. Frontend: new `components/RatingReviewCard.tsx`, self-contained per detail screen (not a store slice — matches how cast/providers are already fetched locally on these same screens), 5 tappable stars wired straight to `POST` (optimistic, rolls back on failure), a note field revealed once rated and saved on blur (no separate Save button — "lightweight, not an over-built review-thread system" per the fix prompt), delete once a review exists. Wired into both `app/show/[id].tsx` and `app/movie/[id].tsx`.
+
+### Files
+`backend/core/models.py`, `backend/core/migrations/0011_moviereview_showreview.py`, `backend/core/review_serializers.py`/`review_views.py`/`review_urls.py` (new), `backend/core/urls.py`, `backend/core/tests/test_reviews.py` (new, 11 tests), `client-mobile/components/RatingReviewCard.tsx` (new), `client-mobile/app/show/[id].tsx`, `client-mobile/app/movie/[id].tsx`.
+
+### Verification
+`manage.py check`/`makemigrations --check --dry-run` clean, `pytest` — 65/65 (54 prior + 11 new: auth-required, 404-when-none, create-then-update-in-place, rating validation rejecting 0/6/-1/non-numeric, delete + re-delete-404, cross-user privacy, scoped+paginated list, movie-side full CRUD). `node --stack-size=8000 tsc --noEmit` — 2 errors, same pre-existing baseline, zero new. **Not verifiable this session:** no device — real star-tap feel, note field keyboard/blur-save UX, visual placement on both screens.
+
+---
+
+## 🟢 DISCOVER HUB AUDIT + 3 NEW FILTERS + REAL BUG FOUND & FIXED (pagination) (2026-07-23, fix prompt's Phase K — 6 sub-items)
+
+### 🟢 (a) Checked, doesn't reproduce
+"Trending stays underneath other filters" — `discover.tsx`'s `filterActive ? <flat grid> : <curated feed>` and `discoverStore.ts`'s `isFilterActive()` already correctly swap the whole feed the moment any non-default genre/sort is picked. No bug found; extended `isFilterActive()` to also cover the two new filters below rather than leaving them uncovered, but did not invent a change for an unreproducible symptom — documented explicitly, same category as Phase 45's stale premise.
+
+### ✅ RESOLVED — (b) Critically Acclaimed sort
+Reused "Top Rated"'s existing `vote_average.desc` + `vote_count.gte` anti-gaming pattern via a new configurable `min_vote_count` param on `TMDBService.discover_tv`/`discover_movies` (default 100 = unchanged existing behavior), with the new sort using `1000` — genuine broad consensus, not a raw average a single vote could game, per the fix prompt's own instruction to reuse this exact convention.
+
+### ✅ RESOLVED — (c) Discover language filter
+Own store state in `discoverStore.ts` (Discover browses live TMDB, not a cached watchlist like My Shows) but reuses `LanguageFilterModal`/its language-name map from Phase H, not a second picker. `DiscoverFilterView` passes `language=` to TMDB's `with_original_language` for non-trending sorts; trending (no `with_original_language` support, same TMDB limitation as genre) is Python-filtered via a new `include_original_language` flag on `get_trending()`, mirroring the existing `include_genre_ids` flag.
+
+### ✅ RESOLVED — (d) Anime filter, one definition reused, not two
+New `ANIME_GENRE_ID`/`ANIME_ORIGINAL_LANGUAGE` constants in `services.py` mirror `client-mobile/lib/anime.ts` exactly (Animation genre + Japanese language), expressed via TMDB's genre ID since /discover operates on IDs. ANDs onto `with_genres` (composes correctly with an explicit genre pick) and forces the language to Japanese, deliberately overriding a conflicting language selection — documented, not a silent surprise, and mirrored in the filter sheet's own UI so it can't show a contradictory state.
+
+### 🔴 REAL BUG FOUND & FIXED — (e) pagination
+"Some titles only shown": `UniversalSearchView` and `DiscoverFilterView` both already returned `page`/`total_pages` from the backend — the pagination infrastructure fully existed. `discoverStore.ts`'s `runSearch`/`fetchFilteredResults` only ever fetched page 1 and replaced results wholesale — a frontend-only gap, not a TMDB result-count ceiling. Fixed: new `loadMoreSearchResults`/`loadMoreFilteredResults` actions append subsequent pages; wired `onEndReached` on both `discover.tsx` grids with a shared `LoadMoreFooter` spinner.
+
+### 🟢 (f) Audit — clean
+`DiscoverFeedView`'s `ThreadPoolExecutor` parallelization untouched. Every TMDB call touched this phase still passes `use_cache=True` — confirmed the cache-key hash (`_request()`) already incorporates the full params dict, so new filter combinations get distinct cache entries with no collision risk. Manually traced then test-asserted genre+language, genre+anime, and trending+anime compositions.
+
+### Files
+`backend/core/services.py`, `backend/core/views.py`, `backend/core/tests/test_services.py` (3 new), `backend/core/tests/test_views.py` (7 new), `client-mobile/store/discoverStore.ts`, `client-mobile/components/DiscoverFilterSheet.tsx`, `client-mobile/components/LanguageFilterModal.tsx`, `client-mobile/app/(tabs)/discover.tsx`.
+
+### Verification
+`manage.py check`/`makemigrations --check --dry-run` clean, `pytest` — 54/54 (44 prior + 10 new). `node --stack-size=8000 tsc --noEmit` — 2 errors, same pre-existing baseline, zero new. **Not verifiable this session:** no device — real infinite-scroll feel, new pills' visual fit, genuine live TMDB responses for the new combinations.
+
+---
+
+## 🟡 GENERIC UI FOUND & REBUILT — logout confirmation was an unstyled native `Alert.alert`, plus new brand infrastructure (2026-07-23, fix prompt's Phase J)
+
+### 🟡 Found
+`app/settings.tsx`'s `handleLogout` called the bare OS-native `Alert.alert('Log Out', ...)` — not a themed component reading generically, an actual native OS dialog with zero app styling. Confirmed live before building a replacement.
+
+### ✅ RESOLVED — LogoutConfirmModal
+New `components/LogoutConfirmModal.tsx`, matching `CascadeModal.tsx`/`BadgeUnlockModal.tsx`'s established pattern (read both live first): `c.glassFill`/`c.hairline` card, `BlurView`, `rgba(0,0,0,0.6)` backdrop — the correct convention per the fix prompt's own callout, versus the `0.85` a past phase already fixed elsewhere. (Noted, not touched: `BadgeUnlockModal.tsx` itself actually uses `0.5`, a third inconsistent value — out of this phase's scope.) Confirm button uses Cinema Neon Yellow (`c.accentFill`), per explicit instruction, deliberately not the more obvious red "destructive" treatment. `performLogout`/`clearWidgetData()` untouched — visual/UX swap only, no behavior change.
+
+### ✅ RESOLVED — login logo
+Added the real `assets/Glix.png` (Phase 30's own asset, confirmed unchanged, not regenerated) above the login screen's existing wordmark.
+
+### 🟡 New infrastructure added deliberately, not silently — "Akony" font
+Confirmed `assets/fonts/AKONY.ttf` is a genuine TrueType font (family "AKONY Bold") before proceeding — not a placeholder, so no need to stop and ask the user for it. Confirmed no `expo-font` dependency existed anywhere in the project before this phase (genuinely new infra, matching the fix prompt's own warning). Added via `npx expo install expo-font` — resolved the SDK-54-correct `~14.0.12` automatically rather than guessing a version, per this project's own pinned-dependency discipline. Wired via `useFonts` in `app/_layout.tsx`, gating the native splash hide and first paint. Grepped the entire `app/` tree for every literal "Glix" wordmark rendering before applying anything: exactly two exist (`login.tsx`, `AnimatedSplash.tsx`'s per-letter reveal) — applied to both, with `fontWeight: 'normal'` explicitly set at each site (Akony is single-weight-Bold-only; a numeric `fontWeight` on a custom single-weight font is a known iOS fallback-to-system-font gotcha). `register.tsx` has no existing wordmark to restyle — deliberately left alone rather than inventing new UI just to have something to apply the font to; stated here explicitly rather than silently under-delivering against the fix prompt's phrasing.
+
+### Files
+`client-mobile/components/LogoutConfirmModal.tsx` (new), `client-mobile/app/settings.tsx`, `client-mobile/app/login.tsx`, `client-mobile/app/_layout.tsx`, `client-mobile/components/AnimatedSplash.tsx`, `client-mobile/package.json`/`package-lock.json`/`app.json`.
+
+### Verification
+`node --stack-size=8000 tsc --noEmit` — 2 errors, same pre-existing baseline, zero new. Confirmed the dependency diff is minimal and expected. **Not verifiable this session:** no device — modal feel, logo balance, and whether Akony actually renders instead of silently falling back to the system font.
+
+---
+
+## 🟢 UX FIX — Add-to-Watchlist forced navigation away from the screen the user was already on (2026-07-23, fix prompt's Phase I)
+
+### Found
+`app/show/[id].tsx`'s `handleAddToWatchlist` and `app/movie/[id].tsx`'s `handlePrimaryAction` both `router.replace`d to the Shows/Movies Hub on every successful add — exactly as described, confirmed live.
+
+### 🟡 Scope question resolved by reading the code, not by guessing or asking unnecessarily
+The fix prompt asked to check whether `onboarding.tsx`'s own add-then-navigate flow should be exempted. Read it: it bulk-adds every selected show via `Promise.all(...)` then navigates once, as the deliberate final step of onboarding — not the same per-item-tap code path this bug report describes, and not ambiguous once read. Left untouched.
+
+### ✅ RESOLVED
+Removed the `router.replace` calls from both detail screens. Confirmed the "Add to Watchlist" pill/icon already flips to its tracked state in place with no new logic required — it was already driven by `watchlistEntry`/`isInWatchlist` reactively, just previously invisible behind the immediate redirect. Added a `Snackbar` confirmation ("Added to Watchlist") to both screens, reusing the same component already established for this purpose. Rollback behavior (`addShowToWatchlist`/`addMovieToWatchlist`'s existing `Promise<boolean>`) untouched — `success` now gates the confirmation instead of the navigation.
+
+### Files
+`client-mobile/app/show/[id].tsx`, `client-mobile/app/movie/[id].tsx`.
+
+### Verification
+`node --stack-size=8000 tsc --noEmit` — 2 errors, same pre-existing baseline, zero new. Manual trace of both add paths. **Not verifiable this session:** no device — real pill-flip timing and Snackbar appearance.
+
+---
+
+## 🔴 REAL BUG FOUND & FIXED — My Shows/My Movies filter pill row had no scroll mechanism at all, not just insufficient scroll distance (2026-07-23, fix prompt's Phase H)
+
+### 🔴 Root cause
+`styles.pillRow` on both `profile/shows.tsx` and `profile/movies.tsx` was a plain `flexDirection:'row'` `View` — no `ScrollView`, no `flexWrap`. Once the status pills plus the Language pill exceeded the screen's width, everything past the visible edge was simply clipped off-screen with no way to reach it at all — confirmed by reading both files live, not assumed to be a scroll-distance tuning issue as the symptom's phrasing might suggest.
+
+### ✅ RESOLVED
+Wrapped both screens' pill rows in a horizontal `ScrollView` (`showsHorizontalScrollIndicator={false}`, the existing `pillRow` style reused unchanged as `contentContainerStyle`) — the same convention the Shows Hub's own filter-pill row already uses elsewhere in the app. Confirmed both screens shared the identical broken pattern before fixing both, per the fix prompt's own "apply to both if both share the pattern" instruction.
+
+### ✅ RESOLVED — new Anime filter, heuristic documented explicitly
+Added an Anime filter pill to both screens, 100% client-side over the already-loaded watchlist (matching Language's own no-new-API-request convention). TMDB has no dedicated "Anime" genre, so per the fix prompt's own instruction to decide and document the exact heuristic: new shared `client-mobile/lib/anime.ts` uses the `Animation` genre (TMDB's own exact genre name — confirmed against `backend/core/services.py`'s `g["name"]`, not internally renamed) combined with `original_language === 'ja'`. Deliberately excludes a Western-produced animated show (Animation + `en`) and a live-action Japanese drama (`ja`, no Animation genre) — both real titles that must not match. Verified against known real titles (no live TMDB query available this session, reasoned instead — stated explicitly): Attack on Titan/Death Note/One Piece correctly match; Rick and Morty/The Simpsons correctly don't; a live-action Japanese drama correctly doesn't either. Built as a shared module, not inlined per-screen, specifically so Phase K's Discover Hub filter reuses the identical definition.
+
+### Files
+`client-mobile/lib/anime.ts` (new), `client-mobile/app/profile/shows.tsx`, `client-mobile/app/profile/movies.tsx`.
+
+### Verification
+`node --stack-size=8000 tsc --noEmit` — 2 errors, same pre-existing baseline, zero new. **Not verifiable this session:** no device — actual scroll-reachability/gesture feel on a real narrow screen.
+
+---
+
+## 🔴 REAL BUG FOUND & FIXED — aired-but-unwatched episodes silently vanished from the Upcoming tab (2026-07-23, fix prompt's Phase G)
+
+### 🔴 Root cause
+`buildUpcomingItems()` (`lib/upcoming.ts`) unconditionally skipped any episode with `air_date < todayIso` in its main loop — the moment an aired episode's date passed without the user marking it watched, it fell out of the list forever, with no way to tell it apart from "already watched." This function is the one shared source for both the in-app Upcoming tab and the widget's `syncWidgetData()` bridge (confirmed live before assuming a second fix would be needed elsewhere).
+
+### ✅ RESOLVED
+Added one "next unwatched" episode per show — same earliest-aired-unwatched definition `pickNextEpisode()` already uses — as an explicit overdue item once its air date passes, instead of dropping it. Deliberately one item per show, not the full unwatched backlog, per the fix prompt's own "for as long as it remains the show's next unwatched episode" phrasing. `formatUpcomingHeaderLabel()` gained an explicit `OVERDUE` bucket (previously fell into "LATER," which reads as future). Both `UpcomingRow` (List) and the Grid card's `ShowPosterCard` gained an inline mark-watched control, gated on `isAired` (matches `WatchStateToggleView`'s own server-side "hasn't aired yet" gate) and wired through a thin `handleUpcomingMarkWatched()` wrapper around the already-existing catch-up-aware `handleGridCheckPress` — no new toggle implementation. Shows Hub bucketing (Phase 41/A) needed no changes, confirmed by tracing: it already derives from `pickNextEpisode()`/`air_date`/`last_watched_at` independent of the Upcoming tab's filtering. The widget inherits the fix automatically since it consumes the same unmodified `buildUpcomingItems()`.
+
+### Files
+`client-mobile/lib/upcoming.ts`, `client-mobile/lib/dateFormat.ts`, `client-mobile/app/(tabs)/index.tsx`.
+
+### Verification
+`node --stack-size=8000 tsc --noEmit` — 2 errors, same pre-existing baseline, zero new. Manual trace of both requested scenarios (episode aired 2 days ago → OVERDUE item with working mark-watched control; marking it → show's Shows-Hub pill and the Upcoming list both update in the same render via the existing `toggleWatchState` optimistic update). **Not verifiable this session:** no device — the OVERDUE badge's real on-screen treatment, tap feedback on both List/Grid rows, actual widget rendering.
+
+---
+
+## 🔴 REAL GAP FOUND & FIXED — no way to remove a show/movie from the watchlist at all, backend or frontend (2026-07-23, fix prompt's Phase F)
+
+### 🔴 Root cause
+`urls.py` had `watchlist/add/`/`movies/add/` but no `DELETE`-style counterpart anywhere — checked live before assuming, per the standing rule, since the fix prompt explicitly flagged this could turn out to be a broken frontend handler instead of a missing endpoint. It wasn't: the gap was total, both sides.
+
+### 🟡 Real data-modeling decision, surfaced rather than guessed
+Does removing a title also delete the user's episode-level watch history (`WatchState`/`MovieWatchState`), or only untrack it while preserving those marks? Both are defensible, and picking wrong silently would mean either unexpectedly wiping data or an Undo that can't fully restore what the user actually had. Asked the user directly rather than deciding silently — answer: **full delete**. `Watchlist.status=ARCHIVED` already covers the separate "hide but keep everything" case, so this isn't redundant with an existing option.
+
+### ✅ RESOLVED — backend
+New `ShowRemoveView` (`DELETE /api/watchlist/remove/`, `{show_id}`) and `MovieRemoveView` (`DELETE /api/movies/watchlist/remove/`, `{movie_id}`), both `IsAuthenticated`, both inside `transaction.atomic()` + `select_for_update()` on the profile row — same locking pattern `WatchStateToggleView`/`BulkWatchStateToggleView` already use. Each captures the user's full `WatchState`/`MovieWatchState` set for that title server-side (not whatever happened to be cached client-side — same "server is the source of truth" reasoning `CatchupCheckView` already established) before deleting both the state rows and the `Watchlist`/`MovieWatchlist` join row, and decrements `total_time_watched` via the identical `F()`-expression + non-negative-floor pattern the toggle views use. `earned_badges` is deliberately left untouched — badges are additive-only everywhere else in this codebase (the toggle endpoints never revoke one on an un-watch either), so remove shouldn't be the one exception. The response returns exactly what was deleted (`watched_episode_ids`, `was_favorite`, `was_status`, `was_ignore_catchup` / `was_watched`) so the frontend can restore it precisely on Undo.
+
+### ✅ RESOLVED — frontend
+`watchStore.ts` gained `removeShowFromWatchlist`/`undoRemoveShow` and `removeMovieFromWatchlist`/`undoRemoveMovie`. Remove optimistically strips the entry from every relevant bucket immediately (Shows Hub + Upcoming update in place, both already derive from the same buckets), then resyncs the widget and profile stats on success — the fourth downstream consumer from the fix prompt's own checklist — or rolls back on failure. Undo replays the server snapshot exactly: re-add, restore favorite/archived/ignore-catchup, then `bulkToggleWatchState` the exact episode ids returned (hits the real backend regardless of local cache completeness, so it's correct even for seasons the freshly-re-added entry hasn't re-cached yet), followed by a `fetchWatchlist()` to reconcile visible progress. Deliberately the same "act now, offer a real reversal" pattern as the Catch-Up cascade's own Undo, reusing `components/Snackbar.tsx` rather than building a second toast component, per the fix prompt's own instruction. Surfaced via a `Trash2` icon in the existing header-icon-row convention on both `app/show/[id].tsx` (alongside Archive/Favorite) and `app/movie/[id].tsx` (alongside the add/watched-toggle icon) — no new interaction pattern introduced.
+
+### 🟡 Correctness gap caught while wiring it up
+`app/show/[id].tsx`'s local `isFavorite`/`isArchived` state only ever synced when `watchlistEntry` was truthy — previously the only way that entry went from set to null was navigating away entirely, so it never went stale *in place*. Now that Remove can null it out without leaving the screen, the effect needed an explicit else-branch reset to `false`, or the Heart/Archive icons would keep showing a stale favorited/archived state after a remove. Fixed alongside the main change.
+
+### Files
+`backend/core/views.py` (`ShowRemoveView`, `MovieRemoveView`), `backend/core/urls.py`, `backend/core/tests/test_views.py` (6 new tests), `client-mobile/store/watchStore.ts`, `client-mobile/app/show/[id].tsx`, `client-mobile/app/movie/[id].tsx`.
+
+### Verification
+`manage.py check` clean, `makemigrations --check --dry-run` clean (no model changes), `pytest` inside `watchtracker_backend` — 44/44 (38 prior + 6 new). `node --stack-size=8000 tsc --noEmit` — 2 errors, same pre-existing baseline, zero new. **Not verifiable this session:** no device — real tap behavior on both detail screens, the new Snackbar message's on-screen appearance, and physically reproducing a network failure mid-remove to watch the rollback path fire live.
+
+---
+
+## 🟡 STALE ASSUMPTION FOUND & CORRECTED — `estimatedItemSize` is dead code against the installed FlashList version; real "cards too large" cause was `numColumns` (2026-07-23, fix prompt's Phase E)
+
+### 🟡 The fix prompt's own premise didn't hold against the live dependency
+Every phase back through 39 treated the 9 hardcoded `estimatedItemSize` call sites as needing a corrected *value* (a `Dimensions`-driven computation matching `discover.tsx`'s own `CARD_WIDTH` pattern) to fix a mismatched-estimate bug — the same framing this fix prompt's Phase E arrived with. Checked the installed `@shopify/flash-list` version directly before writing anything: `2.0.2`, which is FlashList v2. Its `FlashListProps.d.ts` has no `estimatedItemSize` field, its runtime `.js` source has zero references to the string anywhere in the package, and its own README states outright: "Unlike v1, FlashList v2 automatically handles item sizing... doesn't require any estimates." The prop had been fully inert this whole time — the `tsc` excess-property errors it caused had been filed under "FlashList typing gap" every phase since 39, without anyone checking why the type didn't declare it.
+
+### ✅ RESOLVED
+Removed all 9 `estimatedItemSize` props (`app/(tabs)/index.tsx` ×2, `app/(tabs)/movies.tsx`, `app/profile/shows.tsx`, `app/profile/movies.tsx`, `app/(tabs)/discover.tsx` ×2, `components/HorizontalMediaList.tsx`) rather than computing new values for a prop with zero effect. This alone eliminates the entire error category from the `tsc` baseline (11 → 2).
+
+### 🔴 Root cause of the real symptom ("cards too large, forcing extra scrolling")
+Since the estimate never controlled anything visually, the actual cause had to be the cards' real rendered size. The 5 `ShowPosterCard`/`MoviePosterCard` grid FlashLists (Shows Hub, Movies Hub, Profile Shows/Movies, Upcoming tab grid) all ran `numColumns={preferredLayout === 'grid' ? 2 : 1}`, rendering noticeably larger posters (both wider and, via `aspectRatio: 2/3`, taller) than `discover.tsx`'s own already-shipped `SearchResultCard` grids, which use `numColumns={3}` for materially the same poster+title+subtitle content.
+
+### ✅ RESOLVED
+Bumped all 5 sites to `numColumns={3}`, matching the app's own established Discover convention. No component-level changes needed — `ShowPosterCard`/`MoviePosterCard` already size via `flex:1`/`aspectRatio`, not a fixed pixel width, so FlashList's column math alone does the resizing. **Flagged plainly, not silently folded in:** this is a visible density change across 5 screens — if 2-column spacing was a deliberate "larger, more prominent poster" choice on any of them, it's an easy, isolated revert.
+
+### 🟢 Investigated and ruled out (Upcoming tab's specific complaint)
+The fix prompt's own alternate hypotheses — "a card rendering more content than it needs to" or "fixed padding/margins that don't collapse when a show has fewer upcoming episodes" — don't apply to the current architecture: the Upcoming tab's list-mode row (`UpcomingRow`) is a flat, already-lean 110px per-episode row (80px poster + 10px padding ×2) with no per-show variable-content container to fail to collapse. The complaint maps to the grid view, covered by the `numColumns` fix above.
+
+### Files
+`client-mobile/app/(tabs)/index.tsx`, `client-mobile/app/(tabs)/movies.tsx`, `client-mobile/app/profile/shows.tsx`, `client-mobile/app/profile/movies.tsx`, `client-mobile/app/(tabs)/discover.tsx`, `client-mobile/components/HorizontalMediaList.tsx`.
+
+### Verification
+`node --stack-size=8000 tsc --noEmit` — 2 errors, both pre-existing baseline, zero new (down from 11). **Not verifiable this session:** no device — real on-screen density at 3 columns.
+
+---
+
+## 🔴 REAL BUG FOUND & FIXED — Season screen: no way to mark a season watched without opening it, and `SeasonCard` never showed real progress (2026-07-23, fix prompt's Phase D)
+
+### 🔴 Root cause
+`app/show/[id].tsx` rendered every `SeasonCard` without `episodeCount`/`watchedCount` props — the component already supported a progress display, the screen simply never fetched or passed the data, so every row silently read "Tap to view episodes" regardless of true watched state. There was also no affordance to mark/unmark a season from this screen — the only working Mark/Unmark Season Watched control lived inside the season screen itself.
+
+### ✅ RESOLVED
+`app/show/[id].tsx` now derives per-season `{episodeCount, watchedCount}` from `watchlistEntry.show.episodes` (the same field `lib/upcoming.ts` reads), filtered through the app's standard local-midnight `todayLocalIso()` "aired" rule — a season never opened by the user is simply absent from the map, preserving the existing "Tap to view episodes" fallback. `SeasonCard` gained an optional `onToggleWatched`/`isTogglingWatched` prop pair rendering a 28px checkmark circle matching `EpisodeRow`'s existing checkmark iconography exactly (filled `accentFill`+`Check` when fully watched, plain outline otherwise) — omitted when the show isn't in the watchlist. The tap handler re-fetches the season fresh via the same `GET /shows/<id>/season/<n>/` the season screen itself calls (not trusting a possibly-stale local cache), then routes through the season screen's own exact logic: un-watch goes straight to `bulkToggleWatchState`; watch goes through `useCatchupCascade().checkSeason()` first, same `CascadeModal`/Undo `Snackbar` UX, now also rendered on this screen. No second "mark season watched" implementation.
+
+### 🟡 Self-caught before shipping: hook-ordering TDZ bug
+The new hooks were initially written before `displayShow`'s own `const` declaration further down the same component — and the new callbacks' dependency arrays reference `displayShow`. That's a real temporal-dead-zone `ReferenceError` at render time (the show screen would have crashed on open), not a style nit. Caught during self-review of the edited file's structure; fixed by moving `displayShow`'s definition earlier, still ahead of the component's two conditional early-returns (Rules-of-Hooks compliant).
+
+### Files
+`client-mobile/components/SeasonCard.tsx`, `client-mobile/app/show/[id].tsx`.
+
+### Verification
+`node --stack-size=8000 tsc --noEmit` — 11 errors, identical to the Phase 43 baseline, zero new. **Not verifiable this session:** no device — real tap behavior/animation, checkmark legibility over an arbitrary poster photo, and the Catch-Up modal's appearance from this new entry point.
+
+---
+
+## 🔴 REAL BUG FOUND & FIXED — Home-screen widget: missing sync call site, backgrounding race, show-only tap-through, no countdown, top-5-not-2-weeks (2026-07-23, fix prompt's Phase C)
+
+### 🔴 Root cause 1 (reliability): `addShowToWatchlist` never called `syncWidgetData()`
+Grepped every call site of `syncWidgetData()`/`clearWidgetData()` repo-wide (per the standing "check all entry points" rule) rather than trusting `store/watchStore.ts`'s own inline comments claiming 3 call sites. A freshly-added show updated the in-memory store fine but never reached the widget — it stayed silently missing from "Next Up" until some unrelated toggle or a full `fetchWatchlist()` happened to resync it.
+
+### 🔴 Root cause 2 (reliability): a fire-and-forget write can lose the race against the app backgrounding
+Phase 37 deliberately made the season/episode screens' post-toggle `fetchWatchlist()` calls fire-and-forget (a real, correct latency fix — not itself a bug). But no `AppState` listener existed anywhere in the app, so if the user backgrounds the app immediately after marking something watched, that in-flight write can lose the race against process suspension, leaving the widget stale with no other trigger to catch it up.
+
+### ✅ RESOLVED (reliability)
+`addShowToWatchlist` now calls `get().syncWidgetData()` after its optimistic update. New `AppState.addEventListener('change', ...)` in `app/_layout.tsx`, gated on `isAuthenticated`, calls `syncWidgetData()` (no network call — just flushes current in-memory state) the moment the app transitions to `'background'`, closing the race window. `widgets/android/WidgetProvider.tsx`'s native-triggered `requestWidgetUpdate()` calls were also unguarded (no `.catch()`/try-catch) — wrapped, matching the defensive pattern `syncWidgetData()` already used, so a transient failure during an OS-triggered redraw can't go unhandled.
+
+### 🔴 Root cause 3: every widget row deep-linked to the show, never the specific episode
+`lib/upcoming.ts`'s `UpcomingItem` had no episode identifier at all, so both Android widgets could only ever build `watchtracker://show/<id>`.
+
+### ✅ RESOLVED
+`UpcomingItem` gained `episodeId: number | null` (the real `CachedEpisode` tmdb_id when cached, null for the synthetic `next_episode_to_air` item with no cached row yet); `pickNextEpisode()`'s return already carried a real id. Both Android widget row components now build `watchtracker://episode/<id>` first, falling back to the show link, falling back to opening the app. `app/episode/[id].tsx` needed no new `Stack.Screen` registration — Expo Router's file-based routing doesn't require one for deep-link reachability (confirmed against `expo-router`'s own routing model).
+
+### 🔴 Root cause 4: no countdown, and a flat top-5 instead of a real 2-week window
+The Upcoming ("Airing Soon") widget rendered a bare formatted date, and `syncWidgetData()` sliced to a flat top-5 regardless of how many episodes were actually airing soon.
+
+### ✅ RESOLVED
+Countdown text is now precomputed once per sync via the exact `formatCountdown()` (`lib/dateFormat.ts`) the in-app Upcoming tab uses (`"Xd XXh XXm (Weekday)"`) — a native widget can't run a live per-second tick the way `UpcomingRow`'s `useNow` does, so it's baked in at sync time instead. The flat `.slice(0, 5)` became a real 14-day window (`buildUpcomingItems().filter(airDate <= +14d).slice(0, 30)`); Android's `ListWidget` already scrolls, so it now actually reaches everything in that window.
+
+### 🔴 Found en route, more serious than the stated ask: the entire iOS widget implementation was silently broken against the installed `@expo/ui@~0.2.0-beta.9`
+Adding `episode_id`/`countdown` to the iOS props surfaced via `tsc --noEmit` that **neither iOS widget file type-checked at all** — this wasn't new breakage from this pass; every prior phase had been quietly absorbing this as part of the documented "~16 `@expo/ui` widget prop type" baseline without anyone actually reading what the errors said. Checked the package's own live type defs directly (per `AGENTS.md`'s "Expo has changed, read the real docs" standing rule, not assumed from memory): `Image` now only renders SF Symbols via `systemName` — `ImageProps` has no `source`/URL field at all, meaning **no remote-image loading exists anywhere in this package version** — and `Text`/`VStack`/`HStack` dropped their `color`/`font`/`style` props entirely in favor of a `modifiers` array (`foregroundColor()`/`font()`/`background()`/`padding()`/`lineLimit()` from `@expo/ui/swift-ui/modifiers`).
+
+### ✅ RESOLVED
+Both `widgets/ios/WatchlistWidget.tsx`/`UpcomingWidget.tsx` fully rewritten against the real current API. TMDB posters can no longer render on iOS at all — a real capability loss in the dependency version, not a regression introduced here — a generic SF Symbol glyph (`tv.fill` / `calendar.badge.clock`) stands in, documented inline. `createWidget`'s layout function already receives a `WidgetEnvironment` with `widgetFamily`, previously never consumed by either file — both now render a compact second row on `systemMedium` instead of hard-coding `props.watchlist?.[0]`/`props.upcoming?.[0]`.
+
+### 🟡 Documented, deliberate platform limitation — not a gap in this fix
+WidgetKit itself has no scrolling in home-screen widgets, full stop — not a version-specific gap, not fixable by any dependency choice. `app.json`'s `supportedFamilies` for both iOS widgets is `["systemSmall", "systemMedium"]` (no `systemLarge`), and those two share the same fixed widget height — so a compact second row on `systemMedium`, not a real "2-week list," is the actual achievable ceiling on iOS. The Android side, whose `ListWidget` genuinely scrolls, is where the 2-week window fix has real effect.
+
+### 🟢 Re-confirmed, not re-guessed: iOS tap-through is still genuinely unfixable from this repo
+Checked `expo-widgets@57.0.3`'s live `Widgets.d.ts`/`index.d.ts` directly rather than trusting Phase 36's finding as still true by default — `createWidget` still has no `widgetURL`/`Link`/tap-to-open mechanism; only `LiveActivityFactory.start(props, url?)` accepts a URL, and that's Live-Activity-only, unrelated to home-screen widgets. Same conclusion Phase 36 reached, now independently re-verified against the currently installed version.
+
+Files: `client-mobile/lib/upcoming.ts`, `client-mobile/store/watchStore.ts`, `client-mobile/app/_layout.tsx`, `client-mobile/widgets/android/WidgetProvider.tsx`, `client-mobile/widgets/android/WatchlistWidget.tsx`, `client-mobile/widgets/android/UpcomingWidget.tsx`, `client-mobile/widgets/ios/WatchlistWidget.tsx` (full rewrite), `client-mobile/widgets/ios/UpcomingWidget.tsx` (full rewrite). Verified: `node --stack-size=8000 tsc --noEmit` — **11 errors, down from the prior baseline** (the iOS rewrite eliminated its own ~16-error category outright, confirmed by file name that none of the 11 remaining come from any file touched this phase — they're the pre-existing FlashList `estimatedItemSize` gap ×9, `HeroCarousel.tsx`'s ref type, and the stale `watchStore.test.ts` reference). Not verifiable this session: no Android/iOS device or emulator — actual widget render reliability, real tap-through on both platforms, and the iOS rewrite's real visual output are all reasoned from live type defs and code tracing only, never seen rendering.
+
+---
+
+## 🔴 REAL BUG FOUND & FIXED — TV Time import: no clean resume after `SoftTimeLimitExceeded`, re-runs blindly reprocessed everything (2026-07-23, fix prompt's Phase B)
+
+### 🔴 Root cause (no clean resume)
+`run_tvtime_import` processed a whole export (up to ~1,100 sequential TMDB calls) as one Celery invocation under `soft_time_limit=1500`/`time_limit=1560`. On a 300+ show library the soft limit fired mid-run — caught either by the per-item `except Exception` (wasting remaining time re-attempting already-slow calls) or the outer one (job → FAILED) — but the code unconditionally did `job.payload = {}` at the very end **regardless of status**, destroying the only record of what still needed processing. A resubmission had neither a cursor nor the original payload to resume from, so it necessarily restarted at item 0.
+
+### 🔴 Root cause (no diff-awareness)
+`_import_one_show` already skipped duplicate DB writes (`already` = existing `WatchState` ids) but built `season_numbers` from the full `wanted` set *before* checking that — so a show already 100% imported and marked in a prior run still re-fetched every watched season from TMDB on every resubmission instead of being skipped outright.
+
+### ✅ RESOLVED
+Chunked `run_tvtime_import` to `IMPORT_CHUNK_SIZE=10` items/invocation, re-enqueuing itself (`apply_async(countdown=1)`) when work remains instead of looping through the whole payload; `job.processed` (already persisted per-item) doubles as the resume cursor. `soft_time_limit`/`time_limit` dropped 1500s/1560s → 300s/330s, sized for one chunk. Only a `SUCCESS` job clears `payload` now — a `FAILED` job (chunk timeout, or the pre-existing orphaned-job close-out) keeps both `payload` and `processed`. `_import_one_show` now diffs `wanted` against already-cached-and-marked (season, episode) pairs before touching TMDB, skipping the season fetch entirely when nothing's left to mark. `TVTimeImportView.post` resumes the user's latest `FAILED` job in place when its `payload` is byte-identical to the resubmission and `processed > 0`; a different payload still starts fresh.
+
+### 🟡 Documented, deliberate scope boundary
+Zero-cost diffing (skipping the TMDB id-resolution call itself) isn't achievable without indexing `CachedShow` by `tvdb_id`/`imdb_id`, which doesn't exist today — out of this phase's ask (compare against the existing DB, not add new schema). One id-resolution call per show remains unavoidable on every re-run; everything downstream of it is now correctly skipped when already done.
+
+### ✅ Also fixed, unrelated, found en route
+The dev Postgres container was missing an already-committed migration (`0009_importjob_updated_at`) — never applied to this container's volume, which is why the first `pytest` run this phase failed with `UndefinedColumn: "updated_at"`. Ran `manage.py migrate` to apply it (plus this phase's own `0010_alter_importjob_payload`, a `help_text`-only correction).
+
+Files: `backend/core/tasks.py`, `backend/core/views.py`, `backend/core/models.py`, `backend/core/migrations/0010_alter_importjob_payload.py`, new `backend/core/tests/test_tvtime_import.py`. Verified: `pytest` 39/39 (33 baseline + 6 new), `manage.py check` clean, `makemigrations --check --dry-run` clean. A real 300+ show end-to-end re-import against live TMDB is unverifiable without a device/running backend session — verified instead via code tracing + a simulated-interruption/resume/diff test suite against a faked TMDB network boundary.
+
+---
+
+## 🔴 REAL BUG FOUND & FIXED — Shows Hub status pill: started shows landed in "Haven't Watched For A While" instead of "Watch Next" (2026-07-23, fix prompt's Phase A)
+
+### 🔴 Root cause
+`app/(tabs)/index.tsx`'s `buildRows()` buckets a started show (watched > 0, below up-to-date) by recency: WATCH NEXT if the next unwatched episode aired ≤14d ago ("fresh drop") or `entry.last_watched_at` is ≤14d old, else HAVEN'T WATCHED FOR A WHILE — and if `last_watched_at` is **null**, it falls straight through to HAVEN'T WATCHED FOR A WHILE. The optimistic mark-watched reducers in `store/watchStore.ts` (`toggleWatchState`, `bulkToggleWatchState`) updated `watched_episode_count`/`progress_percentage` but **never `last_watched_at`**; the toggle endpoints don't return it either. Marking the first episode of a back-catalog show (next episode aired >14d ago) therefore left `last_watched_at` null → the show jumped to HAVEN'T WATCHED FOR A WHILE, and on the Shows Hub (no post-toggle `fetchWatchlist()`) stayed there until an unrelated refetch. Currently-airing shows hit the fresh-drop branch first, so only back-catalog shows showed the bug — reading as intermittent.
+
+### ✅ RESOLVED
+Both reducers now set `last_watched_at = new Date().toISOString()` on mark-watched (touched entry only, watch direction only; un-mark leaves it for the server to reconcile). A just-watched show reads as "watched now" → WATCH NEXT immediately, no pull-to-refresh. Verified `tsc` at 30-error baseline (zero new), 6-scenario manual trace. Files: `store/watchStore.ts`, `app/(tabs)/index.tsx`. On-device speed/feel unverifiable (no device).
+
+### ✅ Also fixed (perf): Shows Hub re-rendered every second on the WATCH LIST tab
+`useNow(1000)` (always-mounted default tab) re-rendered the whole heavy FlashList once a second for a live countdown only UPCOMING shows. Gated to `activeTab === 'upcoming' && upcomingView === 'list'`. Memoization + scoped selectors were already correct (Phase 34), so this was the one remaining concrete waste.
+
+### 🟡 Noted, pre-existing, deferred to the Phase M cleanup pass
+`__tests__/watchStore.test.ts` asserts `state.isLoading` (removed field; the store uses `isLoadingWatchlist`) — one of the 30 baseline `tsc` errors, and it makes the only frontend store test stale. Not in Phase A scope; flagged for the pre-push audit.
+
+---
+
 ## 🟢 AUDITED, NO CODE CHANGE + 🔴 REAL BUG FOUND & FIXED — Google Sign-In final-touches audit + overall pre-push verification (2026-07-22, fix prompt's Phase 6, P4, plus the closing "test everything before push" pass)
 
 ### 🟢 Phase 6 (Google Sign-In, P4): re-audited end-to-end, nothing left to fix in-repo

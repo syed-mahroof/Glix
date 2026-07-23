@@ -1,11 +1,12 @@
 // client-mobile/app/_layout.tsx
 import { ThemeProvider } from '@react-navigation/native';
+import { useFonts } from 'expo-font';
 import { Stack, useRouter } from 'expo-router';
 import * as SecureStore from 'expo-secure-store';
 import * as SplashScreen from 'expo-splash-screen';
 import { StatusBar } from 'expo-status-bar';
 import React, { useEffect, useState } from 'react';
-import { ActivityIndicator, StyleSheet, View } from 'react-native';
+import { ActivityIndicator, AppState, StyleSheet, View } from 'react-native';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 
@@ -57,9 +58,21 @@ function RootLayoutInner() {
   const unlockedBadges = useWatchStore((s) => s.unlockedBadges);
   const popUnlockedBadge = useWatchStore((s) => s.popUnlockedBadge);
 
+  // "Akony" wordmark font (Phase J) — no custom font asset was loaded
+  // anywhere in this app before this phase, so this is genuinely new
+  // infrastructure, not a one-line style tweak. Gated the same way as the
+  // auth check below: native splash stays up (and the Stack stays
+  // unmounted) until this resolves, so the login screen's first paint
+  // never flashes the system font before Akony pops in.
+  const [fontsLoaded, fontError] = useFonts({
+    Akony: require('../assets/fonts/AKONY.ttf'),
+  });
+
   useEffect(() => {
-    SplashScreen.hideAsync().catch(() => {});
-  }, []);
+    if (fontsLoaded || fontError) {
+      SplashScreen.hideAsync().catch(() => {});
+    }
+  }, [fontsLoaded, fontError]);
 
   useEffect(() => {
     let isMounted = true;
@@ -111,12 +124,38 @@ function RootLayoutInner() {
     return () => setSessionExpiredHandler(null);
   }, [router]);
 
+  useEffect(() => {
+    // The widget is only ever written to by explicit in-app actions
+    // (fetchWatchlist/toggle/add — store/watchStore.ts). Those are mostly
+    // fire-and-forget (Phase 37's latency fix), so if the user backgrounds
+    // the app right after marking something watched, the write can lose
+    // the race against the process being suspended, leaving the widget
+    // stale until some other action happens to resync it. Proactively
+    // resyncing from whatever's already in memory the moment the app
+    // actually leaves the foreground closes that gap — no network call,
+    // just flushes current store state to the widget one more time before
+    // the OS potentially suspends the process. Gated on auth so a
+    // logged-out background doesn't push stale/empty pre-login state.
+    if (!isAuthenticated) return;
+    const subscription = AppState.addEventListener('change', (nextState) => {
+      if (nextState === 'background') {
+        try {
+          useWatchStore.getState().syncWidgetData();
+        } catch {
+          // best-effort — a stale widget for one background cycle self-heals
+          // via Android's own periodic redraw or the next in-app action.
+        }
+      }
+    });
+    return () => subscription.remove();
+  }, [isAuthenticated]);
+
   return (
     <GestureHandlerRootView style={{ flex: 1, backgroundColor: theme.colors.bg }}>
       <SafeAreaProvider>
         <ThemeProvider value={toNavigationTheme(theme)}>
           <StatusBar style={theme.statusBar} />
-          {!isAuthChecked ? (
+          {!isAuthChecked || (!fontsLoaded && !fontError) ? (
             <View style={[styles.bootLoader, { backgroundColor: theme.colors.bg }]}>
               <ActivityIndicator color={theme.colors.accentInk} size="large" />
             </View>

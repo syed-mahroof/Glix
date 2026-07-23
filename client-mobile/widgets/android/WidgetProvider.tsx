@@ -36,27 +36,33 @@ async function readWidgetData(): Promise<any> {
 // it needs the full watchlist state (Zustand `get()`), which this module
 // has no access to. This file only ever reads the key back for rendering.
 export async function widgetTaskHandler(props: any) {
-  const data = await readWidgetData();
-  const widgetInfo = props.widgetInfo;
+  try {
+    const data = await readWidgetData();
+    const widgetInfo = props.widgetInfo;
 
-  switch (widgetInfo.widgetName) {
-    case 'WatchlistWidget':
-      requestWidgetUpdate({
-        widgetName: 'WatchlistWidget',
-        renderWidget: () => <WatchlistWidget data={data} />,
-        widgetNotFound: () => {},
-      });
-      break;
+    switch (widgetInfo.widgetName) {
+      case 'WatchlistWidget':
+        requestWidgetUpdate({
+          widgetName: 'WatchlistWidget',
+          renderWidget: () => <WatchlistWidget data={data} />,
+          widgetNotFound: () => {},
+        }).catch(() => {});
+        break;
 
-    case 'UpcomingWidget':
-      requestWidgetUpdate({
-        widgetName: 'UpcomingWidget',
-        renderWidget: () => <UpcomingWidget data={data} />,
-        widgetNotFound: () => {},
-      });
-      break;
+      case 'UpcomingWidget':
+        requestWidgetUpdate({
+          widgetName: 'UpcomingWidget',
+          renderWidget: () => <UpcomingWidget data={data} />,
+          widgetNotFound: () => {},
+        }).catch(() => {});
+        break;
 
-    default:
-      break;
+      default:
+        break;
+    }
+  } catch {
+    // Called directly by the native module on every OS-triggered redraw
+    // (resize, updatePeriodMillis tick) — a thrown/rejected step here must
+    // never crash that callback; the next scheduled redraw retries anyway.
   }
 }

@@ -13,6 +13,7 @@ import {
   Clock,
   MessageCircle,
   Star,
+  Trash2,
   WifiOff,
 } from 'lucide-react-native';
 import React, { useCallback, useEffect, useState } from 'react';
@@ -37,10 +38,12 @@ import { CastCard } from '../../components/CastCard';
 import GlassSurface from '../../components/GlassSurface';
 import PressableScale from '../../components/PressableScale';
 import { ProviderBadge } from '../../components/ProviderBadge';
+import RatingReviewCard from '../../components/RatingReviewCard';
+import Snackbar from '../../components/Snackbar';
 import { api } from '../../lib/api';
 import { extractErrorMessage } from '../../lib/errors';
 import { useAppTheme } from '../../lib/theme';
-import { useWatchStore } from '../../store/watchStore';
+import { RemovedMovieSnapshot, useWatchStore } from '../../store/watchStore';
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
 const BACKDROP_BASE_URL = 'https://image.tmdb.org/t/p/w1280';
@@ -130,11 +133,17 @@ export default function MovieDetailScreen() {
   const [loadError, setLoadError] = useState<string | null>(null);
   const [isTogglingWatch, setIsTogglingWatch] = useState(false);
   const [isAddingToWatchlist, setIsAddingToWatchlist] = useState(false);
+  const [isRemoving, setIsRemoving] = useState(false);
+  const [removeSnapshot, setRemoveSnapshot] = useState<RemovedMovieSnapshot | null>(null);
+  const [removeSnackbarVisible, setRemoveSnackbarVisible] = useState(false);
+  const [addedSnackbarVisible, setAddedSnackbarVisible] = useState(false);
 
   const movieWatchlist = useWatchStore((state) => state.movieWatchlist);
   const fetchMovieWatchlist = useWatchStore((state) => state.fetchMovieWatchlist);
   const toggleMovieWatchState = useWatchStore((state) => state.toggleMovieWatchState);
   const addMovieToWatchlist = useWatchStore((state) => state.addMovieToWatchlist);
+  const removeMovieFromWatchlist = useWatchStore((state) => state.removeMovieFromWatchlist);
+  const undoRemoveMovie = useWatchStore((state) => state.undoRemoveMovie);
 
   // The watchlist row for this movie (if tracked) lives in the Zustand
   // store — mirrors show/[id].tsx's watchlistEntry derivation so this
@@ -226,7 +235,10 @@ export default function MovieDetailScreen() {
   }, [loadDetails, loadSecondary, fetchMovieWatchlist]);
 
   /** Context-sensitive primary action, mirrors TV Time's Add → Track flow:
-   *  not tracked yet → adds to the watchlist and routes to the Movies Hub;
+   *  not tracked yet → adds to the watchlist in place (Phase I: no forced
+   *  navigation — the icon itself already flips to the watched-toggle state
+   *  the moment `isInWatchlist` goes true via the store's optimistic
+   *  update; a Snackbar covers the confirmation instead of a redirect);
    *  already tracked → toggles watched state in place (store-driven,
    *  optimistic — no local isWatched copy to fall out of sync). */
   const handlePrimaryAction = async () => {
@@ -238,7 +250,7 @@ export default function MovieDetailScreen() {
       const success = await addMovieToWatchlist(tmdbId);
       setIsAddingToWatchlist(false);
       if (success) {
-        router.replace({ pathname: '/(tabs)/movies', params: { highlightFilter: 'WATCH_NEXT' } });
+        setAddedSnackbarVisible(true);
       }
       return;
     }
@@ -247,6 +259,28 @@ export default function MovieDetailScreen() {
     setIsTogglingWatch(true);
     await toggleMovieWatchState(tmdbId);
     setIsTogglingWatch(false);
+  };
+
+  /** Full-delete "Remove from Watchlist" (Phase F) — mirrors show/[id].tsx's
+   *  handleRemoveFromWatchlist exactly: acts immediately, offers a real
+   *  Undo via the server-returned snapshot rather than a deferred commit. */
+  const handleRemoveFromWatchlist = async () => {
+    if (Number.isNaN(tmdbId) || isRemoving || !isInWatchlist) return;
+    setIsRemoving(true);
+    const snapshot = await removeMovieFromWatchlist(tmdbId);
+    setIsRemoving(false);
+    if (snapshot) {
+      setRemoveSnapshot(snapshot);
+      setRemoveSnackbarVisible(true);
+    }
+  };
+
+  const handleUndoRemove = async () => {
+    setRemoveSnackbarVisible(false);
+    if (!removeSnapshot) return;
+    const snapshot = removeSnapshot;
+    setRemoveSnapshot(null);
+    await undoRemoveMovie(snapshot);
   };
 
   if (isLoading && !displayMovie) {
@@ -333,20 +367,34 @@ export default function MovieDetailScreen() {
             <PressableScale onPress={() => router.back()} hitSlop={8} style={styles.iconBtn}>
               <ArrowLeft color="#FFF" size={22} />
             </PressableScale>
-            <PressableScale
-              onPress={handlePrimaryAction}
-              hitSlop={8}
-              style={styles.iconBtn}
-              accessibilityLabel={
-                !isInWatchlist ? 'Add to Watchlist' : isWatched ? 'Watched' : 'Mark as Watched'
-              }
-            >
-              {isWatched ? (
-                <CheckCircle color={c.accentFill} size={22} />
-              ) : (
-                <BookmarkPlus color={isInWatchlist ? c.accentFill : '#FFF'} size={22} />
+            <View style={styles.backdropActionsRow}>
+              {isInWatchlist && (
+                <PressableScale
+                  onPress={handleRemoveFromWatchlist}
+                  disabled={isRemoving}
+                  hitSlop={8}
+                  style={styles.iconBtn}
+                  accessibilityRole="button"
+                  accessibilityLabel="Remove from Watchlist"
+                >
+                  <Trash2 color="#FFF" size={20} />
+                </PressableScale>
               )}
-            </PressableScale>
+              <PressableScale
+                onPress={handlePrimaryAction}
+                hitSlop={8}
+                style={styles.iconBtn}
+                accessibilityLabel={
+                  !isInWatchlist ? 'Add to Watchlist' : isWatched ? 'Watched' : 'Mark as Watched'
+                }
+              >
+                {isWatched ? (
+                  <CheckCircle color={c.accentFill} size={22} />
+                ) : (
+                  <BookmarkPlus color={isInWatchlist ? c.accentFill : '#FFF'} size={22} />
+                )}
+              </PressableScale>
+            </View>
           </SafeAreaView>
         </View>
 
@@ -410,6 +458,13 @@ export default function MovieDetailScreen() {
             </PressableScale>
           </View>
         </View>
+
+        {/* ── Your Rating (Phase L) ────────────────────────────────────── */}
+        {!Number.isNaN(tmdbId) && (
+          <View style={styles.section}>
+            <RatingReviewCard mediaType="movie" tmdbId={tmdbId} />
+          </View>
+        )}
 
         {/* ── Overview ──────────────────────────────────────────────── */}
         {d.overview ? (
@@ -513,6 +568,20 @@ export default function MovieDetailScreen() {
 
         <View style={{ height: 60 }} />
       </Animated.ScrollView>
+
+      <Snackbar
+        visible={removeSnackbarVisible}
+        message="Removed from Watchlist"
+        actionLabel="UNDO"
+        onAction={handleUndoRemove}
+        onDismiss={() => setRemoveSnackbarVisible(false)}
+      />
+
+      <Snackbar
+        visible={addedSnackbarVisible}
+        message="Added to Watchlist"
+        onDismiss={() => setAddedSnackbarVisible(false)}
+      />
     </View>
   );
 }
@@ -595,6 +664,10 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(0,0,0,0.5)',
     alignItems: 'center',
     justifyContent: 'center',
+  },
+  backdropActionsRow: {
+    flexDirection: 'row',
+    gap: 8,
   },
   backButton: {
     position: 'absolute',

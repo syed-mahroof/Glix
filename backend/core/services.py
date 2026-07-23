@@ -64,6 +64,14 @@ class TMDBRateLimitError(TMDBServiceError):
     """Raised when TMDB returns a 429."""
 
 
+# TMDB has no dedicated "Anime" genre. Documented heuristic (Phase K, mirrors
+# client-mobile/lib/anime.ts exactly — one definition, not two): TMDB's
+# Animation genre (id 16, same for both /discover/tv and /discover/movie)
+# combined with Japanese as the original language.
+ANIME_GENRE_ID = 16
+ANIME_ORIGINAL_LANGUAGE = "ja"
+
+
 class TMDBService:
     """
     Usage:
@@ -327,6 +335,7 @@ class TMDBService:
         time_window: str = "day",
         page: int = 1,
         include_genre_ids: bool = False,
+        include_original_language: bool = False,
     ) -> dict[str, Any]:
         """
         media_type can be 'all', 'movie', 'tv', 'person'.
@@ -338,6 +347,10 @@ class TMDBService:
         keeping that field on each result; existing callers are unaffected
         since it defaults to False and page/total_pages/total_results were
         already silently available in `payload`, just not surfaced before.
+
+        `include_original_language`: same reasoning, for the language/anime
+        filters (Phase K) — /trending doesn't accept `with_original_language`
+        either, but every item already carries `original_language`.
         """
         payload = self._request(f"/trending/{media_type}/{time_window}", params={"page": page}, use_cache=True)
         if payload is None:
@@ -361,6 +374,8 @@ class TMDBService:
             }
             if include_genre_ids:
                 entry["genre_ids"] = item.get("genre_ids", [])
+            if include_original_language:
+                entry["original_language"] = item.get("original_language")
             results.append(entry)
         return {
             "page": payload.get("page", page),
@@ -525,23 +540,54 @@ class TMDBService:
         return {"results": characters[:limit]}
 
     def discover_tv(
-        self, genre_id: Optional[int] = None, sort_by: str = "popularity.desc", page: int = 1
+        self,
+        genre_id: Optional[int] = None,
+        sort_by: str = "popularity.desc",
+        page: int = 1,
+        min_vote_count: int = 100,
+        original_language: Optional[str] = None,
+        require_anime: bool = False,
     ) -> dict[str, Any]:
         """
         GET /discover/tv — genre + sort browsing for the Discover Hub's
         "Filter & Sort" sheet. Distinct from get_trending_shows()/
         get_popular_shows(), which serve the curated feed's fixed sections
         and don't accept genre/sort params — TMDB's /discover endpoint is
-        the one that actually supports `with_genres`/`sort_by`.
+        the one that actually supports `with_genres`/`sort_by`/
+        `with_original_language`.
+
+        `min_vote_count`: the floor applied when `sort_by` is
+        `vote_average.desc` (see the comment below) — configurable so
+        DiscoverFilterView's "Critically Acclaimed" sort (Phase K) can
+        reuse this same anti-gaming pattern with a stricter floor than
+        the default "Top Rated" sort, instead of a second implementation.
+
+        `require_anime`: TMDB has no dedicated "Anime" genre — same
+        heuristic as `client-mobile/lib/anime.ts` (Animation genre +
+        Japanese original language), expressed here via TMDB's genre ID
+        since /discover operates on IDs, not names. When set, ANDs the
+        Animation genre (16) onto `genre_id` via TMDB's comma-separated
+        `with_genres` (comma = AND, not OR) and forces
+        `with_original_language=ja`, overriding any separately-passed
+        `original_language` — a real anime is Japanese-language by this
+        definition, so honoring a conflicting language pick alongside
+        `require_anime` would just return zero results instead of
+        silently doing something the caller more likely meant.
         """
         params: dict[str, Any] = {"page": page, "sort_by": sort_by}
-        if genre_id:
-            params["with_genres"] = genre_id
+        genre_ids = [str(genre_id)] if genre_id else []
+        if require_anime:
+            genre_ids.append(str(ANIME_GENRE_ID))
+            original_language = ANIME_ORIGINAL_LANGUAGE
+        if genre_ids:
+            params["with_genres"] = ",".join(genre_ids)
+        if original_language:
+            params["with_original_language"] = original_language
         if sort_by == "vote_average.desc":
             # Without a vote-count floor, TMDB's vote_average sort surfaces
             # obscure titles with a single 10/10 vote ahead of anything
             # actually well-known — a well-documented TMDB API quirk.
-            params["vote_count.gte"] = 100
+            params["vote_count.gte"] = min_vote_count
 
         payload = self._request("/discover/tv", params=params, use_cache=True)
         if payload is None:
@@ -568,14 +614,27 @@ class TMDBService:
         }
 
     def discover_movies(
-        self, genre_id: Optional[int] = None, sort_by: str = "popularity.desc", page: int = 1
+        self,
+        genre_id: Optional[int] = None,
+        sort_by: str = "popularity.desc",
+        page: int = 1,
+        min_vote_count: int = 100,
+        original_language: Optional[str] = None,
+        require_anime: bool = False,
     ) -> dict[str, Any]:
-        """GET /discover/movie — movie counterpart to discover_tv()."""
+        """GET /discover/movie — movie counterpart to discover_tv(). Same
+        `min_vote_count`/`original_language`/`require_anime` reasoning."""
         params: dict[str, Any] = {"page": page, "sort_by": sort_by}
-        if genre_id:
-            params["with_genres"] = genre_id
+        genre_ids = [str(genre_id)] if genre_id else []
+        if require_anime:
+            genre_ids.append(str(ANIME_GENRE_ID))
+            original_language = ANIME_ORIGINAL_LANGUAGE
+        if genre_ids:
+            params["with_genres"] = ",".join(genre_ids)
+        if original_language:
+            params["with_original_language"] = original_language
         if sort_by == "vote_average.desc":
-            params["vote_count.gte"] = 100
+            params["vote_count.gte"] = min_vote_count
 
         payload = self._request("/discover/movie", params=params, use_cache=True)
         if payload is None:

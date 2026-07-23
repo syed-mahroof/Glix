@@ -70,6 +70,10 @@ export function formatUpcomingHeaderLabel(airDate: string, now: Date): string {
   const todayMidnight = new Date(`${todayIso}T00:00:00`);
   const diffDays = Math.round((target.getTime() - todayMidnight.getTime()) / 86400000);
 
+  // Aired-but-unwatched items (Phase G) now stay in this list past their air
+  // date instead of disappearing — without this branch they fell through to
+  // the "LATER" catch-all, which reads as a future date, not a past-due one.
+  if (diffDays < 0) return 'OVERDUE';
   if (diffDays === 1) return 'TOMORROW';
   if (diffDays >= 2 && diffDays <= 6) {
     return new Intl.DateTimeFormat('en-US', { weekday: 'long' }).format(target).toUpperCase();

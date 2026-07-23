@@ -8,6 +8,7 @@ import { extractErrorMessage } from '../lib/errors';
 import { Platform } from 'react-native';
 import { requestWidgetUpdate } from 'react-native-android-widget';
 import { buildUpcomingItems, pickNextEpisode } from '../lib/upcoming';
+import { formatCountdown, todayLocalIso } from '../lib/dateFormat';
 import { WatchlistWidget as AndroidWatchlistWidget } from '../widgets/android/WatchlistWidget';
 import { UpcomingWidget as AndroidUpcomingWidget } from '../widgets/android/UpcomingWidget';
 
@@ -160,6 +161,38 @@ interface MovieToggleResponse {
   watched: boolean;
   total_time_watched: number;
   newly_earned_badges?: string[];
+}
+
+interface ShowRemoveResponse {
+  show_id: number;
+  watched_episode_ids: number[];
+  was_favorite: boolean;
+  was_status: 'TO_WATCH' | 'UP_TO_DATE' | 'ARCHIVED';
+  was_ignore_catchup: boolean;
+  total_time_watched: number;
+}
+
+interface MovieRemoveResponse {
+  movie_id: number;
+  was_watched: boolean;
+  total_time_watched: number;
+}
+
+/** Everything ShowRemoveView deleted, server-authoritative — Undo replays
+ *  this exactly (re-add, restore favorite/status/ignore_catchup, re-mark
+ *  these exact episode ids) rather than trusting whatever the client had
+ *  cached locally, same reasoning as CatchupCheckView. */
+export interface RemovedShowSnapshot {
+  showId: number;
+  watchedEpisodeIds: number[];
+  wasFavorite: boolean;
+  wasStatus: 'TO_WATCH' | 'UP_TO_DATE' | 'ARCHIVED';
+  wasIgnoreCatchup: boolean;
+}
+
+export interface RemovedMovieSnapshot {
+  movieId: number;
+  wasWatched: boolean;
 }
 
 export interface MovieEntry {
@@ -383,11 +416,19 @@ interface WatchStoreState extends AnalyticsSlice {
 
   // Show actions
   addShowToWatchlist: (showId: number) => Promise<boolean>;
+  /** Full delete (product decision, Phase F) — removes the Watchlist row
+   *  AND every WatchState for the show's episodes, server-side. Returns a
+   *  snapshot for Undo, or null if the request failed (state already
+   *  rolled back). */
+  removeShowFromWatchlist: (showId: number) => Promise<RemovedShowSnapshot | null>;
+  undoRemoveShow: (snapshot: RemovedShowSnapshot) => Promise<void>;
 
   // Movie actions
   fetchMovieWatchlist: () => Promise<void>;
   toggleMovieWatchState: (movieId: number) => Promise<void>;
   addMovieToWatchlist: (movieId: number) => Promise<boolean>;
+  removeMovieFromWatchlist: (movieId: number) => Promise<RemovedMovieSnapshot | null>;
+  undoRemoveMovie: (snapshot: RemovedMovieSnapshot) => Promise<void>;
 
   // Analytics methods
   fetchDashboard: () => Promise<void>;
@@ -549,6 +590,16 @@ export const useWatchStore = create<WatchStoreState>()(
       episodes[episodeIndex] = { ...episodes[episodeIndex], is_watched: optimisticWatched };
       entry.show = { ...entry.show, episodes };
       entry.watched_episode_count = entry.watched_episode_count + (optimisticWatched ? 1 : -1);
+      // Recency drives the Shows Hub bucketing (WATCH NEXT vs HAVEN'T WATCHED
+      // FOR A WHILE). A just-watched episode means "watched now", so the show
+      // belongs in WATCH NEXT immediately. Without this the count bumped but
+      // last_watched_at stayed null, and marking the first episode of a
+      // back-catalog show (next episode aired >14d ago, so not a "fresh drop")
+      // jumped it straight to HAVEN'T WATCHED FOR A WHILE — and, on the Shows
+      // Hub, stuck there until a full fetchWatchlist(). The server recomputes
+      // the authoritative value on the next fetch; un-watching leaves it
+      // untouched (the true prior timestamp isn't known client-side).
+      if (optimisticWatched) entry.last_watched_at = new Date().toISOString();
       entry.progress_percentage =
         entry.aired_episode_count > 0
           ? Math.round((entry.watched_episode_count / entry.aired_episode_count) * 1000) / 10
@@ -703,6 +754,41 @@ export const useWatchStore = create<WatchStoreState>()(
     }
   },
 
+  removeMovieFromWatchlist: async (movieId: number) => {
+    const previousMovieWatchlist = get().movieWatchlist;
+
+    set((state) => ({
+      movieWatchlist: {
+        watch_next: state.movieWatchlist.watch_next.filter((i) => i.movie.tmdb_id !== movieId),
+        watched: state.movieWatchlist.watched.filter((i) => i.movie.tmdb_id !== movieId),
+      },
+    }));
+
+    try {
+      const response = await api.delete<MovieRemoveResponse>('/movies/watchlist/remove/', {
+        data: { movie_id: movieId },
+      });
+      get().fetchProfile();
+      return { movieId: response.data.movie_id, wasWatched: response.data.was_watched };
+    } catch (error) {
+      set({ movieWatchlist: previousMovieWatchlist, error: extractErrorMessage(error) });
+      return null;
+    }
+  },
+
+  undoRemoveMovie: async (snapshot: RemovedMovieSnapshot) => {
+    const added = await get().addMovieToWatchlist(snapshot.movieId);
+    if (!added) return;
+    try {
+      if (snapshot.wasWatched) {
+        await get().toggleMovieWatchState(snapshot.movieId);
+      }
+    } finally {
+      get().fetchMovieWatchlist();
+      get().fetchProfile();
+    }
+  },
+
   addShowToWatchlist: async (showId: number) => {
     try {
       const response = await api.post<WatchlistEntry>('/watchlist/add/', { show_id: showId });
@@ -743,10 +829,86 @@ export const useWatchStore = create<WatchStoreState>()(
           },
         };
       });
+      // A freshly-added show belongs in the "Next Up" widget immediately —
+      // without this it silently stayed missing until some other action
+      // happened to trigger a fetchWatchlist()/toggle elsewhere.
+      get().syncWidgetData();
       return true;
     } catch (error) {
       set({ error: extractErrorMessage(error) });
       return false;
+    }
+  },
+
+  removeShowFromWatchlist: async (showId: number) => {
+    const previousWatchlist = get().watchlist;
+    const bucketKeys: (keyof WatchlistBuckets)[] = ['to_watch', 'up_to_date', 'archived'];
+
+    // Optimistic removal — disappear from Shows Hub / Upcoming immediately
+    // rather than waiting on the round trip. The widget and Profile counts
+    // are resynced explicitly below once the delete is confirmed.
+    set((state) => {
+      const next = { ...state.watchlist };
+      for (const key of bucketKeys) {
+        const idx = next[key].results.findIndex((e) => e.show.tmdb_id === showId);
+        if (idx !== -1) {
+          next[key] = {
+            ...next[key],
+            count: Math.max(0, next[key].count - 1),
+            results: next[key].results.filter((e) => e.show.tmdb_id !== showId),
+          };
+          break;
+        }
+      }
+      return { watchlist: next };
+    });
+
+    try {
+      const response = await api.delete<ShowRemoveResponse>('/watchlist/remove/', {
+        data: { show_id: showId },
+      });
+      get().fetchProfile();
+      get().syncWidgetData();
+      const data = response.data;
+      return {
+        showId: data.show_id,
+        watchedEpisodeIds: data.watched_episode_ids,
+        wasFavorite: data.was_favorite,
+        wasStatus: data.was_status,
+        wasIgnoreCatchup: data.was_ignore_catchup,
+      };
+    } catch (error) {
+      set({ watchlist: previousWatchlist, error: extractErrorMessage(error) });
+      return null;
+    }
+  },
+
+  undoRemoveShow: async (snapshot: RemovedShowSnapshot) => {
+    const added = await get().addShowToWatchlist(snapshot.showId);
+    if (!added) return;
+    try {
+      if (snapshot.wasFavorite) {
+        await api.post('/watchlist/favorite/', { show_id: snapshot.showId });
+      }
+      if (snapshot.wasStatus === 'ARCHIVED') {
+        await api.post('/watchlist/archive/', { show_id: snapshot.showId, archived: true });
+      }
+      if (snapshot.wasIgnoreCatchup) {
+        await api.post('/watchlist/catchup-preference/', {
+          show_id: snapshot.showId,
+          ignore_catchup: true,
+        });
+      }
+      // bulkToggleWatchState calls the real backend regardless of what's
+      // locally cached (see its own comment) — this restores every watched
+      // episode even if the freshly re-added entry only has season 1's
+      // episodes cached client-side so far.
+      if (snapshot.watchedEpisodeIds.length > 0) {
+        await get().bulkToggleWatchState(snapshot.watchedEpisodeIds, true);
+      }
+    } finally {
+      get().fetchWatchlist();
+      get().fetchProfile();
     }
   },
 
@@ -791,8 +953,10 @@ export const useWatchStore = create<WatchStoreState>()(
 
       for (const bucketKey of Object.keys(nextWatchlist) as (keyof WatchlistBuckets)[]) {
         nextWatchlist[bucketKey].results = nextWatchlist[bucketKey].results.map((entry) => {
+          let affected = false;
           const episodes = entry.show.episodes.map((ep) => {
             if (!idSet.has(ep.tmdb_id)) return ep;
+            affected = true;
             const wasWatched = ep.is_watched;
             if (wasWatched === watched) return ep;
             totalRuntimeDelta += watched ? ep.runtime_minutes : -ep.runtime_minutes;
@@ -808,6 +972,12 @@ export const useWatchStore = create<WatchStoreState>()(
             show: { ...entry.show, episodes },
             watched_episode_count: watchedCount,
             progress_percentage: progress,
+            // Same recency-for-bucketing reason as toggleWatchState: marking
+            // episodes watched (e.g. a Catch-Up cascade) means "watched now",
+            // so the show belongs in WATCH NEXT immediately. Bumped only for
+            // entries actually touched, and only in the watch direction — an
+            // un-mark ("Unmark Season Watched") leaves last_watched_at alone.
+            last_watched_at: affected && watched ? new Date().toISOString() : entry.last_watched_at,
           };
         });
       }
@@ -946,11 +1116,14 @@ export const useWatchStore = create<WatchStoreState>()(
 
       // "Next up" per show — same chronological rule the Shows Hub row uses
       // (earliest aired-unwatched, else nearest future episode), not just
-      // "first unwatched in array order."
+      // "first unwatched in array order." episode_id lets the widget deep
+      // link straight to that episode (app/episode/[id].tsx) instead of
+      // just the show's general page.
       const toWatch = entries.slice(0, 5).map((entry) => {
         const nextEp = pickNextEpisode(entry);
         return {
           id: entry.show.tmdb_id,
+          episode_id: nextEp?.tmdb_id ?? null,
           title: entry.show.title,
           poster_path: entry.show.poster_path,
           next_episode: nextEp ? `S${nextEp.season_number} E${nextEp.episode_number}` : 'Up to date',
@@ -960,15 +1133,32 @@ export const useWatchStore = create<WatchStoreState>()(
       // "Airing soon" is genuinely upcoming (unaired, future, unwatched)
       // episodes across the whole to-watch bucket — reuses the same builder
       // the Upcoming tab/calendar already trust, sorted soonest-first.
+      // Windowed to the next 14 days (not a flat top-5 slice) so the widget
+      // actually covers "the next 2 weeks" as asked; capped at 30 as a sane
+      // payload bound — Android's ListWidget genuinely scrolls to reach all
+      // of it, iOS shows as many as its widget family's static space allows
+      // (see widgets/ios/UpcomingWidget.tsx — home-screen widgets can't
+      // scroll at all, a real WidgetKit platform constraint, not a gap
+      // here). Countdown text precomputed once here, reusing the exact
+      // formatCountdown() the in-app Upcoming tab uses, since the widget
+      // itself can't run a live per-second tick the way UpcomingRow does.
+      const now = new Date();
+      const windowEndIso = todayLocalIso(new Date(now.getTime() + 14 * 86400000));
       const upcoming = buildUpcomingItems(entries)
-        .slice(0, 5)
-        .map((item) => ({
-          id: item.tmdbShowId,
-          title: item.showTitle,
-          poster_path: item.posterPath,
-          next_episode: `S${item.seasonNumber} E${item.episodeNumber}`,
-          air_date: item.airDate,
-        }));
+        .filter((item) => item.airDate <= windowEndIso)
+        .slice(0, 30)
+        .map((item) => {
+          const { formatted, dayOfWeek } = formatCountdown(new Date(`${item.airDate}T00:00:00`), now);
+          return {
+            id: item.tmdbShowId,
+            episode_id: item.episodeId,
+            title: item.showTitle,
+            poster_path: item.posterPath,
+            next_episode: `S${item.seasonNumber} E${item.episodeNumber}`,
+            air_date: item.airDate,
+            countdown: `${formatted} (${dayOfWeek})`,
+          };
+        });
 
       const widgetData = { watchlist: toWatch, upcoming };
 

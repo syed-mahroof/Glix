@@ -267,8 +267,11 @@ const styles = StyleSheet.create({
   },
   letter: {
     color: '#FFFFFF',
+    fontFamily: 'Akony',
+    // See app/login.tsx's wordmark style comment — Akony is a single Bold
+    // weight; a numeric fontWeight here fights the font resolution on iOS.
+    fontWeight: 'normal',
     fontSize: 24,
-    fontWeight: '700',
     letterSpacing: 6,
   },
 });

@@ -4,10 +4,11 @@
 import { FlashList } from '@shopify/flash-list';
 import { Image } from 'expo-image';
 import { useRouter } from 'expo-router';
-import { ArrowLeft, BookOpen, Languages, Search, Tv2, X } from 'lucide-react-native';
+import { ArrowLeft, BookOpen, Languages, Search, Sparkles, Tv2, X } from 'lucide-react-native';
 import React, { useEffect, useMemo, useState } from 'react';
 import {
   Animated,
+  ScrollView,
   StyleSheet,
   Text,
   TextInput,
@@ -19,6 +20,7 @@ import LanguageFilterModal, { languageDisplayName } from '../../components/Langu
 import LayoutToggle from '../../components/LayoutToggle';
 import PressableScale from '../../components/PressableScale';
 import ShowPosterCard from '../../components/ShowPosterCard';
+import { isAnimeByGenresAndLanguage } from '../../lib/anime';
 import { useAppTheme, type ThemeColors } from '../../lib/theme';
 import { WatchlistEntry } from '../../store/watchStore';
 import { useWatchStore } from '../../store/watchStore';
@@ -149,6 +151,11 @@ export default function ProfileShowsScreen() {
   const [filter, setFilter] = useState<FilterKey>('ALL');
   const [query, setQuery] = useState('');
   const [isLanguageModalVisible, setIsLanguageModalVisible] = useState(false);
+  // Local, not global store state like selectedLanguage — nothing in this
+  // phase's ask requires the Anime toggle to persist across My Shows / My
+  // Movies the way Language deliberately does; kept simple unless the user
+  // wants it elevated later.
+  const [animeOnly, setAnimeOnly] = useState(false);
 
   useEffect(() => {
     fetchWatchlist();
@@ -182,12 +189,16 @@ export default function ProfileShowsScreen() {
       result = result.filter((e) => e.show.original_language === selectedLanguage);
     }
 
+    if (animeOnly) {
+      result = result.filter((e) => isAnimeByGenresAndLanguage(e.show.genres, e.show.original_language));
+    }
+
     const trimmedQuery = query.trim().toLowerCase();
     if (trimmedQuery) {
       result = result.filter((e) => e.show.title.toLowerCase().includes(trimmedQuery));
     }
     return result;
-  }, [allEntries, filter, selectedLanguage, query]);
+  }, [allEntries, filter, selectedLanguage, animeOnly, query]);
 
   return (
     <SafeAreaView style={[styles.container, { backgroundColor: c.bg }]} edges={['top']}>
@@ -228,8 +239,15 @@ export default function ProfileShowsScreen() {
         </View>
       </View>
 
-      {/* Filter Pills */}
-      <View style={styles.pillRow}>
+      {/* Filter Pills — horizontally scrollable (Phase H): this row used to
+          be a plain non-scrolling View, so once the status pills + Language
+          (+ now Anime) exceeded the screen width, the trailing pills were
+          simply clipped off-screen with no way to reach them at all. */}
+      <ScrollView
+        horizontal
+        showsHorizontalScrollIndicator={false}
+        contentContainerStyle={styles.pillRow}
+      >
         {FILTERS.map(({ key, label }) => (
           <PressableScale
             key={key}
@@ -259,7 +277,23 @@ export default function ProfileShowsScreen() {
             {selectedLanguage ? languageDisplayName(selectedLanguage) : 'Language'}
           </Text>
         </PressableScale>
-      </View>
+        <PressableScale
+          style={[
+            styles.pill,
+            styles.languagePill,
+            { backgroundColor: c.glassFill, borderColor: c.hairline },
+            animeOnly && { backgroundColor: c.accentFill, borderColor: c.accentFill },
+          ]}
+          onPress={() => setAnimeOnly((prev) => !prev)}
+          accessibilityRole="button"
+          accessibilityState={{ selected: animeOnly }}
+        >
+          <Sparkles color={animeOnly ? c.onAccent : c.textSecondary} size={14} />
+          <Text style={[styles.pillText, { color: c.textSecondary }, animeOnly && { color: c.onAccent }]}>
+            Anime
+          </Text>
+        </PressableScale>
+      </ScrollView>
 
       <LanguageFilterModal
         visible={isLanguageModalVisible}
@@ -290,14 +324,7 @@ export default function ProfileShowsScreen() {
             key={`profile-shows-${preferredLayout}`}
             data={filtered}
             keyExtractor={(item) => String(item.id)}
-            // List: 110, not the posterWrap's own 96 — rowContent's padding
-            // (24) + its 4 stacked children (title/status pill/progress
-            // bar/episode count) run slightly taller than the poster, plus
-            // the row's own marginBottom (10). Matches the ShowRow/MovieRow/
-            // UpcomingRow convention elsewhere of poster + margin, not a
-            // bare poster-height guess.
-            estimatedItemSize={preferredLayout === 'grid' ? 260 : 110}
-            numColumns={preferredLayout === 'grid' ? 2 : 1}
+            numColumns={preferredLayout === 'grid' ? 3 : 1}
             extraData={preferredLayout}
             renderItem={({ item }) =>
               preferredLayout === 'grid' ? <ShowGridCard entry={item} /> : <ShowListRow entry={item} />

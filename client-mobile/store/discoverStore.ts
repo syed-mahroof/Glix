@@ -39,7 +39,7 @@ export interface UniversalSearchResponse {
 }
 
 export type ActiveSegment = 'tv' | 'movie';
-export type SortOrder = 'trending' | 'popular' | 'top_rated';
+export type SortOrder = 'trending' | 'popular' | 'top_rated' | 'critically_acclaimed';
 
 export interface GenreCover {
   id: number;
@@ -55,6 +55,16 @@ interface DiscoverState {
   searchQuery: string;
   selectedGenreId: number | null;
   sortOrder: SortOrder;
+  /** Distinct store/state from watchStore's My Shows/My Movies
+   *  `selectedLanguage` (Phase H) — Discover browses live TMDB results, not
+   *  the user's own cached watchlist, so it needs its own selection even
+   *  though it reuses the same `LanguageFilterModal` component/language
+   *  names for a consistent picker UI. */
+  selectedLanguage: string | null;
+  /** Same heuristic as lib/anime.ts / My Shows' Anime filter (Phase H) —
+   *  expressed server-side as Animation genre + Japanese language, see
+   *  DiscoverFilterView. Not a second definition of "anime". */
+  animeOnly: boolean;
   filterSheetVisible: boolean;
 
   // Feed data
@@ -64,13 +74,19 @@ interface DiscoverState {
 
   // Search data
   searchResults: DiscoverMediaItem[];
+  searchPage: number;
+  searchTotalPages: number;
   isSearching: boolean;
+  isLoadingMoreSearch: boolean;
   searchError: string | null;
 
-  // Filtered browse data (Filter & Sort sheet — genre/sort, distinct from
-  // the curated feed sections and from universal search)
+  // Filtered browse data (Filter & Sort sheet — genre/sort/language/anime,
+  // distinct from the curated feed sections and from universal search)
   filteredResults: DiscoverMediaItem[];
+  filteredPage: number;
+  filteredTotalPages: number;
   isLoadingFiltered: boolean;
+  isLoadingMoreFiltered: boolean;
   filteredError: string | null;
 
   // Genre Grid cover images (real TMDB backdrops, one per genre — cached
@@ -83,12 +99,16 @@ interface DiscoverState {
   setSearchQuery: (query: string) => void;
   setSelectedGenreId: (genreId: number | null) => void;
   setSortOrder: (order: SortOrder) => void;
+  setSelectedLanguage: (language: string | null) => void;
+  setAnimeOnly: (animeOnly: boolean) => void;
   toggleFilterSheet: () => void;
   closeFilterSheet: () => void;
   fetchFeed: (segment: ActiveSegment) => Promise<void>;
   runSearch: (query: string) => Promise<void>;
+  loadMoreSearchResults: () => Promise<void>;
   clearSearch: () => void;
   fetchFilteredResults: () => Promise<void>;
+  loadMoreFilteredResults: () => Promise<void>;
   resetFilters: () => void;
   isFilterActive: () => boolean;
   fetchGenreCovers: (segment: ActiveSegment) => Promise<void>;
@@ -100,6 +120,8 @@ export const useDiscoverStore = create<DiscoverState>((set, get) => ({
   searchQuery: '',
   selectedGenreId: null,
   sortOrder: 'trending',
+  selectedLanguage: null,
+  animeOnly: false,
   filterSheetVisible: false,
 
   // Initial data state
@@ -108,11 +130,17 @@ export const useDiscoverStore = create<DiscoverState>((set, get) => ({
   feedError: null,
 
   searchResults: [],
+  searchPage: 1,
+  searchTotalPages: 1,
   isSearching: false,
+  isLoadingMoreSearch: false,
   searchError: null,
 
   filteredResults: [],
+  filteredPage: 1,
+  filteredTotalPages: 1,
   isLoadingFiltered: false,
+  isLoadingMoreFiltered: false,
   filteredError: null,
 
   genreCovers: { tv: {}, movie: {} },
@@ -121,8 +149,8 @@ export const useDiscoverStore = create<DiscoverState>((set, get) => ({
   // ── Actions ──────────────────────────────────────────────────────────────────
 
   isFilterActive: () => {
-    const { selectedGenreId, sortOrder } = get();
-    return selectedGenreId !== null || sortOrder !== 'trending';
+    const { selectedGenreId, sortOrder, selectedLanguage, animeOnly } = get();
+    return selectedGenreId !== null || sortOrder !== 'trending' || selectedLanguage !== null || animeOnly;
   },
 
   setActiveSegment: (segment) => {
@@ -157,6 +185,29 @@ export const useDiscoverStore = create<DiscoverState>((set, get) => ({
     }
   },
 
+  setSelectedLanguage: (language) => {
+    // Mirrors the anime override the backend itself applies (see
+    // DiscoverFilterView) — surfacing it here too means the sheet's own UI
+    // reflects the resolved state immediately instead of the user picking
+    // a language that silently gets overridden server-side with no
+    // visible feedback.
+    set({ selectedLanguage: language, animeOnly: language !== null ? false : get().animeOnly });
+    if (get().isFilterActive()) {
+      get().fetchFilteredResults();
+    } else {
+      set({ filteredResults: [], filteredError: null });
+    }
+  },
+
+  setAnimeOnly: (animeOnly) => {
+    set({ animeOnly, selectedLanguage: animeOnly ? null : get().selectedLanguage });
+    if (get().isFilterActive()) {
+      get().fetchFilteredResults();
+    } else {
+      set({ filteredResults: [], filteredError: null });
+    }
+  },
+
   toggleFilterSheet: () =>
     set((state) => ({ filterSheetVisible: !state.filterSheetVisible })),
 
@@ -182,7 +233,7 @@ export const useDiscoverStore = create<DiscoverState>((set, get) => ({
 
   runSearch: async (query) => {
     if (!query.trim()) {
-      set({ searchResults: [], isSearching: false, searchError: null });
+      set({ searchResults: [], isSearching: false, searchError: null, searchPage: 1, searchTotalPages: 1 });
       return;
     }
     set({ isSearching: true, searchError: null });
@@ -190,32 +241,120 @@ export const useDiscoverStore = create<DiscoverState>((set, get) => ({
       const response = await api.get<UniversalSearchResponse>(
         `/search/universal/?query=${encodeURIComponent(query)}`
       );
-      set({ searchResults: response.data.results, isSearching: false });
+      set({
+        searchResults: response.data.results,
+        searchPage: response.data.page,
+        searchTotalPages: response.data.total_pages,
+        isSearching: false,
+      });
     } catch (err) {
       set({ searchError: extractErrorMessage(err), isSearching: false, searchResults: [] });
     }
   },
 
+  loadMoreSearchResults: async () => {
+    const { searchQuery, searchPage, searchTotalPages, isSearching, isLoadingMoreSearch } = get();
+    if (isSearching || isLoadingMoreSearch || !searchQuery.trim() || searchPage >= searchTotalPages) return;
+    set({ isLoadingMoreSearch: true });
+    try {
+      const nextPage = searchPage + 1;
+      const response = await api.get<UniversalSearchResponse>(
+        `/search/universal/?query=${encodeURIComponent(searchQuery)}&page=${nextPage}`
+      );
+      set((state) => ({
+        searchResults: [...state.searchResults, ...response.data.results],
+        searchPage: response.data.page,
+        searchTotalPages: response.data.total_pages,
+        isLoadingMoreSearch: false,
+      }));
+    } catch {
+      // Best-effort — a failed "load more" tail request just means the
+      // user can trigger it again by scrolling; not worth a full error
+      // state for results that are already on screen.
+      set({ isLoadingMoreSearch: false });
+    }
+  },
+
   clearSearch: () =>
-    set({ searchQuery: '', searchResults: [], isSearching: false, searchError: null }),
+    set({
+      searchQuery: '',
+      searchResults: [],
+      isSearching: false,
+      searchError: null,
+      searchPage: 1,
+      searchTotalPages: 1,
+    }),
 
   fetchFilteredResults: async () => {
-    const { activeSegment, selectedGenreId, sortOrder } = get();
+    const { activeSegment, selectedGenreId, sortOrder, selectedLanguage, animeOnly } = get();
     set({ isLoadingFiltered: true, filteredError: null });
     try {
       const params: Record<string, string> = { type: activeSegment, sort: sortOrder };
       if (selectedGenreId !== null) {
         params.genre = String(selectedGenreId);
       }
+      if (selectedLanguage) {
+        params.language = selectedLanguage;
+      }
+      if (animeOnly) {
+        params.anime = 'true';
+      }
       const response = await api.get<UniversalSearchResponse>('/discover/filter/', { params });
-      set({ filteredResults: response.data.results, isLoadingFiltered: false });
+      set({
+        filteredResults: response.data.results,
+        filteredPage: response.data.page,
+        filteredTotalPages: response.data.total_pages,
+        isLoadingFiltered: false,
+      });
     } catch (err) {
       set({ filteredError: extractErrorMessage(err), isLoadingFiltered: false, filteredResults: [] });
     }
   },
 
+  loadMoreFilteredResults: async () => {
+    const {
+      activeSegment,
+      selectedGenreId,
+      sortOrder,
+      selectedLanguage,
+      animeOnly,
+      filteredPage,
+      filteredTotalPages,
+      isLoadingFiltered,
+      isLoadingMoreFiltered,
+    } = get();
+    if (isLoadingFiltered || isLoadingMoreFiltered || filteredPage >= filteredTotalPages) return;
+    set({ isLoadingMoreFiltered: true });
+    try {
+      const params: Record<string, string> = {
+        type: activeSegment,
+        sort: sortOrder,
+        page: String(filteredPage + 1),
+      };
+      if (selectedGenreId !== null) params.genre = String(selectedGenreId);
+      if (selectedLanguage) params.language = selectedLanguage;
+      if (animeOnly) params.anime = 'true';
+      const response = await api.get<UniversalSearchResponse>('/discover/filter/', { params });
+      set((state) => ({
+        filteredResults: [...state.filteredResults, ...response.data.results],
+        filteredPage: response.data.page,
+        filteredTotalPages: response.data.total_pages,
+        isLoadingMoreFiltered: false,
+      }));
+    } catch {
+      set({ isLoadingMoreFiltered: false });
+    }
+  },
+
   resetFilters: () => {
-    set({ selectedGenreId: null, sortOrder: 'trending', filteredResults: [], filteredError: null });
+    set({
+      selectedGenreId: null,
+      sortOrder: 'trending',
+      selectedLanguage: null,
+      animeOnly: false,
+      filteredResults: [],
+      filteredError: null,
+    });
   },
 
   fetchGenreCovers: async (segment) => {

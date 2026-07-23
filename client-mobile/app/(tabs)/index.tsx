@@ -190,12 +190,21 @@ function getAllEntries(watchlist: WatchlistBuckets): WatchlistEntry[] {
   ];
 }
 
-function useNow(intervalMs: number): Date {
+/** Ticking "now" for the UPCOMING tab's live countdowns. `active` gates the
+ *  interval: the WATCH LIST tab is a heavy FlashList (posters + progress
+ *  rings) and doesn't show any per-second countdown, so ticking there
+ *  re-rendered the whole Shows Hub once a second for nothing. Only tick while
+ *  the countdowns are actually on screen. Refreshes immediately on
+ *  (re)activation so a value frozen from the last active period isn't shown
+ *  for up to a second after switching back. */
+function useNow(intervalMs: number, active: boolean = true): Date {
   const [now, setNow] = useState(() => new Date());
   useEffect(() => {
+    if (!active) return;
+    setNow(new Date());
     const id = setInterval(() => setNow(new Date()), intervalMs);
     return () => clearInterval(id);
-  }, [intervalMs]);
+  }, [intervalMs, active]);
   return now;
 }
 
@@ -255,9 +264,9 @@ function FilterPill({
 // ─── Zombie Row (List view fallback for zero-cached-episode entries) ──────────
 // A watchlist entry can have no cached episode data at all — see the
 // buildRows() comment on the null-episode row it produces. Shares ShowRow's
-// footprint (poster + text column, same 100px height) so it doesn't disturb
-// FlashList's estimatedItemSize, but has no checkmark since there's nothing
-// to mark watched — tapping through re-triggers a real TMDB fetch.
+// footprint (poster + text column, same 100px height) for visual consistency
+// in the list, but has no checkmark since there's nothing to mark watched —
+// tapping through re-triggers a real TMDB fetch.
 function ZombieRow({
   showId,
   showTitle,
@@ -298,12 +307,35 @@ function ZombieRow({
 
 // ─── Upcoming Row (Upcoming > List tab) ────────────────────────────────────────
 
-function UpcomingRow({ item, now }: { item: UpcomingItem; now: Date }) {
+function UpcomingRow({
+  item,
+  now,
+  onMarkWatched,
+}: {
+  item: UpcomingItem;
+  now: Date;
+  /** Omitted (no checkmark rendered) when the episode hasn't aired yet — a
+   *  future episode can't be marked watched (WatchStateToggleView rejects
+   *  it server-side), so there's no point showing a tappable control that
+   *  would just error. Present for TODAY items and for the aired-but-
+   *  overdue items buildUpcomingItems() now keeps in this list (Phase G). */
+  onMarkWatched?: (item: UpcomingItem) => void;
+}) {
   const router = useRouter();
   const { theme } = useAppTheme();
   const c = theme.colors;
   const target = new Date(`${item.airDate}T00:00:00`);
   const { formatted, isImminent, dayOfWeek } = formatCountdown(target, now);
+  const todayIso = todayLocalIso(now);
+  const isAired = item.airDate <= todayIso;
+  // Distinct from isAired: a TODAY item is technically "aired" (markable —
+  // WatchStateToggleView's own gate is air_date <= today) but still shows
+  // its normal countdown text; only a genuinely past date (Phase G's
+  // overdue items) swaps to the "OVERDUE" label — formatCountdown clamps a
+  // negative diff to 00:00:00, which would misleadingly read as "airing
+  // right now" instead of "N days ago" for those.
+  const isOverdue = item.airDate < todayIso;
+  const canMarkWatched = isAired && item.episodeId != null && !!onMarkWatched;
 
   return (
     <PressableScale
@@ -335,11 +367,26 @@ function UpcomingRow({ item, now }: { item: UpcomingItem; now: Date }) {
             styles.upcomingCountdown,
             { color: c.textSecondary },
             isImminent && { color: c.accentInk },
+            isOverdue && { color: c.negative },
           ]}
         >
-          {formatted} ({dayOfWeek})
+          {isOverdue ? 'OVERDUE' : `${formatted} (${dayOfWeek})`}
         </Text>
       </View>
+      {canMarkWatched && (
+        <PressableScale
+          onPress={(event) => {
+            event.stopPropagation();
+            onMarkWatched!(item);
+          }}
+          hitSlop={10}
+          style={[styles.upcomingCheckBtn, { borderColor: c.hairline }]}
+          accessibilityRole="button"
+          accessibilityLabel="Mark as watched"
+        >
+          <View style={[styles.upcomingCheckCircle, { borderColor: c.accentFill }]} />
+        </PressableScale>
+      )}
     </PressableScale>
   );
 }
@@ -386,7 +433,7 @@ export default function ShowsScreen() {
   const [upcomingView, setUpcomingView] = useState<UpcomingView>('list');
   const [filter, setFilter] = useState<FilterKey>('WATCH_NEXT');
   const [isRefreshing, setIsRefreshing] = useState(false);
-  const now = useNow(1000);
+  const now = useNow(1000, activeTab === 'upcoming' && upcomingView === 'list');
 
   // Arriving from "Add to Watchlist" (show detail) passes highlightFilter
   // so the newly added show's bucket is on-screen immediately instead of
@@ -494,6 +541,20 @@ export default function ShowsScreen() {
     [catchup, toggleWatchState]
   );
 
+  /** Upcoming tab's inline mark-watched (Phase G) — reuses handleGridCheckPress
+   *  rather than a third implementation: an Upcoming item is only ever shown
+   *  while unwatched (buildUpcomingItems filters to unwatched episodes), so
+   *  this is always the "mark watched" direction, same catch-up-aware flow,
+   *  no exit-collapse animation to coordinate (UpcomingRow/the grid card
+   *  have none, unlike ShowRow). Works for both the List and Grid views. */
+  const handleUpcomingMarkWatched = useCallback(
+    (item: UpcomingItem) => {
+      if (item.episodeId == null) return;
+      handleGridCheckPress(item.episodeId, item.tmdbShowId, item.showTitle, item.seasonNumber, item.episodeNumber, false);
+    },
+    [handleGridCheckPress]
+  );
+
   /** Fired by ShowRow AFTER its collapse animation finishes.
    *  This is the moment we flush the Zustand optimistic update so that
    *  the row is truly gone before the list re-renders with the next episode. */
@@ -579,15 +640,18 @@ export default function ShowsScreen() {
       entry.type === 'header' ? (
         <UpcomingSectionHeader label={entry.label} />
       ) : (
-        <UpcomingRow item={entry.data} now={now} />
+        <UpcomingRow item={entry.data} now={now} onMarkWatched={handleUpcomingMarkWatched} />
       ),
-    [now]
+    [now, handleUpcomingMarkWatched]
   );
 
   const renderUpcomingGridEntry = useCallback(
     ({ item: entry }: { item: UpcomingListEntry }): React.ReactElement => {
       if (entry.type === 'header') return <UpcomingSectionHeader label={entry.label} />;
       const item = entry.data;
+      const todayIso = todayLocalIso(now);
+      const isOverdue = item.airDate < todayIso;
+      const isAired = item.airDate <= todayIso;
       const target = new Date(`${item.airDate}T00:00:00`);
       const { formatted, isImminent, dayOfWeek } = formatCountdown(target, now);
       return (
@@ -595,13 +659,18 @@ export default function ShowsScreen() {
           showId={item.tmdbShowId}
           title={item.showTitle}
           posterPath={item.posterPath}
-          overlayBadge={`${formatted} (${dayOfWeek})`}
+          overlayBadge={isOverdue ? 'OVERDUE' : `${formatted} (${dayOfWeek})`}
           overlayBadgeHighlighted={isImminent}
           subtitle={`S${pad(item.seasonNumber)}E${pad(item.episodeNumber)} · ${item.episodeTitle}`}
+          checkmark={
+            isAired && item.episodeId != null
+              ? { isWatched: false, onPress: () => handleUpcomingMarkWatched(item) }
+              : undefined
+          }
         />
       );
     },
-    [now]
+    [now, handleUpcomingMarkWatched]
   );
 
   const upcomingItemType = useCallback(
@@ -694,7 +763,6 @@ export default function ShowsScreen() {
                  data={history.results}
                  keyExtractor={(item) => item.id}
                  renderItem={({ item }) => <HistoryRow item={item} />}
-                 estimatedItemSize={108}
                  contentContainerStyle={styles.listContent}
                  refreshControl={
                    <RefreshControl
@@ -730,9 +798,8 @@ export default function ShowsScreen() {
               data={rows}
               keyExtractor={(item) => item.id}
               renderItem={preferredLayout === 'grid' ? renderGridRow : renderRow}
-              numColumns={preferredLayout === 'grid' ? 2 : 1}
+              numColumns={preferredLayout === 'grid' ? 3 : 1}
               extraData={preferredLayout}
-              estimatedItemSize={preferredLayout === 'grid' ? 260 : 108}
               contentContainerStyle={styles.listContent}
               refreshControl={
                 <RefreshControl
@@ -849,9 +916,8 @@ export default function ShowsScreen() {
               renderItem={preferredLayout === 'grid' ? renderUpcomingGridEntry : renderUpcomingEntry}
               getItemType={upcomingItemType}
               overrideItemLayout={preferredLayout === 'grid' ? upcomingOverrideLayout : undefined}
-              numColumns={preferredLayout === 'grid' ? 2 : 1}
+              numColumns={preferredLayout === 'grid' ? 3 : 1}
               extraData={preferredLayout}
-              estimatedItemSize={preferredLayout === 'grid' ? 260 : 110}
               contentContainerStyle={styles.listContent}
               refreshControl={
                 <RefreshControl
@@ -1036,6 +1102,15 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     fontVariant: ['tabular-nums'],
     marginTop: 2,
+  },
+  upcomingCheckBtn: {
+    padding: 2,
+  },
+  upcomingCheckCircle: {
+    width: 30,
+    height: 30,
+    borderRadius: 15,
+    borderWidth: 2,
   },
   zombieRow: {
     flexDirection: 'row',

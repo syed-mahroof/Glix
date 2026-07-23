@@ -3,8 +3,8 @@
 // No external bottom-sheet library needed — pure Reanimated + GestureHandler.
 
 import { LinearGradient } from 'expo-linear-gradient';
-import { Flame, Star, Trophy, X, type LucideIcon } from 'lucide-react-native';
-import React, { useEffect } from 'react';
+import { Award, Flame, Languages, Sparkles, Star, Trophy, X, type LucideIcon } from 'lucide-react-native';
+import React, { useEffect, useState } from 'react';
 import {
   Dimensions,
   Pressable,
@@ -22,6 +22,7 @@ import Animated, {
   withSpring,
 } from 'react-native-reanimated';
 import PressableScale from './PressableScale';
+import LanguageFilterModal, { LANGUAGE_NAMES, languageDisplayName } from './LanguageFilterModal';
 import {
   ActiveSegment,
   SortOrder,
@@ -29,6 +30,12 @@ import {
 } from '../store/discoverStore';
 import { MOVIE_GENRES, TV_GENRES } from '../lib/genres';
 import { useAppTheme } from '../lib/theme';
+
+// Discover has no pre-loaded local list of "languages present in this data"
+// the way My Shows/My Movies derives from the user's own cached watchlist
+// (Phase H) — it browses live TMDB results instead. Reuses the exact same
+// curated code→name map so the picker UI is consistent either way.
+const DISCOVER_LANGUAGE_CODES = Object.keys(LANGUAGE_NAMES);
 
 const { height: SCREEN_HEIGHT } = Dimensions.get('window');
 const SHEET_HEIGHT = SCREEN_HEIGHT * 0.72;
@@ -111,13 +118,18 @@ export default function DiscoverFilterSheet({ activeSegment }: Props) {
     filterSheetVisible,
     selectedGenreId,
     sortOrder,
+    selectedLanguage,
+    animeOnly,
     closeFilterSheet,
     setSelectedGenreId,
     setSortOrder,
+    setSelectedLanguage,
+    setAnimeOnly,
     resetFilters,
   } = useDiscoverStore();
   const { theme } = useAppTheme();
   const c = theme.colors;
+  const [isLanguageModalVisible, setIsLanguageModalVisible] = useState(false);
 
   const translateY = useSharedValue(SHEET_HEIGHT);
   const backdropOpacity = useSharedValue(0);
@@ -151,6 +163,10 @@ export default function DiscoverFilterSheet({ activeSegment }: Props) {
     { key: 'trending', label: 'Trending', Icon: Flame },
     { key: 'popular', label: 'Popular', Icon: Star },
     { key: 'top_rated', label: 'Top Rated', Icon: Trophy },
+    // Reuses the exact same vote_count.gte anti-gaming pattern Top Rated
+    // already has (DiscoverFilterView), just with a stricter floor —
+    // genuine broad consensus, not a raw average a single vote could game.
+    { key: 'critically_acclaimed', label: 'Critically Acclaimed', Icon: Award },
   ];
 
   return (
@@ -217,8 +233,32 @@ export default function DiscoverFilterSheet({ activeSegment }: Props) {
             ))}
           </View>
 
+          {/* Language + Anime (Phase K) */}
+          <Text style={[styles.sectionLabel, { color: c.textSecondary, marginTop: 28 }]}>
+            Language
+          </Text>
+          <View style={styles.pillRow}>
+            <SortPill
+              label={selectedLanguage ? languageDisplayName(selectedLanguage) : 'Any Language'}
+              Icon={Languages}
+              active={selectedLanguage !== null}
+              onPress={() => setIsLanguageModalVisible(true)}
+            />
+            {/* Anime forces the language to Japanese server-side (see
+                DiscoverFilterView) — selecting it here mirrors that by
+                clearing any picked language, so the sheet never shows a
+                contradictory "Anime + Korean" state that wouldn't match
+                anything. */}
+            <SortPill
+              label="Anime"
+              Icon={Sparkles}
+              active={animeOnly}
+              onPress={() => setAnimeOnly(!animeOnly)}
+            />
+          </View>
+
           {/* Reset */}
-          {(selectedGenreId || sortOrder !== 'trending') && (
+          {(selectedGenreId || sortOrder !== 'trending' || selectedLanguage || animeOnly) && (
             <PressableScale
               style={[styles.resetBtn, { backgroundColor: c.glassFill, borderColor: c.hairline }]}
               onPress={resetFilters}
@@ -228,6 +268,14 @@ export default function DiscoverFilterSheet({ activeSegment }: Props) {
           )}
         </ScrollView>
       </Animated.View>
+
+      <LanguageFilterModal
+        visible={isLanguageModalVisible}
+        languages={DISCOVER_LANGUAGE_CODES}
+        selected={selectedLanguage}
+        onSelect={setSelectedLanguage}
+        onClose={() => setIsLanguageModalVisible(false)}
+      />
     </View>
   );
 }

@@ -8,9 +8,10 @@ import { useRouter } from 'expo-router';
 import * as SecureStore from 'expo-secure-store';
 import { ArrowLeft, LogOut, Monitor, Moon, Sun } from 'lucide-react-native';
 import React, { useEffect, useState } from 'react';
-import { Alert, ScrollView, StyleSheet, Switch, Text, View } from 'react-native';
+import { ScrollView, StyleSheet, Switch, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
+import LogoutConfirmModal from '../components/LogoutConfirmModal';
 import PressableScale from '../components/PressableScale';
 import { SegmentedControl } from '../components/SegmentedControl';
 import { api, API_BASE_URL } from '../lib/api';
@@ -57,6 +58,7 @@ export default function SettingsScreen() {
   const [notifyNewEpisode, setNotifyNewEpisode] = useState(true);
   const [notifyWeeklyDigest, setNotifyWeeklyDigest] = useState(false);
   const [isLoggingOut, setIsLoggingOut] = useState(false);
+  const [isLogoutModalVisible, setIsLogoutModalVisible] = useState(false);
 
   useEffect(() => {
     (async () => {
@@ -81,6 +83,7 @@ export default function SettingsScreen() {
   };
 
   const performLogout = async () => {
+    setIsLogoutModalVisible(false);
     setIsLoggingOut(true);
     try {
       const refreshToken = await SecureStore.getItemAsync('refresh_token');
@@ -101,10 +104,7 @@ export default function SettingsScreen() {
   };
 
   const handleLogout = () => {
-    Alert.alert('Log Out', 'Are you sure you want to log out?', [
-      { text: 'Cancel', style: 'cancel' },
-      { text: 'Log Out', style: 'destructive', onPress: performLogout },
-    ]);
+    setIsLogoutModalVisible(true);
   };
 
   const AppearanceIcon = preference === 'system' ? Monitor : preference === 'light' ? Sun : Moon;
@@ -180,6 +180,12 @@ export default function SettingsScreen() {
           </Text>
         </PressableScale>
       </ScrollView>
+
+      <LogoutConfirmModal
+        visible={isLogoutModalVisible}
+        onConfirm={performLogout}
+        onCancel={() => setIsLogoutModalVisible(false)}
+      />
     </SafeAreaView>
   );
 }

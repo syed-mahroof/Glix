@@ -109,7 +109,8 @@
             }
           ]
         }
-      ]
+      ],
+      "expo-font"
     ],
     "extra": {
       "router": {},

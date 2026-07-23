@@ -14,7 +14,7 @@ import PressableScale from './PressableScale';
 // ISO 639-1 → display name for TMDB's most common `original_language`
 // values. Falls back to the raw (uppercased) code for anything not listed
 // here, so an unmapped language never breaks the picker.
-const LANGUAGE_NAMES: Record<string, string> = {
+export const LANGUAGE_NAMES: Record<string, string> = {
   ml: 'Malayalam',
   ta: 'Tamil',
   te: 'Telugu',

@@ -10,9 +10,10 @@ import {
   MessageCircle,
   Plus,
   Star,
+  Trash2,
   WifiOff,
 } from 'lucide-react-native';
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   ActivityIndicator,
   ScrollView,
@@ -22,17 +23,22 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
+import CascadeModal from '../../components/CascadeModal';
 import { CastCard } from '../../components/CastCard';
 import GlassSurface from '../../components/GlassSurface';
 import PressableScale from '../../components/PressableScale';
 import { ProgressRing } from '../../components/ProgressRing';
 import { ProviderBadge } from '../../components/ProviderBadge';
+import RatingReviewCard from '../../components/RatingReviewCard';
 import { SeasonCard } from '../../components/SeasonCard';
+import Snackbar from '../../components/Snackbar';
 import { api } from '../../lib/api';
+import { todayLocalIso } from '../../lib/dateFormat';
 import { extractErrorMessage } from '../../lib/errors';
 import { goBack } from '../../lib/navigation';
 import { useAppTheme } from '../../lib/theme';
-import { Show, useWatchStore } from '../../store/watchStore';
+import { useCatchupCascade } from '../../lib/useCatchupCascade';
+import { Episode, RemovedShowSnapshot, Show, useWatchStore } from '../../store/watchStore';
 
 const BACKDROP_BASE_URL = 'https://image.tmdb.org/t/p/w780';
 const POSTER_BASE_URL = 'https://image.tmdb.org/t/p/w342';
@@ -87,7 +93,11 @@ export default function ShowDetailScreen() {
 
   const watchlist = useWatchStore((state) => state.watchlist);
   const fetchWatchlist = useWatchStore((state) => state.fetchWatchlist);
+  const fetchProfile = useWatchStore((state) => state.fetchProfile);
   const addShowToWatchlist = useWatchStore((state) => state.addShowToWatchlist);
+  const bulkToggleWatchState = useWatchStore((state) => state.bulkToggleWatchState);
+  const removeShowFromWatchlist = useWatchStore((state) => state.removeShowFromWatchlist);
+  const undoRemoveShow = useWatchStore((state) => state.undoRemoveShow);
 
   const [show, setShow] = useState<Show | null>(null);
   const [cast, setCast] = useState<CastMember[]>([]);
@@ -104,6 +114,15 @@ export default function ShowDetailScreen() {
   const [isTogglingFavorite, setIsTogglingFavorite] = useState(false);
   const [isTogglingArchive, setIsTogglingArchive] = useState(false);
   const [isAddingToWatchlist, setIsAddingToWatchlist] = useState(false);
+  const [isRemoving, setIsRemoving] = useState(false);
+  const [removeSnapshot, setRemoveSnapshot] = useState<RemovedShowSnapshot | null>(null);
+  const [removeSnackbarVisible, setRemoveSnackbarVisible] = useState(false);
+  const [addedSnackbarVisible, setAddedSnackbarVisible] = useState(false);
+  // Outside-row "mark season watched" (Phase D) — only one season's toggle
+  // can be in flight at a time, matching the single shared CascadeModal
+  // instance below (there's only ever one modal on screen regardless of
+  // which row triggered it).
+  const [togglingSeasonNumber, setTogglingSeasonNumber] = useState<number | null>(null);
 
   // The watchlist row for this show (if the user has tracked it at all)
   // lives in the Zustand store, not on the show-detail response itself —
@@ -121,6 +140,12 @@ export default function ShowDetailScreen() {
     if (watchlistEntry) {
       setIsFavorite(watchlistEntry.is_favorite);
       setIsArchived(watchlistEntry.status === 'ARCHIVED');
+    } else {
+      // Entry can now disappear without leaving this screen (Phase F's
+      // Remove action) — previously the only way watchlistEntry went from
+      // set to null was navigating away, so these never went stale in place.
+      setIsFavorite(false);
+      setIsArchived(false);
     }
   }, [watchlistEntry]);
 
@@ -196,13 +221,21 @@ export default function ShowDetailScreen() {
     }
   };
 
+  /** Phase I: no forced navigation on add — the pill itself already flips to
+   *  "In Watchlist" the moment `watchlistEntry` becomes truthy (the store's
+   *  optimistic update in `addShowToWatchlist`), so the only thing missing
+   *  without a redirect was a moment of confirmation; a Snackbar covers
+   *  that without taking the user off the screen they were already on.
+   *  `success`'s job changes from "should I navigate" to "should I confirm"
+   *  — the underlying optimistic-add/error-rollback in the store is
+   *  unchanged either way. */
   const handleAddToWatchlist = async () => {
     if (Number.isNaN(tmdbId) || isAddingToWatchlist || watchlistEntry) return;
     setIsAddingToWatchlist(true);
     const success = await addShowToWatchlist(tmdbId);
     setIsAddingToWatchlist(false);
     if (success) {
-      router.replace({ pathname: '/(tabs)/', params: { highlightFilter: 'NOT_STARTED' } });
+      setAddedSnackbarVisible(true);
     }
   };
 
@@ -222,6 +255,32 @@ export default function ShowDetailScreen() {
     }
   };
 
+  /** Full-delete "Remove from Watchlist" (Phase F) — acts immediately (same
+   *  pattern as the Catch-Up cascade's own Undo: commit now, offer a real
+   *  reversal, not a deferred commit) and shows Snackbar's Undo, which
+   *  replays the server-returned snapshot exactly rather than trusting
+   *  whatever this screen happens to have in local state. */
+  const handleRemoveFromWatchlist = async () => {
+    if (Number.isNaN(tmdbId) || isRemoving || !watchlistEntry) return;
+    setIsRemoving(true);
+    const snapshot = await removeShowFromWatchlist(tmdbId);
+    setIsRemoving(false);
+    if (snapshot) {
+      setRemoveSnapshot(snapshot);
+      setRemoveSnackbarVisible(true);
+    } else {
+      setSectionError('Could not remove from watchlist — try again.');
+    }
+  };
+
+  const handleUndoRemove = async () => {
+    setRemoveSnackbarVisible(false);
+    if (!removeSnapshot) return;
+    const snapshot = removeSnapshot;
+    setRemoveSnapshot(null);
+    await undoRemoveShow(snapshot);
+  };
+
   const displayShow = show || watchlistEntry?.show || (fallbackTitle ? {
     tmdb_id: tmdbId,
     title: fallbackTitle,
@@ -234,6 +293,93 @@ export default function ShowDetailScreen() {
     overview: fallbackOverview || null,
     total_seasons: 0,
   } as unknown as Show : null);
+
+  // Per-season aired/watched counts, derived from whatever seasons are
+  // already cached in this show's Zustand watchlist entry (`entry.show.episodes`
+  // — the same source lib/upcoming.ts reads). A season the user has never
+  // opened isn't in there yet, so it's simply absent from this map — SeasonCard
+  // already renders "Tap to view episodes" for that case (hasCounts=false),
+  // same as before this phase.
+  const today = useMemo(() => todayLocalIso(), []);
+  const seasonProgress = useMemo(() => {
+    const map = new Map<number, { episodeCount: number; watchedCount: number }>();
+    const episodes = watchlistEntry?.show.episodes ?? [];
+    for (const ep of episodes) {
+      if (!ep.air_date || ep.air_date > today) continue;
+      const bucket = map.get(ep.season_number) ?? { episodeCount: 0, watchedCount: 0 };
+      bucket.episodeCount += 1;
+      if (ep.is_watched) bucket.watchedCount += 1;
+      map.set(ep.season_number, bucket);
+    }
+    return map;
+  }, [watchlistEntry?.show.episodes, today]);
+
+  /** Shared finalize step for both the direct-unmark path and every
+   *  CascadeModal outcome (confirm/cancel/never-for-show) — identical
+   *  bulkToggleWatchState + refetch pattern as the season screen's own
+   *  finalizeSeasonWatch, just without a local `episodes` copy to update
+   *  optimistically (this screen doesn't keep one). */
+  const finalizeSeasonWatch = useCallback(
+    async (ids: number[], watched: boolean) => {
+      if (ids.length === 0) {
+        setTogglingSeasonNumber(null);
+        return;
+      }
+      await bulkToggleWatchState(ids, watched);
+      setTogglingSeasonNumber(null);
+      fetchProfile();
+      fetchWatchlist();
+    },
+    [bulkToggleWatchState, fetchProfile, fetchWatchlist]
+  );
+
+  const catchup = useCatchupCascade(finalizeSeasonWatch);
+
+  /** SeasonCard's outside-row toggle. Always fetches the season fresh
+   *  (same GET the season screen itself makes) rather than trusting
+   *  `seasonProgress` — that map only reflects whatever's already cached
+   *  locally, which can be stale or entirely absent for a season the user
+   *  hasn't opened yet, and correctness here matters more than saving one
+   *  request. Routes through the exact same server-side Catch-Up check
+   *  and batched toggle the season screen uses — no second implementation
+   *  of "mark season watched". */
+  const handleToggleSeasonOutside = useCallback(
+    async (seasonNumber: number) => {
+      if (togglingSeasonNumber !== null || Number.isNaN(tmdbId)) return;
+      setTogglingSeasonNumber(seasonNumber);
+      try {
+        const res = await api.get<Episode[]>(`/shows/${tmdbId}/season/${seasonNumber}/`);
+        const aired = res.data.filter((ep) => ep.air_date && ep.air_date <= today);
+        if (aired.length === 0) {
+          setTogglingSeasonNumber(null);
+          return;
+        }
+        const allWatched = aired.every((ep) => ep.is_watched);
+        if (allWatched) {
+          await finalizeSeasonWatch(aired.map((ep) => ep.tmdb_id), false);
+          return;
+        }
+        const unwatchedIds = aired.filter((ep) => !ep.is_watched).map((ep) => ep.tmdb_id);
+        const shown = await catchup.checkSeason(
+          tmdbId,
+          seasonNumber,
+          unwatchedIds,
+          displayShow?.title ?? '',
+          `Season ${seasonNumber}`
+        );
+        if (!shown) {
+          await finalizeSeasonWatch(unwatchedIds, true);
+        }
+        // If shown, togglingSeasonNumber stays set until the modal resolves —
+        // every CascadeModal outcome (confirm/cancel/neverForShow) calls
+        // onFinalize (finalizeSeasonWatch above), which clears it.
+      } catch (err) {
+        setSectionError(extractErrorMessage(err));
+        setTogglingSeasonNumber(null);
+      }
+    },
+    [togglingSeasonNumber, tmdbId, today, catchup, finalizeSeasonWatch, displayShow]
+  );
 
   if (isLoadingShow && !displayShow) {
     return (
@@ -320,6 +466,18 @@ export default function ShowDetailScreen() {
                   size={20}
                 />
               </PressableScale>
+              {watchlistEntry && (
+                <PressableScale
+                  onPress={handleRemoveFromWatchlist}
+                  disabled={isRemoving}
+                  hitSlop={8}
+                  style={styles.iconButton}
+                  accessibilityRole="button"
+                  accessibilityLabel="Remove from Watchlist"
+                >
+                  <Trash2 color="#FFFFFF" size={20} />
+                </PressableScale>
+              )}
             </View>
           </View>
         </View>
@@ -397,6 +555,12 @@ export default function ShowDetailScreen() {
           </GlassSurface>
         )}
 
+        {!Number.isNaN(tmdbId) && (
+          <View style={styles.section}>
+            <RatingReviewCard mediaType="show" tmdbId={tmdbId} />
+          </View>
+        )}
+
         {displayShow?.overview ? <Text style={[styles.overview, { color: c.textSecondary }]}>{displayShow.overview}</Text> : null}
 
         {sectionError && (
@@ -424,14 +588,23 @@ export default function ShowDetailScreen() {
         <View style={styles.section}>
           <Text style={[styles.sectionTitle, { color: c.textPrimary }]}>Seasons</Text>
           <View style={styles.seasonList}>
-            {seasonNumbers.map((seasonNumber) => (
-              <SeasonCard
-                key={seasonNumber}
-                seasonNumber={seasonNumber}
-                showPosterPath={displayShow?.poster_path}
-                onPress={() => router.push(`/show/${tmdbId}/season/${seasonNumber}`)}
-              />
-            ))}
+            {seasonNumbers.map((seasonNumber) => {
+              const progress = seasonProgress.get(seasonNumber);
+              return (
+                <SeasonCard
+                  key={seasonNumber}
+                  seasonNumber={seasonNumber}
+                  showPosterPath={displayShow?.poster_path}
+                  episodeCount={progress?.episodeCount}
+                  watchedCount={progress?.watchedCount}
+                  onPress={() => router.push(`/show/${tmdbId}/season/${seasonNumber}`)}
+                  onToggleWatched={
+                    watchlistEntry ? () => handleToggleSeasonOutside(seasonNumber) : undefined
+                  }
+                  isTogglingWatched={togglingSeasonNumber === seasonNumber}
+                />
+              );
+            })}
           </View>
         </View>
         ) : null}
@@ -510,6 +683,38 @@ export default function ShowDetailScreen() {
           </View>
         )}
       </ScrollView>
+
+      <CascadeModal
+        visible={catchup.visible}
+        showTitle={catchup.showTitle}
+        episodeLabel={catchup.episodeLabel}
+        previousCount={catchup.previousCount}
+        onConfirm={catchup.confirm}
+        onCancel={catchup.cancel}
+        onNeverForThisShow={catchup.neverForShow}
+      />
+
+      <Snackbar
+        visible={catchup.undoVisible}
+        message={`Marked ${catchup.undoCount} episode${catchup.undoCount !== 1 ? 's' : ''} watched`}
+        actionLabel="UNDO"
+        onAction={catchup.performUndo}
+        onDismiss={catchup.dismissUndo}
+      />
+
+      <Snackbar
+        visible={removeSnackbarVisible}
+        message="Removed from Watchlist"
+        actionLabel="UNDO"
+        onAction={handleUndoRemove}
+        onDismiss={() => setRemoveSnackbarVisible(false)}
+      />
+
+      <Snackbar
+        visible={addedSnackbarVisible}
+        message="Added to Watchlist"
+        onDismiss={() => setAddedSnackbarVisible(false)}
+      />
     </SafeAreaView>
   );
 }
