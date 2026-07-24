@@ -137,6 +137,7 @@ export default function MovieDetailScreen() {
   const [removeSnapshot, setRemoveSnapshot] = useState<RemovedMovieSnapshot | null>(null);
   const [removeSnackbarVisible, setRemoveSnackbarVisible] = useState(false);
   const [addedSnackbarVisible, setAddedSnackbarVisible] = useState(false);
+  const [reviewSnackbarMessage, setReviewSnackbarMessage] = useState<string | null>(null);
 
   const movieWatchlist = useWatchStore((state) => state.movieWatchlist);
   const fetchMovieWatchlist = useWatchStore((state) => state.fetchMovieWatchlist);
@@ -462,7 +463,7 @@ export default function MovieDetailScreen() {
         {/* ── Your Rating (Phase L) ────────────────────────────────────── */}
         {!Number.isNaN(tmdbId) && (
           <View style={styles.section}>
-            <RatingReviewCard mediaType="movie" tmdbId={tmdbId} />
+            <RatingReviewCard mediaType="movie" tmdbId={tmdbId} onSaved={setReviewSnackbarMessage} />
           </View>
         )}
 
@@ -581,6 +582,12 @@ export default function MovieDetailScreen() {
         visible={addedSnackbarVisible}
         message="Added to Watchlist"
         onDismiss={() => setAddedSnackbarVisible(false)}
+      />
+
+      <Snackbar
+        visible={!!reviewSnackbarMessage}
+        message={reviewSnackbarMessage ?? ''}
+        onDismiss={() => setReviewSnackbarMessage(null)}
       />
     </View>
   );

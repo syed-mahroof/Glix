@@ -13,19 +13,37 @@ export interface WatchlistWidgetShow {
 
 export interface WatchlistWidgetProps {
   watchlist?: WatchlistWidgetShow[];
+  loggedOut?: boolean;
 }
 
 const ACCENT = '#E4FA1A';
 
-const NullState = () => (
-  <VStack alignment="center" spacing={8} modifiers={[padding({ all: 16 })]}>
-    <Text modifiers={[foregroundColor(ACCENT), font({ size: 16, weight: 'bold' })]}>Glix</Text>
-    <Text modifiers={[foregroundColor('#FFFFFF'), font({ size: 14 })]}>Your watchlist is empty.</Text>
-    <Text modifiers={[foregroundColor('rgba(255, 255, 255, 0.6)'), font({ size: 12 })]}>
-      Add shows to track them here!
-    </Text>
-  </VStack>
-);
+// Three distinct reasons the widget can have nothing to show, previously
+// all rendered as the same "Your watchlist is empty" copy:
+//  - watchlist === undefined: updateSnapshot() has never been called with
+//    real data (fresh install/reinstall) — not yet synced, not "0 shows."
+//  - loggedOut: store/watchStore.ts's clearWidgetData() wrote this
+//    explicitly on sign-out.
+//  - otherwise: a real sync ran and the watchlist is genuinely empty.
+const NullState = ({ watchlist, loggedOut }: WatchlistWidgetProps) => {
+  const message =
+    watchlist === undefined
+      ? 'Open Glix to sync your watchlist.'
+      : loggedOut
+        ? 'Log in to see your watchlist.'
+        : 'Your watchlist is empty.';
+  return (
+    <VStack alignment="center" spacing={8} modifiers={[padding({ all: 16 })]}>
+      <Text modifiers={[foregroundColor(ACCENT), font({ size: 16, weight: 'bold' })]}>Glix</Text>
+      <Text modifiers={[foregroundColor('#FFFFFF'), font({ size: 14 })]}>{message}</Text>
+      {watchlist !== undefined && !loggedOut ? (
+        <Text modifiers={[foregroundColor('rgba(255, 255, 255, 0.6)'), font({ size: 12 })]}>
+          Add shows to track them here!
+        </Text>
+      ) : null}
+    </VStack>
+  );
+};
 
 // A compact single-row layout (glyph + 2 lines), as opposed to the full
 // hero treatment below — used for the 2nd item on systemMedium, where
@@ -50,7 +68,7 @@ function Layout(props: WatchlistWidgetProps, environment: WidgetEnvironment) {
   if (shows.length === 0) {
     return (
       <VStack alignment="center" modifiers={[background('#000000')]}>
-        <NullState />
+        <NullState watchlist={props?.watchlist} loggedOut={props?.loggedOut} />
       </VStack>
     );
   }

@@ -60,6 +60,17 @@ export function WatchlistWidget({ data }: { data: any }) {
   const items: WatchlistWidgetItem[] = data?.watchlist ?? [];
 
   if (items.length === 0) {
+    // Three distinct reasons the list can be empty, previously all
+    // collapsed into the same "Your watchlist is empty" copy:
+    //  - data === null: SharedPreferences has never had a widgetData key
+    //    written (fresh install, or storage cleared) — the app hasn't
+    //    synced yet, which reads very differently from "you have 0 shows."
+    //  - data.loggedOut: store/watchStore.ts's clearWidgetData() wrote this
+    //    explicitly on sign-out — showing "empty" here reads as "you have
+    //    no shows" when the real state is "you're signed out."
+    //  - otherwise: a real sync ran and the watchlist is genuinely empty.
+    const message =
+      data == null ? 'Open Glix to sync your watchlist.' : data.loggedOut ? 'Log in to see your watchlist.' : 'Your watchlist is empty.';
     return (
       <FlexWidget
         clickAction="OPEN_APP"
@@ -74,7 +85,7 @@ export function WatchlistWidget({ data }: { data: any }) {
         }}
       >
         <TextWidget text="Glix" style={{ fontSize: 16, color: '#E4FA1A', fontWeight: 'bold' }} />
-        <TextWidget text="Your watchlist is empty." style={{ fontSize: 14, color: '#FFFFFF', marginTop: 8 }} />
+        <TextWidget text={message} style={{ fontSize: 14, color: '#FFFFFF', marginTop: 8 }} />
       </FlexWidget>
     );
   }

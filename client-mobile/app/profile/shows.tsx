@@ -4,11 +4,9 @@
 import { FlashList } from '@shopify/flash-list';
 import { Image } from 'expo-image';
 import { useRouter } from 'expo-router';
-import { ArrowLeft, BookOpen, Languages, Search, Sparkles, Tv2, X } from 'lucide-react-native';
+import { ArrowLeft, BookOpen, Search, Sparkles, Tv2, X } from 'lucide-react-native';
 import React, { useEffect, useMemo, useState } from 'react';
 import {
-  Animated,
-  ScrollView,
   StyleSheet,
   Text,
   TextInput,
@@ -16,10 +14,12 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
+import FloatingFilterButton from '../../components/FloatingFilterButton';
 import LanguageFilterModal, { languageDisplayName } from '../../components/LanguageFilterModal';
 import LayoutToggle from '../../components/LayoutToggle';
 import PressableScale from '../../components/PressableScale';
 import ShowPosterCard from '../../components/ShowPosterCard';
+import WatchlistFilterSheet from '../../components/WatchlistFilterSheet';
 import { isAnimeByGenresAndLanguage } from '../../lib/anime';
 import { useAppTheme, type ThemeColors } from '../../lib/theme';
 import { WatchlistEntry } from '../../store/watchStore';
@@ -27,12 +27,16 @@ import { useWatchStore } from '../../store/watchStore';
 
 const POSTER_BASE = 'https://image.tmdb.org/t/p/w185';
 
-type FilterKey = 'ALL' | 'UP_TO_DATE' | 'TO_WATCH' | 'ENDED';
+// "Up to Date" was dropped as a status filter here (Phase 57) in favor of
+// the "Last Watched" sort in the filter sheet below — sorting the whole
+// list by recency is more broadly useful than a filter that only ever
+// isolated the caught-up subset. The per-item "Up to Date" status badge
+// (statusLabel/statusColor below) is untouched.
+type FilterKey = 'ALL' | 'TO_WATCH' | 'ENDED';
 
 const FILTERS: { key: FilterKey; label: string }[] = [
   { key: 'ALL', label: 'All' },
   { key: 'TO_WATCH', label: 'Continuing' },
-  { key: 'UP_TO_DATE', label: 'Up to Date' },
   { key: 'ENDED', label: 'Ended' },
 ];
 
@@ -151,11 +155,13 @@ export default function ProfileShowsScreen() {
   const [filter, setFilter] = useState<FilterKey>('ALL');
   const [query, setQuery] = useState('');
   const [isLanguageModalVisible, setIsLanguageModalVisible] = useState(false);
+  const [isFilterSheetVisible, setIsFilterSheetVisible] = useState(false);
   // Local, not global store state like selectedLanguage — nothing in this
   // phase's ask requires the Anime toggle to persist across My Shows / My
   // Movies the way Language deliberately does; kept simple unless the user
   // wants it elevated later.
   const [animeOnly, setAnimeOnly] = useState(false);
+  const [lastWatchedSort, setLastWatchedSort] = useState(false);
 
   useEffect(() => {
     fetchWatchlist();
@@ -181,8 +187,7 @@ export default function ProfileShowsScreen() {
 
   const filtered = useMemo(() => {
     let result = allEntries;
-    if (filter === 'UP_TO_DATE') result = result.filter((e) => e.status === 'UP_TO_DATE' && e.show.status !== 'ENDED');
-    else if (filter === 'TO_WATCH') result = result.filter((e) => e.status === 'TO_WATCH' && e.show.status !== 'ENDED');
+    if (filter === 'TO_WATCH') result = result.filter((e) => e.status === 'TO_WATCH' && e.show.status !== 'ENDED');
     else if (filter === 'ENDED') result = result.filter((e) => e.show.status === 'ENDED');
 
     if (selectedLanguage) {
@@ -197,8 +202,29 @@ export default function ProfileShowsScreen() {
     if (trimmedQuery) {
       result = result.filter((e) => e.show.title.toLowerCase().includes(trimmedQuery));
     }
+
+    if (lastWatchedSort) {
+      // Never-watched entries (null last_watched_at) sink to the bottom,
+      // most-recently-watched first — matches the field's own semantics
+      // (Phase 41: bumped only on a real mark-watched action).
+      result = [...result].sort((a, b) => {
+        if (!a.last_watched_at && !b.last_watched_at) return 0;
+        if (!a.last_watched_at) return 1;
+        if (!b.last_watched_at) return -1;
+        return b.last_watched_at.localeCompare(a.last_watched_at);
+      });
+    }
     return result;
-  }, [allEntries, filter, selectedLanguage, animeOnly, query]);
+  }, [allEntries, filter, selectedLanguage, animeOnly, query, lastWatchedSort]);
+
+  const hasActiveFilters = filter !== 'ALL' || selectedLanguage !== null || animeOnly || lastWatchedSort;
+
+  const handleReset = () => {
+    setFilter('ALL');
+    setLanguageFilter(null);
+    setAnimeOnly(false);
+    setLastWatchedSort(false);
+  };
 
   return (
     <SafeAreaView style={[styles.container, { backgroundColor: c.bg }]} edges={['top']}>
@@ -239,68 +265,37 @@ export default function ProfileShowsScreen() {
         </View>
       </View>
 
-      {/* Filter Pills — horizontally scrollable (Phase H): this row used to
-          be a plain non-scrolling View, so once the status pills + Language
-          (+ now Anime) exceeded the screen width, the trailing pills were
-          simply clipped off-screen with no way to reach them at all. */}
-      <ScrollView
-        horizontal
-        showsHorizontalScrollIndicator={false}
-        contentContainerStyle={styles.pillRow}
-      >
-        {FILTERS.map(({ key, label }) => (
-          <PressableScale
-            key={key}
-            style={[
-              styles.pill,
-              { backgroundColor: c.glassFill, borderColor: c.hairline },
-              filter === key && { backgroundColor: c.accentFill, borderColor: c.accentFill },
-            ]}
-            onPress={() => setFilter(key)}
-          >
-            <Text style={[styles.pillText, { color: c.textSecondary }, filter === key && { color: c.onAccent }]}>
-              {label}
-            </Text>
-          </PressableScale>
-        ))}
-        <PressableScale
-          style={[
-            styles.pill,
-            styles.languagePill,
-            { backgroundColor: c.glassFill, borderColor: c.hairline },
-            selectedLanguage && { backgroundColor: c.accentFill, borderColor: c.accentFill },
-          ]}
-          onPress={() => setIsLanguageModalVisible(true)}
-        >
-          <Languages color={selectedLanguage ? c.onAccent : c.textSecondary} size={14} />
-          <Text style={[styles.pillText, { color: c.textSecondary }, selectedLanguage && { color: c.onAccent }]}>
-            {selectedLanguage ? languageDisplayName(selectedLanguage) : 'Language'}
-          </Text>
-        </PressableScale>
-        <PressableScale
-          style={[
-            styles.pill,
-            styles.languagePill,
-            { backgroundColor: c.glassFill, borderColor: c.hairline },
-            animeOnly && { backgroundColor: c.accentFill, borderColor: c.accentFill },
-          ]}
-          onPress={() => setAnimeOnly((prev) => !prev)}
-          accessibilityRole="button"
-          accessibilityState={{ selected: animeOnly }}
-        >
-          <Sparkles color={animeOnly ? c.onAccent : c.textSecondary} size={14} />
-          <Text style={[styles.pillText, { color: c.textSecondary }, animeOnly && { color: c.onAccent }]}>
-            Anime
-          </Text>
-        </PressableScale>
-      </ScrollView>
-
       <LanguageFilterModal
         visible={isLanguageModalVisible}
         languages={availableLanguages}
         selected={selectedLanguage}
         onSelect={setLanguageFilter}
         onClose={() => setIsLanguageModalVisible(false)}
+      />
+
+      <WatchlistFilterSheet
+        visible={isFilterSheetVisible}
+        onClose={() => setIsFilterSheetVisible(false)}
+        title="Filter Shows"
+        statusOptions={FILTERS}
+        statusFilter={filter}
+        onStatusChange={(key) => setFilter(key as FilterKey)}
+        lastWatchedSort={lastWatchedSort}
+        onToggleLastWatchedSort={() => setLastWatchedSort((prev) => !prev)}
+        selectedLanguage={selectedLanguage}
+        onOpenLanguagePicker={() => setIsLanguageModalVisible(true)}
+        languageDisplay={selectedLanguage ? languageDisplayName(selectedLanguage) : 'Any Language'}
+        tagToggles={[
+          {
+            key: 'anime',
+            label: 'Anime',
+            Icon: Sparkles,
+            active: animeOnly,
+            onPress: () => setAnimeOnly((prev) => !prev),
+          },
+        ]}
+        hasActiveFilters={hasActiveFilters}
+        onReset={handleReset}
       />
 
       {/* List */}
@@ -313,7 +308,7 @@ export default function ProfileShowsScreen() {
           <Text style={[styles.emptySubtitle, { color: c.textTertiary }]}>
             {query.trim()
               ? `No shows match "${query.trim()}".`
-              : filter === 'ALL' && !selectedLanguage
+              : !hasActiveFilters
               ? 'Start tracking shows from the Discover tab.'
               : 'No shows match this filter.'}
           </Text>
@@ -335,6 +330,8 @@ export default function ProfileShowsScreen() {
           />
         </View>
       )}
+
+      <FloatingFilterButton onPress={() => setIsFilterSheetVisible(true)} active={hasActiveFilters} />
     </SafeAreaView>
   );
 }
@@ -386,28 +383,6 @@ const styles = StyleSheet.create({
     fontSize: 14,
     height: '100%',
   },
-  pillRow: {
-    flexDirection: 'row',
-    paddingHorizontal: 16,
-    gap: 8,
-    marginBottom: 12,
-  },
-  pill: {
-    paddingHorizontal: 14,
-    paddingVertical: 7,
-    borderRadius: 20,
-    borderWidth: StyleSheet.hairlineWidth,
-  },
-  pillText: {
-    fontSize: 13,
-    fontWeight: '600',
-  },
-  languagePill: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 5,
-  },
-
   listWrap: { flex: 1 },
   listContent: { paddingHorizontal: 16, paddingBottom: 32 },
 

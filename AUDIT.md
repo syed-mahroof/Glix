@@ -1,3 +1,175 @@
+## 🟢 FINAL PERFORMANCE PASS + PRE-PUSH AUDIT + CONSOLIDATED DEVICE-VERIFICATION GAP LIST (2026-07-24, master fix prompt Batch 2 — closing phase of the Phase 54–62 batch)
+
+### 🟢 (a) Pre-push audit — every checklist item, all clean
+Grep-swept every file touched across Phases 54–61 for hardcoded colors, raw `TouchableOpacity` in place of the established `Pressable`/`PressableScale` pattern, `console.log`/`TODO`/`FIXME`/`XXX` debug scaffolding, and backend `permission_classes` gaps — clean, nothing to fix. The two Phase 57 components (`FloatingFilterButton.tsx`, `WatchlistFilterSheet.tsx`) already correctly use `PressableScale`/`useAppTheme()`; `FloatingFilterButton.tsx`'s `shadowColor: '#000'` is the platform-universal RN shadow convention, not a themed color. `manage.py check` clean. `makemigrations --check --dry-run` clean (no model changes since Phase 60). `pytest` inside `watchtracker_backend` — 65/65, unchanged from Phase 60 (no backend files touched this phase or Phase 61). `git status --short` confirmed exactly the expected touched-file set for the whole batch plus this phase's two fix files, nothing stray.
+
+### 🟢 (b) Closed both standing `tsc --noEmit` baseline errors
+These two had been documented as an unchanged, out-of-scope baseline across every phase this session (and the session before it): `__tests__/watchStore.test.ts(7,18)` asserted `state.isLoading`, a field no longer on `WatchStoreState` — it was superseded, at some earlier undocumented point, by five separate per-resource flags (`isLoadingWatchlist`/`isLoadingMovies`/`isLoadingHistory`/`isLoadingProfile`/`isLoadingAnalytics`) — fixed the assertion to `state.isLoadingWatchlist`, the correct analog for what the test actually checks (initial watchlist-loading state). `HeroCarousel.tsx(83,55)` called `useAutoPlay(scrollRef, ...)` where `useAutoPlay`'s own signature typed `scrollRef` as the non-nullable `React.RefObject<Animated.ScrollView>`, but the caller's `useRef<Animated.ScrollView>(null)` produces `RefObject<Animated.ScrollView | null>` under the installed TypeScript's strict `RefObject` variance — widened the parameter type to `React.RefObject<Animated.ScrollView | null>`, matching the actual nullable ref every caller passes. Verified via two separate background `tsc --noEmit` runs (before and after the fix, both let run to completion rather than assumed): before — the same 2 errors, confirming nothing else had drifted; after — **zero errors**, the first fully clean run across this entire multi-phase engagement (this session's baseline was 2, and an earlier session's baseline before that was 11).
+
+### 🟡 Consolidated into `ROADMAP.md`'s Remaining/Future Work table, not left buried in prose
+Phase 60's report flagged, but never formally tracked, that `achievements.tsx` and `year-review.tsx` share the identical mount-only-fetch staleness pattern Phase 56 (Watch History tab) and Phase 60 (Analytics tab) both had to fix — both screens sit one hop from Analytics under the same frozen (not unmounted) tab stack, so switching away and back can leave their data stale with no refetch trigger. Added it as a new row to `ROADMAP.md`'s Remaining/Future Work table this phase so it survives past this session rather than requiring someone to re-read Phase 60's paragraph to rediscover it.
+
+### 📋 CONSOLIDATED — everything not verifiable without a real device/emulator, across the entire Phase 54–62 batch
+This project's single biggest standing gap, kept visible here in one place per the master fix prompt's own closing-phase instruction, rather than scattered across 9 separate phase reports:
+
+- **Phase 54** (Upcoming tab flood scoping): the real on-screen chevron/tap feel for the new collapsible OVERDUE header, and whether "OVERDUE (N)" reads clearly against the red/negative accent in both themes.
+- **Phase 55** (Widget future-only scoping + redesign): actual on-device card rendering, day-badge legibility, and tap-through on a real widget instance — Android RemoteViews and iOS WidgetKit can both render subtly differently from the JSX in ways only a real device surfaces.
+- **Phase 56** (Watch History desync fix): real-device timing/feel of the instant Watch History update, and the accepted, pre-existing-class race between an in-flight `fetchHistory()` and a same-tick optimistic toggle.
+- **Phase 57** (My Shows/My Movies filter-pill → floating button): actual pill-row height before/after side by side, the sheet's open/close feel, and the floating button's visual placement over real list content.
+- **Phase 58** (Filter sheet scroll clipping fix): actual scroll-to-tail behavior with a real long genre/language list, and whether the fixed sheet heights (72%/62% of screen) are generous enough on small physical screens even after this fix.
+- **Phase 59** (Rating/review save confirmation + star animation): actual animation feel/timing, and Snackbar-stacking behavior if a review save and a watchlist add/remove toast fire in quick succession.
+- **Phase 60** (Profile stats sync correctness): actual `useFocusEffect` refetch behavior switching away from and back to the Profile tab.
+- **Phase 61** (Widget reliability offline/empty): actual on-screen copy across a real logout, a real fresh install before first sync, and Android's periodic OS-triggered redraw correctly picking up the new `loggedOut` flag.
+- **Phase 62** (this phase): by nature an audit-only phase — every finding in (a)/(b) above was verified via code tracing, `grep`, background `tsc`/`pytest` runs, and `git status` only, never a live running app build. Adds no new device-dependent gap of its own.
+
+No physical device or emulator was available at any point across this session's Batch 2 (Phases 54–62), matching the gap already logged for the prior Batch 1 session. Every fix was verified by the strongest available proxy (`tsc --noEmit`, `manage.py check`, `pytest` inside Docker, and manual code tracing) — this list is the complete, itemized record of what that proxy verification could not reach. EAS Build for on-device widget/UI testing remains tracked as the top `ROADMAP.md` Remaining/Future Work item.
+
+### Files (Phase 62 itself)
+`client-mobile/__tests__/watchStore.test.ts`, `client-mobile/components/HeroCarousel.tsx`, `ROADMAP.md`, `context.md`, `PROJECT_STATUS.md`, `AUDIT.md` — no other code changes this phase.
+
+---
+
+
+## 🔴 REAL BUG FOUND & FIXED — Widgets showed "your watchlist is empty" after logout instead of prompting login, and identically for a never-synced fresh install (2026-07-24, master fix prompt Batch 2, Phase 61)
+
+### 🔴 Root cause
+All four widget render files (`widgets/android/WatchlistWidget.tsx`, `widgets/android/UpcomingWidget.tsx`, `widgets/ios/WatchlistWidget.tsx`, `widgets/ios/UpcomingWidget.tsx`) rendered the identical "Your watchlist is empty."/"No upcoming shows." copy for three genuinely different states: (1) never synced yet — Android's `SharedPreferences` read returns `null` before any write, iOS props are `undefined` before the first `updateSnapshot()` call; (2) explicitly logged out — `store/watchStore.ts`'s `clearWidgetData()`, called from `app/settings.tsx`'s logout flow, wrote `{watchlist: [], upcoming: []}`, indistinguishable in shape from a real empty account; (3) a genuinely-synced account with zero shows. The logged-out case is the most user-facing: `clearWidgetData()`'s own existing comment ("Otherwise the home-screen widgets keep showing this account's watchlist to whoever uses the device next") confirms the clear itself is intentional and correct — a real privacy concern on shared devices or account switches — but the resulting copy then told the next person "your watchlist is empty," reading as "this account has 0 shows" rather than "you're signed out."
+
+### ✅ RESOLVED
+Added a `loggedOut: true` marker to `clearWidgetData()`'s payload on both platforms (Android's `SharedPreferences.setItem('widgetData', ...)` write and iOS's two `updateSnapshot()` calls). All four widget files' empty-state branch now checks, in order: data never synced (`data == null` on Android / the relevant array prop `=== undefined` on iOS) → "Open Glix to sync your watchlist."/"...your shows."; `loggedOut` → "Log in to see your watchlist."/"...upcoming episodes."; otherwise → the original "Your watchlist is empty."/"No upcoming shows." copy, unchanged. `syncWidgetData()`'s own success path already writes a fresh object literal with no `loggedOut` key on every real sync, so logging back in and syncing correctly clears the marker with no extra bookkeeping required.
+
+### Regression audit
+Audited all 5 `syncWidgetData()` call sites in `store/watchStore.ts` (`fetchWatchlist`, `toggleWatchState`, `bulkToggleWatchState`, `addShowToWatchlist`, `removeShowFromWatchlist`) — confirmed every one fires only in its success branch, never on the optimistic-update or rollback paths, so no offline/failed mutation can push stale data to the widget (no bug found, existing behavior already correct). Re-confirmed `widgets/android/WidgetProvider.tsx`'s `widgetTaskHandler`/`readWidgetData` and `app/_layout.tsx`'s `registerWidgetTaskHandler` wiring and `AppState` background-flush effect are all still correctly guarded, try/catch-wrapped, and module-scope registered — genuine pre-existing offline resilience via Android's SharedPreferences cache + periodic OS redraw and iOS's native WidgetKit snapshot persistence, no changes needed. Considered adding retry/backoff to `syncWidgetData()`'s own try/catch and deliberately did not — three independent self-healing paths already cover a transient failure (next mutation's own sync call, Android's periodic redraw re-reading the last-good cache, the `AppState` background flush), so a bespoke retry would have duplicated existing coverage.
+
+### Files
+`client-mobile/store/watchStore.ts`, `client-mobile/widgets/android/WatchlistWidget.tsx`, `client-mobile/widgets/android/UpcomingWidget.tsx`, `client-mobile/widgets/ios/WatchlistWidget.tsx`, `client-mobile/widgets/ios/UpcomingWidget.tsx`.
+
+### Verification
+`tsc --noEmit` — 2 errors, same pre-existing baseline (`__tests__/watchStore.test.ts`, `HeroCarousel.tsx`), zero new. No backend files touched this phase. **Not verifiable this session:** no device — actual on-screen copy across a real logout, a real fresh install before first sync, and Android's periodic OS-triggered redraw correctly picking up the new `loggedOut` flag.
+
+---
+
+
+## 🔴 REAL BUG FOUND & FIXED — Analytics dashboard/streak/heatmap went stale after watching elsewhere and returning to the Profile tab; no admin recovery path existed for total_time_watched drift (2026-07-24, master fix prompt Batch 2, Phase 60)
+
+### 🔴 Root cause
+`app/analytics.tsx` fetched its dashboard/streak/heatmap/genres/completion/monthly-recap exactly once, in a mount-only `useEffect`. This screen's stack lives inside the Profile tab and is frozen rather than unmounted on tab switch (same architecture as every other tab), so watching an episode or movie on a different tab and switching back to Profile left every one of these server-computed stats showing what they were at last mount — the identical staleness class Phase 56 already fixed for the Watch History tab. Separately: `total_time_watched` itself is kept correct in real time by consistently-guarded F()-expression updates on every mutation path (verified: single/cascade episode toggle, movie toggle, remove-show, remove-movie, TV Time import — all identical pattern, no gap), but unlike `WatchStreak` (which has `recalculate_watch_streak` as an idempotent Celery safety net) there was no way for an admin to recover a profile whose stored value had drifted from actual watch history for any other reason.
+
+### ✅ RESOLVED
+`app/analytics.tsx`: replaced the mount-only `useEffect` with `useFocusEffect` (`@react-navigation/native`, already a direct dependency — first use of this hook in the codebase, but the standard tool for exactly this problem) so every stat refetches whenever the screen regains focus, not just on first mount. `backend/core/admin.py`: added `recalculate_total_time_watched` on `UserProfileAdmin`, re-summing every `WatchState`/`MovieWatchState` row's current runtime — documented as a drift-correction tool (not routine maintenance, since a title's runtime can legitimately change on TMDB after it was originally credited). Added `recalculate_streak_action` on `WatchStreakAdmin`, manually queuing the existing (and re-verified still correct/idempotent) `recalculate_watch_streak` task per user — confirmed that task is not on `CELERY_BEAT_SCHEDULE` and only ever fires automatically after a TV Time import, so this is the only on-demand trigger available for the ordinary case.
+
+### Regression audit
+Ran the new admin aggregation as a read-only query against the real dev database (not just reasoned about it) — it correctly surfaced genuine drift on an actual profile (8413 stored vs. 8683 recomputed minutes), confirming both correctness and that the gap was real rather than hypothetical. Deliberately did not invoke the mutating action against that profile — confirming the read logic works didn't require writing, and actually changing a real profile's data wasn't asked for. Investigated `achievements.tsx` and `year-review.tsx`, which share the identical mount-only pattern one hop from Analytics under the same frozen tab stack — same latent bug class, knowingly left unfixed as out of this phase's bounded scope rather than silently expanded into.
+
+### Files
+`backend/core/admin.py`, `client-mobile/app/analytics.tsx`.
+
+### Verification
+`pytest` inside `watchtracker_backend` — 65/65, unchanged from baseline. `manage.py check` clean. `makemigrations --check --dry-run` clean (no model changes). `tsc --noEmit` — 2 errors, same pre-existing baseline, zero new. **Not verifiable this session:** no device — actual focus-effect refetch behavior switching away from and back to the Profile tab.
+
+---
+
+
+## 🔴 REAL BUG FOUND & FIXED — Rating/review card saved silently with no confirmation, no explicit note-save, a self-erasing privacy placeholder, and no real star-tap animation (2026-07-24, master fix prompt Batch 2, Phase 59)
+
+### 🔴 Root cause
+`components/RatingReviewCard.tsx` (shared by both show/movie detail screens) POSTed every rating tap and note blur with zero user-visible confirmation. The note only ever saved implicitly on blur, with no visible affordance telling the user how/when it saves. The placeholder text ("Add a note (optional, only visible to you)") carried the entire privacy reassurance — which disappears the instant the user starts typing, since placeholders only render on an empty input, vanishing exactly when it matters. Stars had only the component-generic `PressableScale` press-in/out scale — no animation tied to an actual rating change.
+
+### ✅ RESOLVED
+Added an `onSaved?: (message: string) => void` prop, firing "Rating saved" / "Note saved" / "Review deleted" after each successful round-trip. Both `app/show/[id].tsx` and `app/movie/[id].tsx` already render their added/removed-from-watchlist `Snackbar`s as a `ScrollView` sibling at the screen root; added a third `reviewSnackbarMessage` state + `Snackbar` there, matching that exact convention rather than a toast nested inside the card itself. Added `savedNote` state to track dirtiness and a new "Save note" button (disabled unless the note actually changed) alongside the pre-existing save-on-blur, which now also skips a redundant POST when nothing changed. Moved the privacy line out of the placeholder into a persistent caption above the input ("Private — only visible to you"), shortened the placeholder to "Share your thoughts...". Added an internal `AnimatedStar` sub-component: a Reanimated pop (`withSequence`/`withTiming`/`withSpring`) fires only on the false→true activation transition (so loading an existing rating doesn't animate), staggered by position so jumping straight from e.g. 1 to 5 stars ripples left-to-right.
+
+### Files
+`client-mobile/components/RatingReviewCard.tsx`, `client-mobile/app/show/[id].tsx`, `client-mobile/app/movie/[id].tsx`.
+
+### Verification
+`node --stack-size=8000 tsc --noEmit` — 2 errors, same pre-existing baseline, zero new. Confirmed `handleSelectStar` still posts the current (even if not yet explicitly saved) note text alongside a new rating, unchanged from before, and now correctly marks it saved since it just round-tripped. The exact original master-prompt wording for this phase wasn't recoverable from any doc file (same gap already noted for Phases 57/58) — the placeholder and animation specifics above are a judgment call from live-code investigation, not verbatim instructions. **Not verifiable this session:** no device — actual animation feel/timing, and Snackbar-stacking behavior if a review save and a watchlist add/remove toast fire in quick succession (a pre-existing risk the screen's other two Snackbars already carry).
+
+---
+
+
+## 🔴 REAL BUG FOUND & FIXED — Discover/Watchlist filter sheets clipping tail content + sort pills missing toggle-off (2026-07-24, master fix prompt Batch 2, Phase 58)
+
+### 🔴 Root cause
+`components/DiscoverFilterSheet.tsx`, the new `components/WatchlistFilterSheet.tsx` (Phase 57, this batch), and `components/LanguageFilterModal.tsx` all had a `ScrollView` with no `style` prop — only `contentContainerStyle`. Without an explicit `flex`/height, a `ScrollView` sizes itself to its full content rather than the space actually available. The two sheets sit in a parent `View` with a real fixed pixel height (`Dimensions`-derived); once genre + language + anime + reset content exceeded it, the tail was silently clipped — Android implicitly clips overflow once `borderRadius` is set on a `View` (both sheets round their top corners), so there was no scrollbar and no way to reach the cut-off content. Separately, Discover's Sort By pills only ever set `sortOrder` forward — tapping the already-active pill (including "Trending") was a no-op, unlike the Genre/Anime pills in the same sheet which already supported deselect-by-retap.
+
+### ✅ RESOLVED
+Added `style={{ flex: 1 }}` to the `ScrollView` in both `DiscoverFilterSheet.tsx` and `WatchlistFilterSheet.tsx` — valid here because their parent has a concrete fixed height, so `flex: 1` correctly claims the remaining space after the handle/header. `LanguageFilterModal.tsx`'s sheet uses `maxHeight: '70%'` instead (deliberately, so a short language list still hugs its content rather than leaving empty space) — `flex: 1` there would fight that and collapse the list to zero height, so it got `flexShrink: 1` instead, which only engages once the list is long enough to actually hit the cap. For toggle-off: Discover's `onPress` changed to `setSortOrder(sortOrder === opt.key ? 'trending' : opt.key)`, handling all four sort pills uniformly (Trending included, as a natural no-op rather than a special case). `WatchlistFilterSheet`'s new Status pills got the same treatment, reverting to `statusOptions[0].key` (each caller's "All") on re-tap.
+
+### Regression audit
+Confirmed `setSortOrder`'s existing `isFilterActive()`-gated fetch-or-clear branch is untouched and still correct with the new toggle-off wiring. Traced `fetchFilteredResults`/`loadMoreFilteredResults` end to end — genre/language/anime params and pagination guards (`filteredPage >= filteredTotalPages`, in-flight loading checks) are completely unchanged. Genre pill toggle-off and the Language picker's "All languages" clear flow were already correct and remain so.
+
+### Files
+`client-mobile/components/DiscoverFilterSheet.tsx`, `client-mobile/components/WatchlistFilterSheet.tsx`, `client-mobile/components/LanguageFilterModal.tsx`.
+
+### Verification
+`node --stack-size=8000 tsc --noEmit` — 2 errors, same pre-existing baseline (`watchStore.test.ts`, `HeroCarousel.tsx`), zero new. **Not verifiable this session:** no device/emulator — actual scroll-to-tail behavior with a real long genre/language list, and whether the fixed sheet heights (72%/62% of screen) are generous enough on small physical screens even after this fix.
+
+---
+
+## 🔴 REAL BUG FOUND & FIXED — My Shows/My Movies filter-pill row height regression + floating "FILTERS" sheet + tab-set changes (2026-07-24, master fix prompt Batch 2, Phase 57)
+
+### 🔴 Root cause
+Both `app/profile/shows.tsx` and `app/profile/movies.tsx`'s filter row was a horizontally-scrolling `ScrollView` that had simply kept absorbing new pills across successive phases (status filters, then Language, then Anime), with nothing checking the row's total height against anything else on screen — each addition made the row a little taller/busier with no shared layout budget. That's the pill-row height regression this batch named.
+
+### ✅ RESOLVED
+Replaced the pill row entirely on both screens with a floating `FILTERS` trigger (new `components/FloatingFilterButton.tsx`, styled after `Snackbar.tsx`'s existing floating-element shadow/elevation precedent) opening a new shared bottom sheet (new `components/WatchlistFilterSheet.tsx`, modeled directly on `DiscoverFilterSheet`'s Reanimated spring/backdrop mechanics rather than inventing a new one). Every filter now gets a real vertical section instead of competing for horizontal space. Tab-set change: dropped "Up to Date" as a My Shows status filter in favor of a "Last Watched" sort toggle, added to both My Shows and My Movies — Shows sorts by `WatchlistEntry.last_watched_at` descending; Movies has no equivalent field, so `MovieWatchlistItem.updated_at` doubles as one, now stamped client-side on mark-watched only inside `toggleMovieWatchState` (mirroring `last_watched_at`'s existing "unmark doesn't move it" rule) so the sort reflects a toggle immediately rather than only after the next `fetchMovieWatchlist()`. The per-item "Up to Date" status badge is untouched — only the top-level filter tab changed. Added a new "Animation" tag filter for Movies via a new `hasAnimationGenreString()` helper in `lib/anime.ts` — Animation genre in any language, deliberately broader than the existing Anime filter (which additionally requires Japanese).
+
+### Files
+`client-mobile/app/profile/shows.tsx`, `client-mobile/app/profile/movies.tsx`, `client-mobile/components/WatchlistFilterSheet.tsx` (new), `client-mobile/components/FloatingFilterButton.tsx` (new), `client-mobile/lib/anime.ts`, `client-mobile/store/watchStore.ts`.
+
+### Verification
+`node --stack-size=8000 tsc --noEmit` — 2 errors, same pre-existing baseline, zero new. Confirmed the removed `FilterKey` type in `shows.tsx` is module-local (not exported) and not referenced by the Shows Hub tab's own separate `FilterKey`/`highlightFilter` deep-link handling in `(tabs)/index.tsx`. **Not verifiable this session:** no device/emulator — actual pill-row height before/after side by side, the sheet's open/close feel, and the floating button's visual placement over real list content.
+
+---
+
+## 🔴 REAL BUG FOUND & FIXED — Watch History tab desynced from real watch activity (2026-07-24, master fix prompt Batch 2, Phase 56)
+
+### 🔴 Root cause
+`store/watchStore.ts`'s `toggleWatchState()` and `bulkToggleWatchState()` — which cover every mark/unmark-watched path in the app (Shows Hub row checkmark, episode screen, season screen, and the Catch-Up cascade via `useCatchupCascade((ids, watched) => bulkToggleWatchState(ids, watched))`) — updated `watchlist` and `profile` optimistically and called `syncWidgetData()`, but never touched `history` state. `history` was only ever populated by the mount-time `fetchHistory()` call and the pull-to-refresh handler in `app/(tabs)/index.tsx`. Confirmed by reading both toggle functions end to end, not assumed from the bug report alone.
+
+### ✅ RESOLVED
+Both functions now update `history` optimistically in the same `set()` call as the watchlist update, with the same snapshot-and-revert-on-error convention already used for `watchlist`/`profile` (`previousHistory` captured up front, restored in `catch`). Marking watched prepends a synthetic `HistoryEntry` (`id: "optimistic-${episode.tmdb_id}"`) sharing its timestamp with the `last_watched_at` bump; unmarking filters out the matching entry by episode id. `bulkToggleWatchState` accumulates the same data across every episode actually toggled (via `newHistoryEntries`/`unwatchedEpisodeIds`, built inside its existing per-entry map) and applies one history update after the loop, instead of forking a second code path. Audited every other Shows Hub tab per the batch's instruction: WATCH NEXT/HAVEN'T WATCHED FOR A WHILE/HAVEN'T STARTED all derive purely from `useMemo`s keyed on the `watchlist` object, which both toggle functions already replace on every optimistic update — those were already correct; Watch History was the only tab with its own separately-fetched state. Confirmed no toggle path calls `fetchWatchlist()`/`fetchHistory()` (only `syncWidgetData()`, a local-state read) — no full-list refetch per toggle, before or after this fix. Confirmed the Phase 41 `last_watched_at` bump is unchanged in behavior (just hoisted to a shared timestamp variable so the watchlist bump and the new history entry agree exactly).
+
+### Files
+`client-mobile/store/watchStore.ts`.
+
+### Verification
+`node --stack-size=8000 tsc --noEmit` — 2 errors, same pre-existing baseline (`watchStore.test.ts`, `HeroCarousel.tsx`), zero new. **Not verifiable this session:** no device/emulator — real-device timing/feel of the instant Watch History update, and the (accepted, pre-existing-class) race between an in-flight `fetchHistory()` and a same-tick optimistic toggle.
+
+---
+
+## 🔴 REAL BUG FOUND & FIXED — Widget "AIRING SOON" list re-flooded with backlog + visual redesign (2026-07-24, master fix prompt Batch 2, Phase 55)
+
+### 🔴 Root cause
+`store/watchStore.ts`'s `syncWidgetData()` built its `upcoming` widget payload with `.filter((item) => item.airDate <= windowEndIso)` — a future-end bound only, no lower bound. Phase 54 (this same batch, same day) correctly gated `buildUpcomingItems()`'s Overdue items to recently-active shows, but they remain in the same flat, date-sorted array (`airDate < today`). Any past date trivially satisfies "<= a future date," so every Overdue item passed straight through into the widget's payload — the in-app tab's fix never reached the widget, which has no collapsible Overdue section to route them into. Confirmed by reading the live filter, not assumed from the Phase 54 fix alone.
+
+### ✅ RESOLVED
+Added `item.airDate >= todayIso` so only strictly-future items reach the widget; Overdue items are excluded from the widget entirely rather than shown uncollapsed. Also redesigned both platforms' Upcoming widget rows per the user's ask: new `formatDayBadge()` (`client-mobile/lib/dateFormat.ts`) renders a bigger, right-aligned day-count (`"3D"`, or `"TODAY"`) computed from the item's `air_date`; each row now gets real glassmorphism card styling — `rgba(30, 30, 30, 0.65)` fill, `rgba(255, 255, 255, 0.12)` hairline border — matching `lib/theme.ts`'s dark `glassFill`/`hairline` tokens exactly (translated to raw rgba strings since neither `react-native-android-widget`'s RemoteViews bridge nor `@expo/ui`'s SwiftUI bridge can import the theme module directly). The existing 14-day window and the `formatCountdown()`-based per-item countdown string (still shown in the subtitle line) were kept as-is, not reinvented, per the batch's explicit instruction.
+
+### Files
+`client-mobile/lib/dateFormat.ts` (new `formatDayBadge()`), `client-mobile/store/watchStore.ts` (`syncWidgetData` filter fix), `client-mobile/widgets/android/UpcomingWidget.tsx`, `client-mobile/widgets/ios/UpcomingWidget.tsx`.
+
+### Verification
+`node --stack-size=8000 tsc --noEmit` — 2 errors, same pre-existing baseline (`__tests__/watchStore.test.ts`, `HeroCarousel.tsx`), zero new. Confirmed `react-native-android-widget`'s `RgbaColor` template type (`` rgba(${number}, ${number}, ${number}, ${number}) ``) matches the exact token strings used; confirmed `@expo/ui`'s `Color` type (`string | ColorValue | NamedColor`) accepts arbitrary rgba strings, and that `border`/`background` (with `shapes.roundedRectangle`) modifiers exist for the card treatment. Confirmed `widgetUri()`'s tap-through fallback chain (episode → show → open-app) and both platforms' empty-state branch were read and left untouched by the redesign. Deliberately left the separate Watchlist ("NEXT UP") widget untouched — never in scope for this phase's flooding bug. **Not verifiable this session:** no device/emulator — actual on-device card rendering, day-badge legibility, and tap-through on a real widget instance; Android RemoteViews and iOS WidgetKit can both render subtly differently from the JSX in ways only a real device surfaces.
+
+---
+
+## 🔴 REAL BUG FOUND & FIXED — Upcoming tab flooded with backlog, not scoped to true upcoming/overdue (2026-07-24, master fix prompt Batch 2, Phase 54)
+
+### 🔴 Root cause
+`lib/upcoming.ts`'s `buildUpcomingItems()` (its overdue branch added Phase 47, same day) pushed a show's next unwatched-and-aired episode as an "overdue" item unconditionally — no staleness bound, no distinction between "actively one episode behind" and "untouched backlog from months ago." Confirmed live, per the batch's own bootstrap instruction not to trust `context.md`'s prior "Fixed" claim on this area at face value — this was a real gap in the Phase 47 fix itself, not a regression introduced afterward. Every watchlist show with any unwatched aired episode qualified, which is what turned the tab into a full backlog dump on a real imported library.
+
+### ✅ RESOLVED
+The overdue item now requires (a) the show has actually been started (`watched_episode_count > 0` — a never-started show belongs to HAVEN'T STARTED, not a second copy of it here) and (b) the show counts as "actively behind": `last_watched_at` within the last 14 days, or the missed episode's own `air_date` within the last 14 days. Deliberately reused `app/(tabs)/index.tsx`'s `buildRows()`'s existing `INACTIVITY_MS = 14 days` window (the same constant already splitting WATCH NEXT from HAVEN'T WATCHED FOR A WHILE) instead of a second, arbitrary threshold — not ambiguous enough to stop and ask for a day count when the repo already has an established answer for this exact class of decision. UI: the OVERDUE header (List + Grid) is now a collapsible "OVERDUE (N)" section, defaulting closed (`overdueCollapsed` local state) so it can't sit ahead of and swallow the real TODAY/TOMORROW/weekday sections — `groupUpcomingItemsByDate()` tracks a running count on the header (every overdue item is contiguous at the front of the sorted list), and a new `visibleUpcomingEntries` memo hides the item rows under it while collapsed. Genuinely future items are untouched. The widget inherits the same bound automatically (unmodified `buildUpcomingItems()` call) — its own redesign is Phase 55, scoped separately.
+
+### Files
+`client-mobile/lib/upcoming.ts`, `client-mobile/app/(tabs)/index.tsx`.
+
+### Verification
+`node --stack-size=8000 tsc --noEmit` — 2 errors, same pre-existing baseline (`__tests__/watchStore.test.ts`, `HeroCarousel.tsx`), zero new. Manual trace of 4 scenarios: never-started show with a next episode aired 3 days ago → excluded; started show last watched 20 days ago, episode aired 60 days ago → excluded; started show last watched 5 days ago, episode aired 45 days ago → included; currently-airing show watched last week, missed yesterday's episode → included. **Not verifiable this session:** no device — the real on-screen chevron/tap feel for the collapsible header, and whether "OVERDUE (N)" reads clearly against the red/negative accent in both themes.
+
+---
+
 ## 🟢 FINAL PERFORMANCE PASS + PRE-PUSH AUDIT + CONSOLIDATED DEVICE-VERIFICATION GAP LIST (2026-07-23, fix prompt's Phase M — closing phase of the Phase A–M batch)
 
 ### 🟢 (a) Performance — re-verified fresh, not assumed

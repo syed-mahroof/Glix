@@ -48,7 +48,7 @@ interface Props {
 }
 
 // Custom hook to run interval manually, bypassing the lack of FlashList autoScroll natively
-function useAutoPlay(scrollRef: React.RefObject<Animated.ScrollView>, itemsCount: number) {
+function useAutoPlay(scrollRef: React.RefObject<Animated.ScrollView | null>, itemsCount: number) {
   const [currentIndex, setCurrentIndex] = useState(0);
   const timerRef = useRef<NodeJS.Timeout | null>(null);
 

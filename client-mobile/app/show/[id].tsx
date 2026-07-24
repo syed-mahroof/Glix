@@ -118,6 +118,7 @@ export default function ShowDetailScreen() {
   const [removeSnapshot, setRemoveSnapshot] = useState<RemovedShowSnapshot | null>(null);
   const [removeSnackbarVisible, setRemoveSnackbarVisible] = useState(false);
   const [addedSnackbarVisible, setAddedSnackbarVisible] = useState(false);
+  const [reviewSnackbarMessage, setReviewSnackbarMessage] = useState<string | null>(null);
   // Outside-row "mark season watched" (Phase D) — only one season's toggle
   // can be in flight at a time, matching the single shared CascadeModal
   // instance below (there's only ever one modal on screen regardless of
@@ -557,7 +558,7 @@ export default function ShowDetailScreen() {
 
         {!Number.isNaN(tmdbId) && (
           <View style={styles.section}>
-            <RatingReviewCard mediaType="show" tmdbId={tmdbId} />
+            <RatingReviewCard mediaType="show" tmdbId={tmdbId} onSaved={setReviewSnackbarMessage} />
           </View>
         )}
 
@@ -714,6 +715,12 @@ export default function ShowDetailScreen() {
         visible={addedSnackbarVisible}
         message="Added to Watchlist"
         onDismiss={() => setAddedSnackbarVisible(false)}
+      />
+
+      <Snackbar
+        visible={!!reviewSnackbarMessage}
+        message={reviewSnackbarMessage ?? ''}
+        onDismiss={() => setReviewSnackbarMessage(null)}
       />
     </SafeAreaView>
   );

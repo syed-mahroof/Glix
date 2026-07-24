@@ -52,6 +52,27 @@ export function formatCountdown(
 }
 
 /**
+ * Compact "day count" badge for the Upcoming widgets' redesigned right-aligned
+ * countdown (Phase 55) — a bigger, glanceable number instead of the full
+ * countdown string crammed into a one-line subtitle. The precise per-item
+ * countdown text itself still comes from formatCountdown() (precomputed once
+ * in store/watchStore.ts's syncWidgetData, since a static widget snapshot
+ * can't tick live) — this only supplies the big headline number next to it.
+ * Widget items are always strictly future by the time this is called
+ * (syncWidgetData filters Overdue out before building the payload), but this
+ * stays safe for a same-day item too.
+ */
+export function formatDayBadge(airDate: string, now: Date): string {
+  const todayIso = todayLocalIso(now);
+  if (airDate === todayIso) return 'TODAY';
+
+  const target = new Date(`${airDate}T00:00:00`);
+  const todayMidnight = new Date(`${todayIso}T00:00:00`);
+  const diffDays = Math.round((target.getTime() - todayMidnight.getTime()) / 86400000);
+  return `${diffDays}D`;
+}
+
+/**
  * Buckets a single upcoming episode's air date into the day-wise header
  * label used by the Shows Hub's UPCOMING tab (List + Grid views): TODAY /
  * TOMORROW, a weekday name for the next few days, an absolute date for

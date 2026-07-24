@@ -3,6 +3,7 @@
 // entrance stagger on the quick-stats row, an ambient glow behind the hero
 // number, and a trend chip verdict on hours watched vs. last month.
 
+import { useFocusEffect } from '@react-navigation/native';
 import { useRouter } from 'expo-router';
 import {
   Activity,
@@ -11,7 +12,7 @@ import {
   Flame,
   Trophy,
 } from 'lucide-react-native';
-import React, { useEffect, useMemo } from 'react';
+import React, { useCallback, useMemo } from 'react';
 import {
   ActivityIndicator,
   ScrollView,
@@ -71,14 +72,25 @@ export default function AnalyticsScreen() {
   const monthlyRecap = useWatchStore((s) => s.monthlyRecap);
   const isLoading = useWatchStore((s) => s.isLoadingAnalytics);
 
-  useEffect(() => {
-    fetchDashboard();
-    fetchGenres();
-    fetchHeatmap();
-    fetchStreak();
-    fetchCompletion();
-    fetchMonthlyRecap();
-  }, [fetchDashboard, fetchGenres, fetchHeatmap, fetchStreak, fetchCompletion, fetchMonthlyRecap]);
+  // This screen's stack lives inside the Profile tab and is frozen (not
+  // unmounted) when the user switches tabs — a mount-only fetch left every
+  // stat here (streak, heatmap, genres, completion, monthly recap) stale
+  // after watching something on another tab and switching back, the same
+  // staleness class Phase 56 fixed for the Watch History tab. Unlike
+  // total_time_watched/history there, none of these are cheap to patch
+  // from the mutation site (server-computed aggregates) — refetch on
+  // focus is the minimal correct fix instead of reimplementing the
+  // aggregation client-side.
+  useFocusEffect(
+    useCallback(() => {
+      fetchDashboard();
+      fetchGenres();
+      fetchHeatmap();
+      fetchStreak();
+      fetchCompletion();
+      fetchMonthlyRecap();
+    }, [fetchDashboard, fetchGenres, fetchHeatmap, fetchStreak, fetchCompletion, fetchMonthlyRecap])
+  );
 
   const totalHoursWhole = Math.floor(dashboard?.total_hours_watched ?? 0);
 

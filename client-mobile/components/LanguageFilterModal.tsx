@@ -105,7 +105,7 @@ export default function LanguageFilterModal({
             </PressableScale>
           </View>
 
-          <ScrollView contentContainerStyle={styles.list}>
+          <ScrollView style={styles.scroll} contentContainerStyle={styles.list}>
             {renderRow(null)}
 
             {indianLanguages.length > 0 && (
@@ -163,6 +163,19 @@ const styles = StyleSheet.create({
     fontSize: 18,
     fontWeight: '700',
     letterSpacing: -0.3,
+  },
+  // `sheet` uses maxHeight (not a fixed height) so a short language list
+  // still hugs its content instead of leaving empty space — `flexShrink: 1`
+  // (not `flex: 1`) is what makes that work: it lets the ScrollView size to
+  // content normally, but shrink (and start scrolling internally) once the
+  // list is long enough to actually hit the 70% cap. `flex: 1` would fight
+  // the parent's content-based sizing and collapse this to zero height for
+  // short lists instead. Long lists were previously clipped at the cap with
+  // no way to scroll to the tail (Phase 58 — same root cause as
+  // DiscoverFilterSheet/WatchlistFilterSheet, different fix because those
+  // sheets use a fixed pixel height rather than maxHeight).
+  scroll: {
+    flexShrink: 1,
   },
   list: {
     paddingHorizontal: 16,

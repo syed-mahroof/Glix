@@ -26,3 +26,12 @@ export function isAnimeByGenreStringAndLanguage(
     originalLanguage
   );
 }
+
+/** Animation genre, any language — deliberately broader than the Anime
+ *  heuristic above (which additionally requires Japanese). Lets Western
+ *  animated movies (Pixar, DreamWorks, adult animated comedies, etc.) be
+ *  filtered on their own, distinct from the Anime tag. */
+export function hasAnimationGenreString(genresString: string | null | undefined): boolean {
+  if (!genresString) return false;
+  return genresString.split(',').map((g) => g.trim().toLowerCase()).includes('animation');
+}

@@ -1,5 +1,6 @@
 import React from 'react';
 import { FlexWidget, TextWidget, ImageWidget, ListWidget } from 'react-native-android-widget';
+import { formatDayBadge } from '../../lib/dateFormat';
 
 interface UpcomingWidgetItem {
   id?: number;
@@ -27,19 +28,34 @@ function widgetUri(show: UpcomingWidgetItem): string | undefined {
   return undefined;
 }
 
+// Card row redesign (Phase 55): glassmorphism tokens shared with the in-app
+// theme (lib/theme.ts's dark `glassFill`/`hairline`, not reinvented here
+// since RemoteViews can't import the theme module's React Native color
+// helpers, only the raw rgba strings), plus a bigger, right-aligned day-count
+// badge — previously the countdown was buried as small text inside the
+// subtitle line, easy to miss at a glance.
 function UpcomingRow({ show }: { show: UpcomingWidgetItem }) {
   const uri = widgetUri(show);
+  const dayBadge = formatDayBadge(show.air_date, new Date());
   return (
     <FlexWidget
       clickAction={uri ? 'OPEN_URI' : 'OPEN_APP'}
       clickActionData={uri ? { uri } : undefined}
       style={{
-        height: 64,
+        height: 72,
         width: 'match_parent',
         flexDirection: 'row',
         alignItems: 'center',
-        paddingLeft: 16,
-        paddingRight: 16,
+        backgroundColor: 'rgba(30, 30, 30, 0.65)',
+        borderWidth: 1,
+        borderColor: 'rgba(255, 255, 255, 0.12)',
+        borderRadius: 14,
+        marginLeft: 12,
+        marginRight: 12,
+        marginTop: 6,
+        marginBottom: 6,
+        paddingLeft: 12,
+        paddingRight: 14,
         paddingTop: 8,
         paddingBottom: 8,
       }}
@@ -49,7 +65,7 @@ function UpcomingRow({ show }: { show: UpcomingWidgetItem }) {
           image={`https://image.tmdb.org/t/p/w200${show.poster_path}`}
           imageWidth={36}
           imageHeight={52}
-          radius={4}
+          radius={6}
           resizeMode="cover"
           style={{ marginRight: 12 }}
         />
@@ -62,6 +78,17 @@ function UpcomingRow({ show }: { show: UpcomingWidgetItem }) {
           maxLines={1}
         />
       </FlexWidget>
+      <FlexWidget style={{ flexDirection: 'column', alignItems: 'flex-end', width: 56 }}>
+        <TextWidget
+          text={dayBadge}
+          style={{
+            fontSize: dayBadge === 'TODAY' ? 14 : 20,
+            color: '#E4FA1A',
+            fontWeight: 'bold',
+          }}
+          maxLines={1}
+        />
+      </FlexWidget>
     </FlexWidget>
   );
 }
@@ -70,6 +97,10 @@ export function UpcomingWidget({ data }: { data: any }) {
   const items: UpcomingWidgetItem[] = data?.upcoming ?? [];
 
   if (items.length === 0) {
+    // Same three-way split as widgets/android/WatchlistWidget.tsx — never
+    // synced vs. signed out vs. genuinely nothing airing soon.
+    const message =
+      data == null ? 'Open Glix to sync your shows.' : data.loggedOut ? 'Log in to see upcoming episodes.' : 'No upcoming shows.';
     return (
       <FlexWidget
         clickAction="OPEN_APP"
@@ -84,7 +115,7 @@ export function UpcomingWidget({ data }: { data: any }) {
         }}
       >
         <TextWidget text="Glix" style={{ fontSize: 16, color: '#E4FA1A', fontWeight: 'bold' }} />
-        <TextWidget text="No upcoming shows." style={{ fontSize: 14, color: '#FFFFFF', marginTop: 8 }} />
+        <TextWidget text={message} style={{ fontSize: 14, color: '#FFFFFF', marginTop: 8 }} />
       </FlexWidget>
     );
   }

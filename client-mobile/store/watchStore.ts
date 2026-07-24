@@ -571,9 +571,12 @@ export const useWatchStore = create<WatchStoreState>()(
     const { bucketKey, entryIndex, episodeIndex } = location;
     const previousWatchlist = get().watchlist;
     const previousProfile = get().profile;
-    const episode = previousWatchlist[bucketKey].results[entryIndex].show.episodes[episodeIndex];
+    const previousHistory = get().history;
+    const entrySnapshot = previousWatchlist[bucketKey].results[entryIndex];
+    const episode = entrySnapshot.show.episodes[episodeIndex];
     const optimisticWatched = !episode.is_watched;
     const runtimeDelta = optimisticWatched ? episode.runtime_minutes : -episode.runtime_minutes;
+    const watchedAtIso = new Date().toISOString();
 
     set((state) => {
       const nextWatchlist: WatchlistBuckets = {
@@ -599,7 +602,7 @@ export const useWatchStore = create<WatchStoreState>()(
       // Hub, stuck there until a full fetchWatchlist(). The server recomputes
       // the authoritative value on the next fetch; un-watching leaves it
       // untouched (the true prior timestamp isn't known client-side).
-      if (optimisticWatched) entry.last_watched_at = new Date().toISOString();
+      if (optimisticWatched) entry.last_watched_at = watchedAtIso;
       entry.progress_percentage =
         entry.aired_episode_count > 0
           ? Math.round((entry.watched_episode_count / entry.aired_episode_count) * 1000) / 10
@@ -607,8 +610,36 @@ export const useWatchStore = create<WatchStoreState>()(
       results[entryIndex] = entry;
       nextWatchlist[bucketKey] = { ...nextWatchlist[bucketKey], results };
 
+      // Phase 56: the Watch History tab previously only ever refreshed on
+      // mount / pull-to-refresh — marking (or unmarking) an episode watched
+      // anywhere else in the app (Shows Hub row, episode screen, season
+      // screen) left it stale until the user manually pulled to refresh.
+      // Same optimistic-first convention as the watchlist update above.
+      const history = optimisticWatched
+        ? {
+            ...state.history,
+            count: state.history.count + 1,
+            results: [
+              {
+                id: `optimistic-${episode.tmdb_id}`,
+                episode: episodes[episodeIndex],
+                show_id: entry.show.tmdb_id,
+                show_title: entry.show.title,
+                show_poster_path: entry.show.poster_path,
+                watched_at: watchedAtIso,
+              },
+              ...state.history.results,
+            ],
+          }
+        : {
+            ...state.history,
+            count: Math.max(0, state.history.count - (state.history.results.some((h) => h.episode.tmdb_id === episodeId) ? 1 : 0)),
+            results: state.history.results.filter((h) => h.episode.tmdb_id !== episodeId),
+          };
+
       return {
         watchlist: nextWatchlist,
+        history,
         profile: state.profile
           ? {
               ...state.profile,
@@ -645,6 +676,7 @@ export const useWatchStore = create<WatchStoreState>()(
       set({
         watchlist: previousWatchlist,
         profile: previousProfile,
+        history: previousHistory,
         error: extractErrorMessage(error),
       });
     }
@@ -682,11 +714,19 @@ export const useWatchStore = create<WatchStoreState>()(
 
     const wasWatched = entry.movie.is_watched;
     const runtimeDelta = wasWatched ? -entry.movie.runtime_minutes : entry.movie.runtime_minutes;
+    // Movies have no dedicated "last watched" timestamp field like
+    // WatchlistEntry.last_watched_at — `updated_at` doubles as one, bumped
+    // client-side here so the My Movies "Last Watched" sort (Phase 57)
+    // reflects a mark-watched immediately instead of only after the next
+    // fetchMovieWatchlist(). Unmarking leaves it alone, matching the shows
+    // side's "unmark doesn't move it" convention.
+    const watchedAtIso = new Date().toISOString();
 
     // Optimistic: move between buckets and flip is_watched
     set((state) => {
       const updatedEntry = {
         ...entry,
+        updated_at: !wasWatched ? watchedAtIso : entry.updated_at,
         movie: { ...entry.movie, is_watched: !wasWatched },
       };
       const nextWatchNext = wasWatched
@@ -940,6 +980,7 @@ export const useWatchStore = create<WatchStoreState>()(
   bulkToggleWatchState: async (episodeIds: number[], watched: boolean) => {
     const previousWatchlist = get().watchlist;
     const previousProfile = get().profile;
+    const previousHistory = get().history;
 
     // Optimistic update for all affected episodes
     set((state) => {
@@ -950,6 +991,12 @@ export const useWatchStore = create<WatchStoreState>()(
       };
       const idSet = new Set(episodeIds);
       let totalRuntimeDelta = 0;
+      const watchedAtIso = new Date().toISOString();
+      // Phase 56: mirror toggleWatchState's optimistic Watch History update
+      // here too — Mark/Unmark Season Watched and the Catch-Up cascade both
+      // go through this path, and hit the exact same desync bug.
+      const newHistoryEntries: HistoryEntry[] = [];
+      const unwatchedEpisodeIds = new Set<number>();
 
       for (const bucketKey of Object.keys(nextWatchlist) as (keyof WatchlistBuckets)[]) {
         nextWatchlist[bucketKey].results = nextWatchlist[bucketKey].results.map((entry) => {
@@ -960,7 +1007,20 @@ export const useWatchStore = create<WatchStoreState>()(
             const wasWatched = ep.is_watched;
             if (wasWatched === watched) return ep;
             totalRuntimeDelta += watched ? ep.runtime_minutes : -ep.runtime_minutes;
-            return { ...ep, is_watched: watched };
+            const nextEp = { ...ep, is_watched: watched };
+            if (watched) {
+              newHistoryEntries.push({
+                id: `optimistic-${ep.tmdb_id}`,
+                episode: nextEp,
+                show_id: entry.show.tmdb_id,
+                show_title: entry.show.title,
+                show_poster_path: entry.show.poster_path,
+                watched_at: watchedAtIso,
+              });
+            } else {
+              unwatchedEpisodeIds.add(ep.tmdb_id);
+            }
+            return nextEp;
           });
           const watchedCount = episodes.filter((ep) => ep.is_watched).length;
           const progress =
@@ -977,13 +1037,34 @@ export const useWatchStore = create<WatchStoreState>()(
             // so the show belongs in WATCH NEXT immediately. Bumped only for
             // entries actually touched, and only in the watch direction — an
             // un-mark ("Unmark Season Watched") leaves last_watched_at alone.
-            last_watched_at: affected && watched ? new Date().toISOString() : entry.last_watched_at,
+            last_watched_at: affected && watched ? watchedAtIso : entry.last_watched_at,
           };
         });
       }
 
+      const history = watched
+        ? newHistoryEntries.length > 0
+          ? {
+              ...state.history,
+              count: state.history.count + newHistoryEntries.length,
+              results: [...newHistoryEntries, ...state.history.results],
+            }
+          : state.history
+        : unwatchedEpisodeIds.size > 0
+          ? {
+              ...state.history,
+              count: Math.max(
+                0,
+                state.history.count -
+                  state.history.results.filter((h) => unwatchedEpisodeIds.has(h.episode.tmdb_id)).length
+              ),
+              results: state.history.results.filter((h) => !unwatchedEpisodeIds.has(h.episode.tmdb_id)),
+            }
+          : state.history;
+
       return {
         watchlist: nextWatchlist,
+        history,
         profile: state.profile
           ? { ...state.profile, total_time_watched: Math.max(0, state.profile.total_time_watched + totalRuntimeDelta) }
           : state.profile,
@@ -1012,7 +1093,12 @@ export const useWatchStore = create<WatchStoreState>()(
       });
       get().syncWidgetData();
     } catch (error) {
-      set({ watchlist: previousWatchlist, profile: previousProfile, error: extractErrorMessage(error) });
+      set({
+        watchlist: previousWatchlist,
+        profile: previousProfile,
+        history: previousHistory,
+        error: extractErrorMessage(error),
+      });
     }
   },
 
@@ -1142,10 +1228,20 @@ export const useWatchStore = create<WatchStoreState>()(
       // here). Countdown text precomputed once here, reusing the exact
       // formatCountdown() the in-app Upcoming tab uses, since the widget
       // itself can't run a live per-second tick the way UpcomingRow does.
+      // Phase 54 bounded buildUpcomingItems()'s Overdue items to
+      // recently-active shows, but they're still interleaved into the same
+      // sorted array (airDate < today) — this filter's job is the strictly-
+      // future cut. Without the todayIso lower bound, every Overdue item
+      // passed `airDate <= windowEndIso` trivially (any past date is <= a
+      // future one), so the widget's "AIRING SOON" list re-flooded with
+      // backlog even after the in-app tab was fixed. The widget has no
+      // collapsible Overdue section to put them in (Phase 54's UI fix), so
+      // they're excluded here entirely rather than shown uncollapsed.
       const now = new Date();
+      const todayIso = todayLocalIso(now);
       const windowEndIso = todayLocalIso(new Date(now.getTime() + 14 * 86400000));
       const upcoming = buildUpcomingItems(entries)
-        .filter((item) => item.airDate <= windowEndIso)
+        .filter((item) => item.airDate >= todayIso && item.airDate <= windowEndIso)
         .slice(0, 30)
         .map((item) => {
           const { formatted, dayOfWeek } = formatCountdown(new Date(`${item.airDate}T00:00:00`), now);
@@ -1190,7 +1286,11 @@ export const useWatchStore = create<WatchStoreState>()(
 
   clearWidgetData: async () => {
     try {
-      const emptyData = { watchlist: [], upcoming: [] };
+      // loggedOut distinguishes "signed out" from a genuinely empty
+      // watchlist — both used to write the identical {watchlist: [],
+      // upcoming: []} shape, so the widgets showed "Your watchlist is
+      // empty" after logout instead of prompting the user to log back in.
+      const emptyData = { watchlist: [], upcoming: [], loggedOut: true };
       if (Platform.OS === 'android') {
         if (SharedPreferences) {
           SharedPreferences.setItem('widgetData', JSON.stringify(emptyData));
@@ -1206,8 +1306,8 @@ export const useWatchStore = create<WatchStoreState>()(
           widgetNotFound: () => {},
         }).catch(() => {});
       } else if (Platform.OS === 'ios') {
-        IOSWidgets.WatchlistWidget?.updateSnapshot({ watchlist: [] });
-        IOSWidgets.UpcomingWidget?.updateSnapshot({ upcoming: [] });
+        IOSWidgets.WatchlistWidget?.updateSnapshot({ watchlist: [], loggedOut: true });
+        IOSWidgets.UpcomingWidget?.updateSnapshot({ upcoming: [], loggedOut: true });
       }
     } catch (error) {
       console.warn('Failed to clear widget data', error);

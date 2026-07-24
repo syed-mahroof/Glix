@@ -6,6 +6,7 @@ from django.contrib import admin
 from django.contrib.auth.admin import GroupAdmin as BaseGroupAdmin
 from django.contrib.auth.admin import UserAdmin as BaseUserAdmin
 from django.contrib.auth.models import Group, User
+from django.db.models import Sum
 
 from unfold.admin import ModelAdmin
 from unfold.forms import (
@@ -32,6 +33,7 @@ from core.models import (
     WatchState,
     WatchStreak,
 )
+from core.tasks import recalculate_watch_streak
 
 admin.site.unregister(User)
 admin.site.unregister(Group)
@@ -49,12 +51,45 @@ class GroupAdmin(BaseGroupAdmin, ModelAdmin):
     pass
 
 
+@admin.action(description="Recalculate total watch time from history")
+def recalculate_total_time_watched(modeladmin, request, queryset):
+    """
+    Drift-correction tool, not routine maintenance: total_time_watched is
+    normally kept correct in real time by F()-expression updates on every
+    watch/unwatch (see WatchStateToggleView etc.), each guarded against
+    going negative. This action re-derives it from scratch by summing
+    every WatchState/MovieWatchState row's *current* episode/movie
+    runtime_minutes — which can differ slightly from the value originally
+    credited if TMDB's runtime for a title changed after it was marked
+    watched. Use this to recover a profile that's visibly wrong (e.g.
+    after a bug or manual DB edit), not to "keep it in sync" — the
+    real-time ledger is the more historically-accurate source of truth.
+    """
+    updated = 0
+    for profile in queryset:
+        episode_minutes = (
+            WatchState.objects.filter(user=profile.user)
+            .aggregate(total=Sum("episode__runtime_minutes"))["total"]
+            or 0
+        )
+        movie_minutes = (
+            MovieWatchState.objects.filter(user=profile.user)
+            .aggregate(total=Sum("movie__runtime_minutes"))["total"]
+            or 0
+        )
+        profile.total_time_watched = episode_minutes + movie_minutes
+        profile.save(update_fields=["total_time_watched", "updated_at"])
+        updated += 1
+    modeladmin.message_user(request, f"Recalculated total watch time for {updated} profile(s).")
+
+
 @admin.register(UserProfile)
 class UserProfileAdmin(ModelAdmin):
     list_display = ("user", "total_time_watched", "created_at")
     search_fields = ("user__username", "user__email")
     readonly_fields = ("created_at", "updated_at")
     autocomplete_fields = ("user",)
+    actions = [recalculate_total_time_watched]
 
 
 @admin.register(SocialAccount)
@@ -118,12 +153,27 @@ class EpisodeInteractionAdmin(ModelAdmin):
     autocomplete_fields = ("user", "episode")
 
 
+@admin.action(description="Recalculate streak from watch history")
+def recalculate_streak_action(modeladmin, request, queryset):
+    """
+    Manual trigger for the same idempotent recalculate_watch_streak task
+    that already runs automatically after every TV Time import — exposed
+    here so a support/ops request ("my streak looks wrong") doesn't need a
+    shell to resolve. Queued through Celery rather than run inline so a
+    large history doesn't block the admin request.
+    """
+    for streak in queryset:
+        recalculate_watch_streak.delay(streak.user_id)
+    modeladmin.message_user(request, f"Queued streak recalculation for {queryset.count()} user(s).")
+
+
 @admin.register(WatchStreak)
 class WatchStreakAdmin(ModelAdmin):
     list_display = ("user", "current_streak", "longest_streak", "total_streak_days", "last_watch_date", "updated_at")
     search_fields = ("user__username",)
     readonly_fields = ("created_at", "updated_at")
     autocomplete_fields = ("user",)
+    actions = [recalculate_streak_action]
 
 
 @admin.register(NotificationPreference)

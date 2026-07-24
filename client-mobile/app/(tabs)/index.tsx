@@ -8,7 +8,7 @@
 import { FlashList } from '@shopify/flash-list';
 import { Image } from 'expo-image';
 import { useLocalSearchParams, useRouter } from 'expo-router';
-import { CalendarDays, LayoutGrid, List as ListIcon, RefreshCw, Tv } from 'lucide-react-native';
+import { CalendarDays, ChevronDown, ChevronUp, LayoutGrid, List as ListIcon, RefreshCw, Tv } from 'lucide-react-native';
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   ActivityIndicator,
@@ -393,15 +393,58 @@ function UpcomingRow({
 
 // ─── Upcoming Section Header (day-wise grouping) ───────────────────────────────
 
-function UpcomingSectionHeader({ label }: { label: string }) {
+/** The OVERDUE header (Phase 54) is collapsible — a bounded catch-up section
+ *  that defaults closed so it can never swallow the screen ahead of the
+ *  genuinely future TODAY/TOMORROW/weekday sections — every other header is
+ *  a plain, non-interactive date label, unchanged from Phase 18. */
+function UpcomingSectionHeader({
+  label,
+  count,
+  collapsed,
+  onToggleCollapse,
+}: {
+  label: string;
+  count?: number;
+  collapsed?: boolean;
+  onToggleCollapse?: () => void;
+}) {
   const { theme } = useAppTheme();
   const c = theme.colors;
-  return (
+  const isOverdue = label === 'OVERDUE' && onToggleCollapse != null;
+
+  const pill = (
     <View style={styles.upcomingSectionHeaderRow}>
-      <View style={[styles.upcomingSectionPill, { backgroundColor: c.glassFill, borderColor: c.hairline }]}>
-        <Text style={[styles.upcomingSectionPillText, { color: c.textSecondary }]}>{label}</Text>
+      <View
+        style={[
+          styles.upcomingSectionPill,
+          { backgroundColor: c.glassFill, borderColor: c.hairline },
+          isOverdue && { borderColor: c.negative },
+        ]}
+      >
+        <Text style={[styles.upcomingSectionPillText, { color: isOverdue ? c.negative : c.textSecondary }]}>
+          {isOverdue ? `OVERDUE (${count ?? 0})` : label}
+        </Text>
+        {isOverdue &&
+          (collapsed ? (
+            <ChevronDown size={14} color={c.negative} style={styles.upcomingSectionChevron} />
+          ) : (
+            <ChevronUp size={14} color={c.negative} style={styles.upcomingSectionChevron} />
+          ))}
       </View>
     </View>
+  );
+
+  if (!isOverdue) return pill;
+
+  return (
+    <PressableScale
+      onPress={onToggleCollapse}
+      accessibilityRole="button"
+      accessibilityLabel={`Overdue episodes, ${count ?? 0}`}
+      accessibilityState={{ expanded: !collapsed }}
+    >
+      {pill}
+    </PressableScale>
   );
 }
 
@@ -433,6 +476,9 @@ export default function ShowsScreen() {
   const [upcomingView, setUpcomingView] = useState<UpcomingView>('list');
   const [filter, setFilter] = useState<FilterKey>('WATCH_NEXT');
   const [isRefreshing, setIsRefreshing] = useState(false);
+  // Overdue section (Phase 54) defaults closed — a bounded catch-up list the
+  // user opts into, not a wall of backlog ahead of real future dates.
+  const [overdueCollapsed, setOverdueCollapsed] = useState(true);
   const now = useNow(1000, activeTab === 'upcoming' && upcomingView === 'list');
 
   // Arriving from "Add to Watchlist" (show detail) passes highlightFilter
@@ -479,6 +525,28 @@ export default function ShowsScreen() {
     () => groupUpcomingItemsByDate(upcomingItems, now),
     [upcomingItems, now]
   );
+
+  // The OVERDUE header itself always renders (it's the toggle affordance);
+  // only the item rows beneath it hide while collapsed (Phase 54) — every
+  // overdue item is contiguous right after that header (buildUpcomingItems
+  // sorts by airDate, and all overdue airDates are < today), so a single
+  // pass tracking "am I inside the header I just hid" is correct.
+  const visibleUpcomingEntries = useMemo(() => {
+    if (!overdueCollapsed) return upcomingEntries;
+    const result: UpcomingListEntry[] = [];
+    let hidingItems = false;
+    for (const entry of upcomingEntries) {
+      if (entry.type === 'header') {
+        hidingItems = entry.label === 'OVERDUE';
+        result.push(entry);
+        continue;
+      }
+      if (!hidingItems) result.push(entry);
+    }
+    return result;
+  }, [upcomingEntries, overdueCollapsed]);
+
+  const toggleOverdueCollapsed = useCallback(() => setOverdueCollapsed((v) => !v), []);
 
   const handleCheckPress = useCallback(
     (
@@ -638,16 +706,29 @@ export default function ShowsScreen() {
   const renderUpcomingEntry = useCallback(
     ({ item: entry }: { item: UpcomingListEntry }): React.ReactElement =>
       entry.type === 'header' ? (
-        <UpcomingSectionHeader label={entry.label} />
+        <UpcomingSectionHeader
+          label={entry.label}
+          count={entry.count}
+          collapsed={overdueCollapsed}
+          onToggleCollapse={entry.label === 'OVERDUE' ? toggleOverdueCollapsed : undefined}
+        />
       ) : (
         <UpcomingRow item={entry.data} now={now} onMarkWatched={handleUpcomingMarkWatched} />
       ),
-    [now, handleUpcomingMarkWatched]
+    [now, handleUpcomingMarkWatched, overdueCollapsed, toggleOverdueCollapsed]
   );
 
   const renderUpcomingGridEntry = useCallback(
     ({ item: entry }: { item: UpcomingListEntry }): React.ReactElement => {
-      if (entry.type === 'header') return <UpcomingSectionHeader label={entry.label} />;
+      if (entry.type === 'header')
+        return (
+          <UpcomingSectionHeader
+            label={entry.label}
+            count={entry.count}
+            collapsed={overdueCollapsed}
+            onToggleCollapse={entry.label === 'OVERDUE' ? toggleOverdueCollapsed : undefined}
+          />
+        );
       const item = entry.data;
       const todayIso = todayLocalIso(now);
       const isOverdue = item.airDate < todayIso;
@@ -670,7 +751,7 @@ export default function ShowsScreen() {
         />
       );
     },
-    [now, handleUpcomingMarkWatched]
+    [now, handleUpcomingMarkWatched, overdueCollapsed, toggleOverdueCollapsed]
   );
 
   const upcomingItemType = useCallback(
@@ -911,13 +992,13 @@ export default function ShowsScreen() {
           ) : upcomingView === 'list' ? (
             <FlashList
               key={`upcoming-${preferredLayout}`}
-              data={upcomingEntries}
+              data={visibleUpcomingEntries}
               keyExtractor={(entry) => entry.key}
               renderItem={preferredLayout === 'grid' ? renderUpcomingGridEntry : renderUpcomingEntry}
               getItemType={upcomingItemType}
               overrideItemLayout={preferredLayout === 'grid' ? upcomingOverrideLayout : undefined}
               numColumns={preferredLayout === 'grid' ? 3 : 1}
-              extraData={preferredLayout}
+              extraData={[preferredLayout, overdueCollapsed]}
               contentContainerStyle={styles.listContent}
               refreshControl={
                 <RefreshControl
@@ -1074,6 +1155,8 @@ const styles = StyleSheet.create({
     marginBottom: 10,
   },
   upcomingSectionPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
     borderWidth: StyleSheet.hairlineWidth,
     borderRadius: 20,
     paddingHorizontal: 14,
@@ -1083,6 +1166,9 @@ const styles = StyleSheet.create({
     fontSize: 11,
     fontWeight: '800',
     letterSpacing: 0.6,
+  },
+  upcomingSectionChevron: {
+    marginLeft: 6,
   },
   upcomingRow: {
     flexDirection: 'row',

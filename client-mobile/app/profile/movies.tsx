@@ -4,16 +4,18 @@
 import { FlashList } from '@shopify/flash-list';
 import { Image } from 'expo-image';
 import { useRouter } from 'expo-router';
-import { ArrowLeft, Clapperboard, Film, Languages, Search, Sparkles, X } from 'lucide-react-native';
+import { ArrowLeft, Clapperboard, Film, Palette, Search, Sparkles, X } from 'lucide-react-native';
 import React, { useEffect, useMemo, useState } from 'react';
-import { ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
+import { StyleSheet, Text, TextInput, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
+import FloatingFilterButton from '../../components/FloatingFilterButton';
 import LanguageFilterModal, { languageDisplayName } from '../../components/LanguageFilterModal';
 import LayoutToggle from '../../components/LayoutToggle';
 import MoviePosterCard from '../../components/MoviePosterCard';
 import PressableScale from '../../components/PressableScale';
-import { isAnimeByGenreStringAndLanguage } from '../../lib/anime';
+import WatchlistFilterSheet from '../../components/WatchlistFilterSheet';
+import { hasAnimationGenreString, isAnimeByGenreStringAndLanguage } from '../../lib/anime';
 import { useAppTheme } from '../../lib/theme';
 import { MovieWatchlistItem } from '../../store/watchStore';
 import { useWatchStore } from '../../store/watchStore';
@@ -151,7 +153,10 @@ export default function ProfileMoviesScreen() {
   const [filter, setFilter] = useState<FilterKey>('ALL');
   const [query, setQuery] = useState('');
   const [isLanguageModalVisible, setIsLanguageModalVisible] = useState(false);
+  const [isFilterSheetVisible, setIsFilterSheetVisible] = useState(false);
   const [animeOnly, setAnimeOnly] = useState(false);
+  const [animationOnly, setAnimationOnly] = useState(false);
+  const [lastWatchedSort, setLastWatchedSort] = useState(false);
 
   useEffect(() => {
     fetchMovieWatchlist();
@@ -185,12 +190,33 @@ export default function ProfileMoviesScreen() {
       );
     }
 
+    if (animationOnly) {
+      result = result.filter((item) => hasAnimationGenreString(item.movie.genres_string));
+    }
+
     const trimmedQuery = query.trim().toLowerCase();
     if (trimmedQuery) {
       result = result.filter((item) => item.movie.title.toLowerCase().includes(trimmedQuery));
     }
+
+    if (lastWatchedSort) {
+      // `updated_at` doubles as "last watched" here — see the client-side
+      // stamp added to toggleMovieWatchState (Phase 57); most-recent first.
+      result = [...result].sort((a, b) => b.updated_at.localeCompare(a.updated_at));
+    }
     return result;
-  }, [allItems, filter, selectedLanguage, animeOnly, movieWatchlist, query]);
+  }, [allItems, filter, selectedLanguage, animeOnly, animationOnly, movieWatchlist, query, lastWatchedSort]);
+
+  const hasActiveFilters =
+    filter !== 'ALL' || selectedLanguage !== null || animeOnly || animationOnly || lastWatchedSort;
+
+  const handleReset = () => {
+    setFilter('ALL');
+    setLanguageFilter(null);
+    setAnimeOnly(false);
+    setAnimationOnly(false);
+    setLastWatchedSort(false);
+  };
 
   return (
     <SafeAreaView style={[styles.container, { backgroundColor: c.bg }]} edges={['top']}>
@@ -230,66 +256,44 @@ export default function ProfileMoviesScreen() {
         </View>
       </View>
 
-      {/* Filter Pills — horizontally scrollable (Phase H): see profile/shows.tsx
-          for the identical fix and the reason it was needed. */}
-      <ScrollView
-        horizontal
-        showsHorizontalScrollIndicator={false}
-        contentContainerStyle={styles.pillRow}
-      >
-        {FILTERS.map(({ key, label }) => (
-          <PressableScale
-            key={key}
-            style={[
-              styles.pill,
-              { backgroundColor: c.glassFill, borderColor: c.hairline },
-              filter === key && { backgroundColor: c.accentFill, borderColor: c.accentFill },
-            ]}
-            onPress={() => setFilter(key)}
-          >
-            <Text style={[styles.pillText, { color: c.textSecondary }, filter === key && { color: c.onAccent }]}>
-              {label}
-            </Text>
-          </PressableScale>
-        ))}
-        <PressableScale
-          style={[
-            styles.pill,
-            styles.languagePill,
-            { backgroundColor: c.glassFill, borderColor: c.hairline },
-            selectedLanguage && { backgroundColor: c.accentFill, borderColor: c.accentFill },
-          ]}
-          onPress={() => setIsLanguageModalVisible(true)}
-        >
-          <Languages color={selectedLanguage ? c.onAccent : c.textSecondary} size={14} />
-          <Text style={[styles.pillText, { color: c.textSecondary }, selectedLanguage && { color: c.onAccent }]}>
-            {selectedLanguage ? languageDisplayName(selectedLanguage) : 'Language'}
-          </Text>
-        </PressableScale>
-        <PressableScale
-          style={[
-            styles.pill,
-            styles.languagePill,
-            { backgroundColor: c.glassFill, borderColor: c.hairline },
-            animeOnly && { backgroundColor: c.accentFill, borderColor: c.accentFill },
-          ]}
-          onPress={() => setAnimeOnly((prev) => !prev)}
-          accessibilityRole="button"
-          accessibilityState={{ selected: animeOnly }}
-        >
-          <Sparkles color={animeOnly ? c.onAccent : c.textSecondary} size={14} />
-          <Text style={[styles.pillText, { color: c.textSecondary }, animeOnly && { color: c.onAccent }]}>
-            Anime
-          </Text>
-        </PressableScale>
-      </ScrollView>
-
       <LanguageFilterModal
         visible={isLanguageModalVisible}
         languages={availableLanguages}
         selected={selectedLanguage}
         onSelect={setLanguageFilter}
         onClose={() => setIsLanguageModalVisible(false)}
+      />
+
+      <WatchlistFilterSheet
+        visible={isFilterSheetVisible}
+        onClose={() => setIsFilterSheetVisible(false)}
+        title="Filter Movies"
+        statusOptions={FILTERS}
+        statusFilter={filter}
+        onStatusChange={(key) => setFilter(key as FilterKey)}
+        lastWatchedSort={lastWatchedSort}
+        onToggleLastWatchedSort={() => setLastWatchedSort((prev) => !prev)}
+        selectedLanguage={selectedLanguage}
+        onOpenLanguagePicker={() => setIsLanguageModalVisible(true)}
+        languageDisplay={selectedLanguage ? languageDisplayName(selectedLanguage) : 'Any Language'}
+        tagToggles={[
+          {
+            key: 'anime',
+            label: 'Anime',
+            Icon: Sparkles,
+            active: animeOnly,
+            onPress: () => setAnimeOnly((prev) => !prev),
+          },
+          {
+            key: 'animation',
+            label: 'Animation',
+            Icon: Palette,
+            active: animationOnly,
+            onPress: () => setAnimationOnly((prev) => !prev),
+          },
+        ]}
+        hasActiveFilters={hasActiveFilters}
+        onReset={handleReset}
       />
 
       {/* List */}
@@ -302,7 +306,7 @@ export default function ProfileMoviesScreen() {
           <Text style={[styles.emptySubtitle, { color: c.textTertiary }]}>
             {query.trim()
               ? `No movies match "${query.trim()}".`
-              : filter === 'ALL' && !selectedLanguage
+              : !hasActiveFilters
               ? 'Add movies from the Movies tab or Discover.'
               : 'No movies match this filter.'}
           </Text>
@@ -324,6 +328,8 @@ export default function ProfileMoviesScreen() {
           />
         </View>
       )}
+
+      <FloatingFilterButton onPress={() => setIsFilterSheetVisible(true)} active={hasActiveFilters} />
     </SafeAreaView>
   );
 }
@@ -375,28 +381,6 @@ const styles = StyleSheet.create({
     fontSize: 14,
     height: '100%',
   },
-  pillRow: {
-    flexDirection: 'row',
-    paddingHorizontal: 16,
-    gap: 8,
-    marginBottom: 12,
-  },
-  pill: {
-    paddingHorizontal: 14,
-    paddingVertical: 7,
-    borderRadius: 20,
-    borderWidth: StyleSheet.hairlineWidth,
-  },
-  pillText: {
-    fontSize: 13,
-    fontWeight: '600',
-  },
-  languagePill: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 5,
-  },
-
   listWrap: { flex: 1 },
   listContent: { paddingHorizontal: 16, paddingBottom: 32 },
 

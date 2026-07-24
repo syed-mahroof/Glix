@@ -196,10 +196,17 @@ export default function DiscoverFilterSheet({ activeSegment }: Props) {
         </View>
 
         <ScrollView
+          style={styles.scroll}
           showsVerticalScrollIndicator={false}
           contentContainerStyle={styles.scrollContent}
         >
-          {/* Sort By */}
+          {/* Sort By — tapping the already-active pill toggles back to the
+              'trending' default rather than being a no-op, matching every
+              other filter in this sheet (genre/language/anime) already
+              supporting toggle-off (Phase 58). Trending itself is included
+              rather than special-cased: setSortOrder(sortOrder === opt.key
+              ? 'trending' : opt.key) is a true no-op when opt.key is already
+              'trending', so the same line handles all four pills. */}
           <Text style={[styles.sectionLabel, { color: c.textSecondary }]}>Sort By</Text>
           <View style={styles.pillRow}>
             {SORT_OPTIONS.map((opt) => (
@@ -208,7 +215,7 @@ export default function DiscoverFilterSheet({ activeSegment }: Props) {
                 label={opt.label}
                 Icon={opt.Icon}
                 active={sortOrder === opt.key}
-                onPress={() => setSortOrder(opt.key)}
+                onPress={() => setSortOrder(sortOrder === opt.key ? 'trending' : opt.key)}
               />
             ))}
           </View>
@@ -324,6 +331,15 @@ const styles = StyleSheet.create({
     borderRadius: 16,
     alignItems: 'center',
     justifyContent: 'center',
+  },
+  // Without this, the ScrollView sizes itself to its content instead of
+  // the sheet's remaining space — once genres + language + anime + reset
+  // pushed content past SHEET_HEIGHT, the tail was clipped (Android's
+  // implicit overflow:hidden from the sheet's borderRadius) with no way to
+  // scroll to it, since the ScrollView's own viewport was never bounded
+  // (Phase 58).
+  scroll: {
+    flex: 1,
   },
   scrollContent: {
     paddingHorizontal: 20,
