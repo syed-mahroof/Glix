@@ -30,6 +30,7 @@ import {
 } from '../store/discoverStore';
 import { MOVIE_GENRES, TV_GENRES } from '../lib/genres';
 import { useAppTheme } from '../lib/theme';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 // Discover has no pre-loaded local list of "languages present in this data"
 // the way My Shows/My Movies derives from the user's own cached watchlist
@@ -129,6 +130,7 @@ export default function DiscoverFilterSheet({ activeSegment }: Props) {
   } = useDiscoverStore();
   const { theme } = useAppTheme();
   const c = theme.colors;
+  const insets = useSafeAreaInsets();
   const [isLanguageModalVisible, setIsLanguageModalVisible] = useState(false);
 
   const translateY = useSharedValue(SHEET_HEIGHT);
@@ -197,16 +199,23 @@ export default function DiscoverFilterSheet({ activeSegment }: Props) {
 
         <ScrollView
           style={styles.scroll}
-          showsVerticalScrollIndicator={false}
-          contentContainerStyle={styles.scrollContent}
+          showsVerticalScrollIndicator
+          persistentScrollbar
+          contentContainerStyle={[styles.scrollContent, { paddingBottom: 48 + insets.bottom }]}
         >
           {/* Sort By — tapping the already-active pill toggles back to the
               'trending' default rather than being a no-op, matching every
-              other filter in this sheet (genre/language/anime) already
-              supporting toggle-off (Phase 58). Trending itself is included
-              rather than special-cased: setSortOrder(sortOrder === opt.key
-              ? 'trending' : opt.key) is a true no-op when opt.key is already
-              'trending', so the same line handles all four pills. */}
+              other filter in this sheet (genre/language/anime). Trending
+              itself is the sheet's neutral/no-sort state (same convention
+              isFilterActive() already uses: sortOrder !== 'trending' is
+              what "a sort is applied" means) — it must never render as
+              "selected," or it reads as a filter permanently stuck on with
+              no way to turn off (Phase 64: this was the real bug behind
+              "Trending still can't be tapped off" — the toggle-off logic
+              itself already worked, but Trending highlighting as active by
+              default made it look un-toggleable). Tapping it still works
+              exactly like every other pill (reverts to 'trending'); it's
+              only the highlight that's suppressed. */}
           <Text style={[styles.sectionLabel, { color: c.textSecondary }]}>Sort By</Text>
           <View style={styles.pillRow}>
             {SORT_OPTIONS.map((opt) => (
@@ -214,7 +223,7 @@ export default function DiscoverFilterSheet({ activeSegment }: Props) {
                 key={opt.key}
                 label={opt.label}
                 Icon={opt.Icon}
-                active={sortOrder === opt.key}
+                active={opt.key !== 'trending' && sortOrder === opt.key}
                 onPress={() => setSortOrder(sortOrder === opt.key ? 'trending' : opt.key)}
               />
             ))}

@@ -8,6 +8,7 @@
 // (Shows/Movies) — Following/Followers were hard-coded 0s with a TODO,
 // no social graph exists yet. They return the day one ships, not before.
 
+import { useFocusEffect } from '@react-navigation/native';
 import { useRouter } from 'expo-router';
 import { Image } from 'expo-image';
 import {
@@ -25,7 +26,7 @@ import {
   XCircle,
   AlertTriangle,
 } from 'lucide-react-native';
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useMemo, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
@@ -79,9 +80,18 @@ export default function ProfileScreen() {
     stats?: { shows: number; movies: number; episodes: number; errors: number };
   }>({ visible: false, type: 'success', title: '', message: '' });
 
-  useEffect(() => {
-    fetchProfile();
-  }, [fetchProfile]);
+  // Phase 65: was a mount-only useEffect — profile.tsx is itself a bottom
+  // tab, and switching tabs doesn't unmount it (React Navigation keeps tab
+  // screens mounted/frozen), so watching something on another tab and
+  // switching back here never re-fetched. Same staleness class Phase 56
+  // fixed for Watch History and Phase 60 fixed for Analytics — this exact
+  // screen (the Profile Hub itself, not just Analytics one hop further in)
+  // was the one still missing it.
+  useFocusEffect(
+    useCallback(() => {
+      fetchProfile();
+    }, [fetchProfile])
+  );
 
   const initials = useMemo(() => {
     if (!profile?.username) return '?';
@@ -107,16 +117,28 @@ export default function ProfileScreen() {
     return movieWatchlist.watch_next.length + movieWatchlist.watched.length;
   }, [movieWatchlist]);
 
-  // Time display from profile
-  const watchedMonths = useMemo(() => {
-    if (!profile?.watched_days) return 0;
-    return Math.floor(profile.watched_days / 30);
-  }, [profile?.watched_days]);
-
-  const remainderDays = useMemo(() => {
-    if (!profile?.watched_days) return 0;
-    return profile.watched_days % 30;
-  }, [profile?.watched_days]);
+  // Time display — derived client-side straight from total_time_watched
+  // (Phase 65 root-cause fix), not from the separate watched_days/
+  // watched_hours/watched_minutes fields the backend also serializes.
+  // Root cause: every toggle/bulk-toggle/movie-toggle action in
+  // watchStore.ts keeps total_time_watched itself correctly in sync, both
+  // optimistically and via the authoritative response reconcile (verified
+  // — Phase 60's audit of this was accurate) — but none of those response
+  // payloads include watched_days/watched_hours/watched_minutes (the
+  // per-toggle endpoints only ever return total_time_watched; only the
+  // full GET /profile/ fetch returns the other three), so those fields
+  // silently froze at whatever fetchProfile() last returned and never
+  // moved again until the next full refetch, no matter how many episodes
+  // got marked watched in between. Backend formula (serializers.py
+  // get_watched_days/_hours/_minutes) is 1440 min/day, 60 min/hour —
+  // mirrored exactly here so this can never drift from the one field that
+  // actually does stay fresh.
+  const watchedMinutesTotal = profile?.total_time_watched ?? 0;
+  const watchedDaysTotal = Math.floor(watchedMinutesTotal / 1440);
+  const watchedHours = Math.floor((watchedMinutesTotal % 1440) / 60);
+  const watchedMinutes = watchedMinutesTotal % 60;
+  const watchedMonths = Math.floor(watchedDaysTotal / 30);
+  const remainderDays = watchedDaysTotal % 30;
 
   // ── Import handler ──────────────────────────────────────────────────────────
   // The POST only enqueues; resolving a full export against TMDB takes
@@ -270,12 +292,12 @@ export default function ProfileScreen() {
           </View>
           <View style={[styles.statDivider, { backgroundColor: c.accentDim }]} />
           <View style={styles.statItem}>
-            <Text style={[styles.statValue, monoValueStyle, { color: c.accentInk }]}>{profile?.watched_hours ?? 0}</Text>
+            <Text style={[styles.statValue, monoValueStyle, { color: c.accentInk }]}>{watchedHours}</Text>
             <Text style={[styles.statLabel, monoLabelStyle, { color: c.textSecondary }]}>Hours</Text>
           </View>
           <View style={[styles.statDivider, { backgroundColor: c.accentDim }]} />
           <View style={styles.statItem}>
-            <Text style={[styles.statValue, monoValueStyle, { color: c.accentInk }]}>{profile?.watched_minutes ?? 0}</Text>
+            <Text style={[styles.statValue, monoValueStyle, { color: c.accentInk }]}>{watchedMinutes}</Text>
             <Text style={[styles.statLabel, monoLabelStyle, { color: c.textSecondary }]}>Mins</Text>
           </View>
         </GlassSurface>

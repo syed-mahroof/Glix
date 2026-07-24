@@ -1,11 +1,17 @@
 // client-mobile/components/FloatingFilterButton.tsx
-// Floating "FILTERS" trigger for My Shows / My Movies (Phase 57), replacing
-// the old inline pill row. Shadow/elevation values match `Snackbar.tsx`'s
-// existing floating-element precedent, not new invented values.
+// Floating "FILTERS" trigger for My Shows / My Movies. Bottom-centered,
+// safe-area aware, always solid accentFill (Phase 63 rework — was
+// previously right-pinned with a color that only activated when a filter
+// was applied; now a permanent CTA-style floating action button matching
+// the app's #E4FA1A accent, with a small dot overlay as the "filters
+// applied" indicator instead of a full color swap). Shadow/elevation
+// values match `Snackbar.tsx`'s existing floating-element precedent, not
+// new invented values.
 
 import { SlidersHorizontal } from 'lucide-react-native';
 import React from 'react';
 import { StyleSheet, Text, View } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import PressableScale from './PressableScale';
 import { useAppTheme } from '../lib/theme';
@@ -18,21 +24,19 @@ interface Props {
 export default function FloatingFilterButton({ onPress, active }: Props) {
   const { theme } = useAppTheme();
   const c = theme.colors;
+  const insets = useSafeAreaInsets();
   return (
-    <View style={styles.wrap} pointerEvents="box-none">
+    <View style={[styles.wrap, { bottom: insets.bottom + 20 }]} pointerEvents="box-none">
       <PressableScale
-        style={[
-          styles.btn,
-          { backgroundColor: c.glassFill, borderColor: c.hairline },
-          active && { backgroundColor: c.accentDim, borderColor: c.accentInk },
-        ]}
+        style={[styles.btn, { backgroundColor: c.accentFill }]}
         onPress={onPress}
         accessibilityRole="button"
         accessibilityLabel="Filters"
+        accessibilityState={{ selected: active }}
       >
-        <SlidersHorizontal color={active ? c.accentInk : c.textSecondary} size={16} strokeWidth={2.25} />
-        <Text style={[styles.label, { color: active ? c.accentInk : c.textSecondary }]}>FILTERS</Text>
-        {active && <View style={[styles.dot, { backgroundColor: c.accentFill }]} />}
+        <SlidersHorizontal color={c.onAccent} size={16} strokeWidth={2.25} />
+        <Text style={[styles.label, { color: c.onAccent }]}>FILTERS</Text>
+        {active && <View style={[styles.dot, { backgroundColor: c.onAccent }]} />}
       </PressableScale>
     </View>
   );
@@ -41,17 +45,17 @@ export default function FloatingFilterButton({ onPress, active }: Props) {
 const styles = StyleSheet.create({
   wrap: {
     position: 'absolute',
-    right: 16,
-    bottom: 20,
+    left: 0,
+    right: 0,
+    alignItems: 'center',
   },
   btn: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 6,
-    paddingHorizontal: 16,
-    paddingVertical: 11,
-    borderRadius: 22,
-    borderWidth: StyleSheet.hairlineWidth,
+    paddingHorizontal: 18,
+    paddingVertical: 12,
+    borderRadius: 24,
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 4 },
     shadowOpacity: 0.3,

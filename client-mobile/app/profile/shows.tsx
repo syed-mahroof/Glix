@@ -7,6 +7,7 @@ import { useRouter } from 'expo-router';
 import { ArrowLeft, BookOpen, Search, Sparkles, Tv2, X } from 'lucide-react-native';
 import React, { useEffect, useMemo, useState } from 'react';
 import {
+  ScrollView,
   StyleSheet,
   Text,
   TextInput,
@@ -27,18 +28,50 @@ import { useWatchStore } from '../../store/watchStore';
 
 const POSTER_BASE = 'https://image.tmdb.org/t/p/w185';
 
-// "Up to Date" was dropped as a status filter here (Phase 57) in favor of
-// the "Last Watched" sort in the filter sheet below — sorting the whole
-// list by recency is more broadly useful than a filter that only ever
-// isolated the caught-up subset. The per-item "Up to Date" status badge
-// (statusLabel/statusColor below) is untouched.
-type FilterKey = 'ALL' | 'TO_WATCH' | 'ENDED';
+// "Up to Date" was dropped as a status filter (Phase 57) in favor of a
+// "Last Watched" sort. Phase 63 folded that sort back into this same
+// single-select tab row as its own option (rather than a second
+// independent toggle living in the filter sheet) — selecting it doesn't
+// narrow the list by status, it just sorts the full list by recency. The
+// per-item "Up to Date" status badge (statusLabel/statusColor below) is
+// untouched either way.
+type FilterKey = 'ALL' | 'TO_WATCH' | 'LAST_WATCHED' | 'ENDED';
 
 const FILTERS: { key: FilterKey; label: string }[] = [
   { key: 'ALL', label: 'All' },
   { key: 'TO_WATCH', label: 'Continuing' },
+  { key: 'LAST_WATCHED', label: 'Last Watched' },
   { key: 'ENDED', label: 'Ended' },
 ];
+
+function TabPill({
+  label,
+  active,
+  onPress,
+}: {
+  label: string;
+  active: boolean;
+  onPress: () => void;
+}) {
+  const { theme } = useAppTheme();
+  const c = theme.colors;
+  return (
+    <PressableScale
+      style={[
+        styles.tabPill,
+        { backgroundColor: c.glassFill, borderColor: c.hairline },
+        active && { backgroundColor: c.accentFill, borderColor: c.accentFill },
+      ]}
+      onPress={onPress}
+      accessibilityRole="button"
+      accessibilityState={{ selected: active }}
+    >
+      <Text style={[styles.tabPillText, { color: c.textSecondary }, active && { color: c.onAccent }]}>
+        {label}
+      </Text>
+    </PressableScale>
+  );
+}
 
 function statusColor(entry: WatchlistEntry, c: ThemeColors): string {
   // Was hardcoded '#888'/'#4CAF50' (grey/green) in 3 of 4 branches despite
@@ -161,7 +194,10 @@ export default function ProfileShowsScreen() {
   // Movies the way Language deliberately does; kept simple unless the user
   // wants it elevated later.
   const [animeOnly, setAnimeOnly] = useState(false);
-  const [lastWatchedSort, setLastWatchedSort] = useState(false);
+  // Derived from the tab selection, not independent state — Last Watched
+  // is one of the single-select FILTERS options now (Phase 63), not a
+  // second toggle that could be active alongside Continuing/Ended.
+  const lastWatchedSort = filter === 'LAST_WATCHED';
 
   useEffect(() => {
     fetchWatchlist();
@@ -217,13 +253,12 @@ export default function ProfileShowsScreen() {
     return result;
   }, [allEntries, filter, selectedLanguage, animeOnly, query, lastWatchedSort]);
 
-  const hasActiveFilters = filter !== 'ALL' || selectedLanguage !== null || animeOnly || lastWatchedSort;
+  const hasActiveFilters = filter !== 'ALL' || selectedLanguage !== null || animeOnly;
 
   const handleReset = () => {
     setFilter('ALL');
     setLanguageFilter(null);
     setAnimeOnly(false);
-    setLastWatchedSort(false);
   };
 
   return (
@@ -242,6 +277,25 @@ export default function ProfileShowsScreen() {
         </View>
         <LayoutToggle />
       </View>
+
+      {/* Status/sort tabs — a normal top-of-screen horizontal pill row
+          again (Phase 63), not a filter-sheet section. Single-select;
+          tapping the already-active pill returns to "All". */}
+      <ScrollView
+        horizontal
+        showsHorizontalScrollIndicator={false}
+        contentContainerStyle={styles.tabsContainer}
+        style={styles.tabsScroll}
+      >
+        {FILTERS.map((f) => (
+          <TabPill
+            key={f.key}
+            label={f.label}
+            active={filter === f.key}
+            onPress={() => setFilter(filter === f.key ? 'ALL' : f.key)}
+          />
+        ))}
+      </ScrollView>
 
       {/* Search — client-side filter over the already-loaded watchlist page
           (same page-1-per-bucket scope the rest of this screen has). */}
@@ -271,31 +325,6 @@ export default function ProfileShowsScreen() {
         selected={selectedLanguage}
         onSelect={setLanguageFilter}
         onClose={() => setIsLanguageModalVisible(false)}
-      />
-
-      <WatchlistFilterSheet
-        visible={isFilterSheetVisible}
-        onClose={() => setIsFilterSheetVisible(false)}
-        title="Filter Shows"
-        statusOptions={FILTERS}
-        statusFilter={filter}
-        onStatusChange={(key) => setFilter(key as FilterKey)}
-        lastWatchedSort={lastWatchedSort}
-        onToggleLastWatchedSort={() => setLastWatchedSort((prev) => !prev)}
-        selectedLanguage={selectedLanguage}
-        onOpenLanguagePicker={() => setIsLanguageModalVisible(true)}
-        languageDisplay={selectedLanguage ? languageDisplayName(selectedLanguage) : 'Any Language'}
-        tagToggles={[
-          {
-            key: 'anime',
-            label: 'Anime',
-            Icon: Sparkles,
-            active: animeOnly,
-            onPress: () => setAnimeOnly((prev) => !prev),
-          },
-        ]}
-        hasActiveFilters={hasActiveFilters}
-        onReset={handleReset}
       />
 
       {/* List */}
@@ -331,6 +360,33 @@ export default function ProfileShowsScreen() {
         </View>
       )}
 
+      {/* Filter sheet — rendered last (after the list), not before it. React
+          Native has no implicit z-index across siblings: an earlier sibling
+          with `position: absolute` still paints underneath a later one, so
+          mounting this before the FlashList (the Phase 57/63 bug) let the
+          list's own paint pass draw over the sheet despite it being a
+          correct full-screen overlay. Matches DiscoverFilterSheet's own
+          placement in discover.tsx. */}
+      <WatchlistFilterSheet
+        visible={isFilterSheetVisible}
+        onClose={() => setIsFilterSheetVisible(false)}
+        title="Filter Shows"
+        selectedLanguage={selectedLanguage}
+        onOpenLanguagePicker={() => setIsLanguageModalVisible(true)}
+        languageDisplay={selectedLanguage ? languageDisplayName(selectedLanguage) : 'Any Language'}
+        tagToggles={[
+          {
+            key: 'anime',
+            label: 'Anime',
+            Icon: Sparkles,
+            active: animeOnly,
+            onPress: () => setAnimeOnly((prev) => !prev),
+          },
+        ]}
+        hasActiveFilters={hasActiveFilters}
+        onReset={handleReset}
+      />
+
       <FloatingFilterButton onPress={() => setIsFilterSheetVisible(true)} active={hasActiveFilters} />
     </SafeAreaView>
   );
@@ -363,6 +419,25 @@ const styles = StyleSheet.create({
     fontSize: 20,
     fontWeight: '700',
     letterSpacing: -0.3,
+  },
+
+  tabsScroll: {
+    flexGrow: 0,
+    marginBottom: 12,
+  },
+  tabsContainer: {
+    paddingHorizontal: 16,
+    gap: 8,
+  },
+  tabPill: {
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    borderRadius: 16,
+    borderWidth: StyleSheet.hairlineWidth,
+  },
+  tabPillText: {
+    fontSize: 13,
+    fontWeight: '600',
   },
 
   searchRow: {

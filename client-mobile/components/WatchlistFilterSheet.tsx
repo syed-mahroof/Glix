@@ -1,24 +1,22 @@
 // client-mobile/components/WatchlistFilterSheet.tsx
-// Bottom sheet for My Shows / My Movies filtering (Phase 57). Replaces the
-// old horizontal filter-pill row on both screens — that row was a plain
-// non-scrolling-then-scrolling ScrollView that kept absorbing new pills
-// (status, Language, Anime, and now Sort/Animation) with no shared layout
-// budget, which is what actually drove the pill-row height regression: each
-// addition pushed the row's intrinsic content height a little further
-// without any of them re-checking the total against the header they sit
-// under. A single sheet, triggered by one floating button (see
-// `FloatingFilterButton`), gives every filter a fixed, generous vertical
-// budget instead of a horizontal one that silently grows.
+// Bottom sheet for My Shows / My Movies filtering — Language + tag filters
+// only (Phase 63 rework). Status (All/Continuing/Ended, etc.) and the Last
+// Watched sort both moved back out to a top-of-screen pill row on each
+// screen (see shows.tsx/movies.tsx) — they're tab-like, single-select
+// controls that belong above the fold, not buried in a sheet the user has
+// to open first. This sheet now only holds genuinely supplementary filters:
+// Language, and the Anime/Animation tag toggles.
 //
 // Modeled on `DiscoverFilterSheet`'s Reanimated spring sheet (same backdrop/
 // translateY/handle structure) rather than inventing a new sheet mechanism.
+// Phase 63 root cause for why this rendered inline behind the list wasn't
+// this component at all — it was already a correct absolute-positioned
+// overlay. It was mount ORDER in the parent screen: React Native has no
+// implicit z-index across siblings, so a sheet mounted before a FlashList
+// in JSX paints underneath it regardless of `position: absolute`. Fixed at
+// the call site (rendered last, after the list) — see shows.tsx/movies.tsx.
 
-import {
-  Clock,
-  Languages,
-  type LucideIcon,
-  X,
-} from 'lucide-react-native';
+import { Languages, type LucideIcon, X } from 'lucide-react-native';
 import React, { useEffect } from 'react';
 import { Dimensions, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import Animated, {
@@ -26,17 +24,13 @@ import Animated, {
   useSharedValue,
   withSpring,
 } from 'react-native-reanimated';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import PressableScale from './PressableScale';
 import { useAppTheme } from '../lib/theme';
 
 const { height: SCREEN_HEIGHT } = Dimensions.get('window');
-const SHEET_HEIGHT = SCREEN_HEIGHT * 0.62;
-
-export interface StatusOption {
-  key: string;
-  label: string;
-}
+const SHEET_HEIGHT = SCREEN_HEIGHT * 0.5;
 
 export interface ToggleOption {
   key: string;
@@ -50,11 +44,6 @@ interface Props {
   visible: boolean;
   onClose: () => void;
   title: string;
-  statusOptions: StatusOption[];
-  statusFilter: string;
-  onStatusChange: (key: string) => void;
-  lastWatchedSort: boolean;
-  onToggleLastWatchedSort: () => void;
   selectedLanguage: string | null;
   onOpenLanguagePicker: () => void;
   languageDisplay: string;
@@ -99,11 +88,6 @@ export default function WatchlistFilterSheet({
   visible,
   onClose,
   title,
-  statusOptions,
-  statusFilter,
-  onStatusChange,
-  lastWatchedSort,
-  onToggleLastWatchedSort,
   selectedLanguage,
   onOpenLanguagePicker,
   languageDisplay,
@@ -113,6 +97,7 @@ export default function WatchlistFilterSheet({
 }: Props) {
   const { theme } = useAppTheme();
   const c = theme.colors;
+  const insets = useSafeAreaInsets();
 
   const translateY = useSharedValue(SHEET_HEIGHT);
   const backdropOpacity = useSharedValue(0);
@@ -160,38 +145,11 @@ export default function WatchlistFilterSheet({
 
         <ScrollView
           style={styles.scroll}
-          showsVerticalScrollIndicator={false}
-          contentContainerStyle={styles.scrollContent}
+          showsVerticalScrollIndicator
+          persistentScrollbar
+          contentContainerStyle={[styles.scrollContent, { paddingBottom: 48 + insets.bottom }]}
         >
-          <Text style={[styles.sectionLabel, { color: c.textSecondary }]}>Status</Text>
-          <View style={styles.pillRow}>
-            {/* First option is each caller's "all/default" status (both My
-                Shows and My Movies list it first) — tapping the active pill
-                again returns to it instead of being a no-op, matching every
-                other pill in this sheet (Phase 58). */}
-            {statusOptions.map((opt) => (
-              <OptionPill
-                key={opt.key}
-                label={opt.label}
-                active={statusFilter === opt.key}
-                onPress={() =>
-                  onStatusChange(statusFilter === opt.key ? statusOptions[0].key : opt.key)
-                }
-              />
-            ))}
-          </View>
-
-          <Text style={[styles.sectionLabel, { color: c.textSecondary, marginTop: 24 }]}>Sort</Text>
-          <View style={styles.pillRow}>
-            <OptionPill
-              label="Last Watched"
-              Icon={Clock}
-              active={lastWatchedSort}
-              onPress={onToggleLastWatchedSort}
-            />
-          </View>
-
-          <Text style={[styles.sectionLabel, { color: c.textSecondary, marginTop: 24 }]}>Language</Text>
+          <Text style={[styles.sectionLabel, { color: c.textSecondary }]}>Language</Text>
           <View style={styles.pillRow}>
             <OptionPill
               label={languageDisplay}

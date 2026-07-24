@@ -1,3 +1,144 @@
+## 🟢 FINAL RE-AUDIT + CROSS-CHECK + DEVICE-VERIFICATION GAP LIST (2026-07-24, master fix prompt Batch 3 — closing phase of the Phase 63–68 batch)
+
+### 🟢 Bootstrap re-verification (before Phase 63 started)
+Batch 3's own bootstrap instruction was not to trust Batch 2's Phase 62 close-out at face value. Re-read the live code (not the changelog) for Phases 54, 55, 56, 59, 61 — all five genuinely hold: `hasStarted`/`watchedRecently`/`airedRecently` gating present in `lib/upcoming.ts`; `airDate >= todayIso` lower bound present in `syncWidgetData()`; `previousHistory`/`newHistoryEntries`/optimistic-id history entries present in both toggle functions; `onSaved`/`AnimatedStar`/`savedNote` present in `RatingReviewCard.tsx`; `loggedOut` marker present across all 4 widget render files. No additional hidden gaps found beyond the three the user had already flagged (57/58/60) and the one dropped from scope entirely (movies remove/add — see Phase 66).
+
+### 🟢 Cross-check: every reported bug mapped to a phase, nothing left silently unmapped
+| Reported item | Phase | Status |
+|---|---|---|
+| My Shows/My Movies filter sheet renders inline behind cards, wrong button placement, tabs misplaced | 63 | ✅ fixed — mount-order bug, tabs restored to top row, sheet trimmed |
+| Discover filter sheet can't scroll to Language/Reset, Trending can't be tapped off | 64 | ✅ fixed — safe-area bottom padding + Trending highlight suppressed |
+| Profile stats (Months/Days/Hours/Mins) don't update after watching | 65 | ✅ fixed — derived fields were never refreshed by any toggle response; screen itself was mount-only fetch |
+| Movies detail screen remove/add-to-watchlist buttons non-functional | 66 | 🟢 investigated, does not reproduce — see Phase 66 below; appears already fixed by Phase 46 (2026-07-23), predating the bug list this batch worked from |
+| Completion celebration when an Ended show's final episode is marked watched | 67 | ✅ shipped — new feature |
+| Batch 2's own Phase 62 "everything verified" close-out | 68 (this entry) | ⚠️ corrected — see the three ⚠️ CORRECTION notes on the Phase 57/58/60 entries below; Phase 54/55/56/59/61 re-confirmed genuinely solid |
+
+No item from the batch's own bootstrap/Phase 63-67 scope was found unmapped at closing time.
+
+### 🟢 Quality-standard re-check across Phases 63–67
+Architecture fit: no new state-management pattern introduced — `completedShow` (Phase 67) mirrors `unlockedBadges`' exact single-value-in-global-store + root-layout-consumer convention; the top pill row restored in Phase 63 mirrors the Shows Hub's (`(tabs)/index.tsx`) own pre-existing `FilterPill`/horizontal-`ScrollView` pattern exactly, not a new one. No new dependency added anywhere in this batch (confetti is pure Reanimated, same as every other celebratory moment in this codebase). Edge cases: Phase 67's trigger is computed strictly from the toggle action's own before/after counts (never a render/refetch), so it cannot retroactively fire for already-100%-watched shows and cannot refire on reopen; Phase 65's fix eliminates an entire class of future drift by deriving the display fields from the one field that's provably kept fresh, rather than patching the derived fields at every call site (which would need repeating at every *future* call site too). One real self-caught defect during this phase's own review: `CompletionCelebration.tsx`'s first draft used a literal `'#FFFFFF'` confetti color, which would have been near-invisible against the light theme's `#EDEEEA` background — caught before shipping and replaced with `c.textPrimary` (theme-resolved).
+
+### 🟢 Performance pass — existing optimizations re-confirmed intact
+`estimatedItemSize`: zero matches repo-wide (Phase 45's removal still fully intact, nothing in this batch reintroduced it). Fire-and-forget `fetchWatchlist()` on season/episode screens: untouched, no phase this batch touched those files. `DiscoverFeedView`'s `ThreadPoolExecutor` parallelization: untouched, no backend files touched this batch at all. No new unnecessary re-renders introduced: Phase 65's profile stats fix actually *removes* three separate `useMemo`-wrapped reads of a stale field in favor of 4 cheap derived `const`s computed directly from an already-subscribed `profile.total_time_watched`; Phase 63's pill-row restoration reuses local `useState`, no new global subscriptions. No new full-refetch replaced an optimistic update anywhere — Phase 67's completion detection is computed entirely from data already present in the same optimistic `set()` call, no extra network round-trip.
+
+### 🟡 Backend verification — not runnable this session
+No backend files were touched in Phases 63–67 (this batch is entirely frontend/`client-mobile`), and Phase 62 already confirmed `manage.py check`/`makemigrations --check --dry-run`/`pytest` (65/65) clean with nothing since. However, Docker Desktop was not running in this session (`docker compose ps` failed to connect to the daemon), so the trio could not be re-run to confirm the baseline still holds — stated plainly rather than assumed. Frontend `tsc --noEmit` (`node --stack-size=8000`) run after every phase this batch, always **zero errors** (the fully-clean baseline Phase 62 first achieved).
+
+### 📋 CONSOLIDATED — everything not verifiable without a real device/emulator, Phase 63–67
+- **Phase 63** (filter sheet mount-order fix + tabs restored): actual paint-order fix confirmed correct by React Native's own documented stacking rules, but the visual result (no more bleed-through, correct bottom-center floating button, correct top pill row) is unconfirmed on a real screen.
+- **Phase 64** (Discover sheet scroll/Trending fix): whether the safe-area bottom padding is generous enough on every real device's gesture-nav/home-indicator inset, and whether the always-visible scrollbar actually reads as a clear "more below" affordance in practice.
+- **Phase 65** (profile stats derivation + focus refetch): the Months/Days/Hours/Mins card updating instantly after a real on-device toggle, and `useFocusEffect` firing correctly on a real tab switch.
+- **Phase 66** (movies remove/add investigation): no code changed, so nothing new to verify — the existing Phase 46 implementation's on-device behavior was never independently confirmed by that phase either, per its own report.
+- **Phase 67** (completion celebration): the single biggest device-verification gap of this batch — confetti physics/timing, banner legibility, and whether the celebration actually fires at the right moment have only been verified by manual code trace (4 scenarios: single-episode completing an Ended show, bulk/season-mark completing one, un-marking not firing it, a Continuing show not firing it), never a real device.
+
+No physical device or emulator was available at any point this session, same as every prior batch. EAS Build for on-device testing remains the top `ROADMAP.md` Remaining/Future Work item.
+
+### Files (Phase 68 itself)
+`ROADMAP.md`, `context.md`, `PROJECT_STATUS.md`, `AUDIT.md` — documentation only, no code changes this phase.
+
+---
+
+
+## 🟢 NEW FEATURE — Completion celebration (confetti) when an Ended show's final episode is marked watched (2026-07-24, master fix prompt Batch 3, Phase 67)
+
+### 🟢 Trigger design
+Fires only on the specific toggle/bulk-toggle mutation that crosses incomplete→complete for a show whose `status === 'ENDED'` at that moment, computed from that action's own before/after `watched_episode_count` vs. `aired_episode_count` — never from a render, mount, or refetch. This is what guarantees it can't retroactively fire for a show that was already 100% watched before this shipped, and can't refire from simply reopening the show's screen: the check only ever runs inside the two mutation functions themselves.
+
+### ✅ RESOLVED — implementation
+`store/watchStore.ts`: added `completedShow: CompletedShowInfo | null` + `clearCompletedShow()`. `toggleWatchState()` (single episode) computes the transition inline in its existing optimistic `set()` callback, using data it was already computing (before-count from `entrySnapshot`, after-count from the already-built `entry`) — no extra work. `bulkToggleWatchState()` (Catch-Up cascade, Mark Season Watched) does the same per-entry inside its existing `.map()`, capturing `beforeWatchedCount` before the per-episode mutation and comparing against the freshly computed `watchedCount` after it; first genuine completion found wins (only one celebration can show at a time, and both current bulk call sites are single-show anyway, so this is a defensive bound rather than an expected real case). Both functions are guarded to the marking direction only (`optimisticWatched`/`watched === true`) and require `aired_episode_count > 0` to avoid a 0/0 edge case. New `components/CompletionCelebration.tsx`: Reanimated-only (no Lottie, no new dependency — same primitive as `BadgeUnlockModal`/`CascadeModal`/`AnimatedSplash`), a confetti particle burst (`pointerEvents="none"`, never intercepts touches) plus a **non-blocking** banner card (Snackbar's exact `pointerEvents="box-none"` + `setTimeout`-based auto-dismiss convention, not a blocking full-screen `Modal` like `BadgeUnlockModal` — a user who just finished a series shouldn't be trapped on the screen). Wired into `app/_layout.tsx` at the root, mirroring `unlockedBadges`'/`BadgeUnlockModal`'s exact pattern, since the mark-watched action that can finish a series happens from several different screens (Shows Hub row, season screen, episode screen), not just one.
+
+### 🟡 Self-caught defect, fixed before shipping
+First draft's confetti palette used a literal `'#FFFFFF'` for one of three particle colors — would have been nearly invisible against the light theme's `#EDEEEA` background (this isn't a "photo caption overlay" situation like the app's other fixed-color exceptions; confetti has no photo underneath it, just the screen's own themed background). Replaced with `c.textPrimary` (white in dark, near-black in light), which stays visible in both themes.
+
+### 🟡 Scope decision — Movies-only extension noted, not built
+The request was explicitly Shows-only (a movie's own "mark as watched" already *is* "finishing" in one action, no incomplete→complete transition to detect) — flagged as a low-cost follow-up rather than expanded into without being asked.
+
+### Files
+`client-mobile/store/watchStore.ts`, `client-mobile/components/CompletionCelebration.tsx` (new), `client-mobile/app/_layout.tsx`.
+
+### Verification
+`tsc --noEmit` — zero errors (same clean baseline every phase this batch). Manual trace of 4 scenarios: single episode completing the last unwatched episode of an Ended show → fires; bulk "Mark Season Watched" crossing the same threshold in one action → fires; un-marking an episode → never fires (guarded by direction); a still-`Continuing` show reaching 100% of its aired episodes → never fires (guarded by `status === 'ENDED'`). **Not verifiable this session:** no device — confetti physics/timing feel, banner legibility, and real on-screen trigger timing.
+
+---
+
+
+## 🟢 INVESTIGATED, DOES NOT REPRODUCE — Movies detail screen remove/add-to-watchlist buttons reported non-functional (2026-07-24, master fix prompt Batch 3, Phase 66)
+
+### 🟢 Investigation
+The bug list this batch worked from described the movie detail screen's trash-can (remove) and bookmark (add/watched-state) icons as non-functional boilerplate, framed as a gap that fell out of Batch 2's scope by mistake. Read `app/movie/[id].tsx`'s `handlePrimaryAction`/`handleRemoveFromWatchlist`/`handleUndoRemove` and their backing `store/watchStore.ts` actions (`toggleMovieWatchState`, `addMovieToWatchlist`, `removeMovieFromWatchlist`, `undoRemoveMovie`) live, specifically checking for the pattern named as most plausible — a copy-pasted Shows-specific action used by mistake. Found none: every handler calls the correct Movies-domain action with the correct id, each with proper optimistic update + rollback-on-error, and `handleRemoveFromWatchlist` explicitly documents mirroring the Shows-side Phase 46 pattern. Backend routes (`POST /movies/watch-state/toggle/`, `POST /movies/add/`, `DELETE /movies/watchlist/remove/`, all in `backend/core/urls.py`) exist and their view implementations' response shapes match the frontend's `MovieToggleResponse`/`MovieRemoveResponse` types exactly. `git log` confirms this wiring is genuinely committed (not a stashed/uncommitted state) as of the current `HEAD`.
+
+### 🟢 Conclusion
+This appears to already be fixed by Phase 46 (2026-07-23, "Remove/Undo 'Add to Watchlist' — full-delete DELETE endpoints (show + movie), snapshot-based Undo via Snackbar"), which predates the bug list this batch was compiled from. No code change made — inventing a fix for a non-reproducing symptom would itself violate this codebase's own established standard (see Phase 51(a)'s identical precedent: verify against live code, document rather than fabricate when a reported symptom doesn't hold). Also confirmed, per the master prompt's own item 3: the home-screen widgets (`syncWidgetData()`) are entirely Shows/episode-based by data model (next-episode, air-date, upcoming-episode concepts) — movies have no equivalent, so movie mutations correctly never call `syncWidgetData()`; this is architecturally correct, not a missed integration. Profile stats (`total_time_watched`) already flow correctly from both `toggleMovieWatchState`/`removeMovieFromWatchlist` into the Phase 65 fix.
+
+### Files
+None changed — investigation only.
+
+### Verification
+No code changed; `tsc --noEmit` unaffected (still zero errors). **Not verifiable this session:** no device — if the reported symptom really was device-specific (e.g. a stale JS bundle on the reporter's own device predating this wiring), that can't be distinguished from "already fixed" without seeing the actual device.
+
+---
+
+
+## 🔴 REAL BUG FOUND & FIXED — Discover filter sheet still not reachable/toggleable on-device despite Phase 58's fix (2026-07-24, master fix prompt Batch 3, Phase 64)
+
+### 🔴 Root cause
+Re-read `components/DiscoverFilterSheet.tsx`'s current live layout code from scratch, per the batch's own instruction not to reuse Phase 58's diagnosis if it clearly didn't lead to a real fix. Phase 58's `flex: 1` ScrollView fix and toggle-off `onPress` logic were both genuinely present and structurally correct — the mechanical scroll/toggle code was never actually broken. Two things Phase 58's `tsc`-and-code-tracing-only verification couldn't have caught without a device: (1) the ScrollView's bottom padding was a flat `paddingBottom: 48` with no `useSafeAreaInsets().bottom` accounted for — on a device with a generous gesture-nav/home-indicator inset, the tail content (Reset button) could sit at or under that inset, reading as unreachable even though technically scrollable one more swipe; a hidden scrollbar (`showsVerticalScrollIndicator={false}`) gave no visual cue more content existed below the fold either. (2) The literal "Trending still can't be tapped off": `SORT_OPTIONS`' pills rendered `active={sortOrder === opt.key}` for every option including Trending — since `'trending'` is the sheet's own default/neutral state, this pill was highlighted-as-selected by default, reading as a filter permanently stuck on with no visible way to turn off, even though the toggle-off tap handler underneath it was already working correctly. The highlighting, not the handler, was the actual bug.
+
+### ✅ RESOLVED
+Added `insets.bottom` (via `useSafeAreaInsets`) on top of the existing 48px base padding on the ScrollView's `contentContainerStyle`, and made the scrollbar always visible (`showsVerticalScrollIndicator` + Android `persistentScrollbar`) so a long sheet visibly signals there's more to scroll. Changed the Sort By pills' `active` prop to `opt.key !== 'trending' && sortOrder === opt.key` — Trending never renders as selected (matching `isFilterActive()`'s own existing "sortOrder !== 'trending' means a sort is applied" convention), while its tap behavior (`setSortOrder(sortOrder === opt.key ? 'trending' : opt.key)`) is completely unchanged and still works as the "clear sort" action. Applied the identical safe-area bottom-padding + always-visible-scrollbar fix to `components/WatchlistFilterSheet.tsx` too (Phase 63, this same batch) so it doesn't inherit the same gap on day one.
+
+### Regression audit
+Confirmed `discoverStore.ts`'s `isFilterActive()`/`setSortOrder`/`fetchFilteredResults`/`loadMoreFilteredResults` are completely untouched — this was a pure UI-layer fix (padding + one boolean expression), no store logic changed. `LanguageFilterModal.tsx` re-confirmed unaffected and correctly implemented on its own terms — it already uses a real `Modal` + `SafeAreaView edges={['bottom']}`, the right pattern, no gap found there.
+
+### Files
+`client-mobile/components/DiscoverFilterSheet.tsx`, `client-mobile/components/WatchlistFilterSheet.tsx`.
+
+### Verification
+`tsc --noEmit` — zero errors. **Not verifiable this session:** no device — whether the safe-area padding is generous enough on every real device, and whether the persistent scrollbar actually reads as intended.
+
+---
+
+
+## 🔴 REAL BUG FOUND & FIXED — Profile Hub's own watch-time stats (Months/Days/Hours/Mins) never update after watching, despite Phase 60's Analytics fix (2026-07-24, master fix prompt Batch 3, Phase 65)
+
+### 🔴 Root cause
+Two independent bugs, neither touched by Phase 60 (which fixed `app/analytics.tsx`, a different screen). (1) `watched_days`/`watched_hours`/`watched_minutes` are `SerializerMethodField`s (`backend/core/serializers.py`, formula: `days = total_time_watched // 1440`, `hours = (total_time_watched % 1440) // 60`, `minutes = total_time_watched % 60`) — but every toggle/bulk-toggle/movie-toggle endpoint's response payload only ever returns `total_time_watched` itself (confirmed via grep across every `views.py` response dict). `store/watchStore.ts`'s optimistic-then-reconcile logic for `total_time_watched` was already correct (Phase 60's own audit of that specific field was accurate) — but the three *derived* display fields were never touched by any mutation path, optimistic or reconciled, so they silently froze at whatever the last full `fetchProfile()` returned and never moved again no matter how many episodes got marked watched. (2) `app/(tabs)/profile.tsx` — the actual Profile Hub tab, not Analytics — still had a mount-only `useEffect` fetching profile, the exact staleness class Phase 56 (Watch History) and Phase 60 (Analytics) already fixed elsewhere; since Profile is itself a bottom tab, React Navigation keeps it mounted/frozen on tab switch, so it never re-fetched on return either.
+
+### ✅ RESOLVED
+`app/(tabs)/profile.tsx`: replaced the three separate `useMemo`s reading `profile.watched_days`/`watched_hours`/`watched_minutes` with direct derivation from `profile.total_time_watched` (mirroring the backend formula exactly: `÷1440`, `%1440÷60`, `%60`) — root-cause fix, not a patch, since it means these values can never drift from `total_time_watched` again regardless of what future mutation call sites do or don't return. Replaced the mount-only `useEffect` with `useFocusEffect` (`@react-navigation/native`, already a dependency, same convention Phase 60 established on `analytics.tsx`), so a refocus after watching elsewhere refetches the full profile as defense-in-depth for anything not covered by the client-side derivation (badges, streak).
+
+### Regression audit
+Confirmed `watched_days`/`watched_hours`/`watched_minutes` are not read anywhere else in the client (`analytics.tsx`, `achievements.tsx`, `year-review.tsx` all use different fields) — safe to stop reading them on this one screen without touching the API contract itself (still serialized, just no longer consumed here). Confirmed `profile.tsx` doesn't render streak at all (that's Analytics' job, already covered by Phase 60) — the master prompt's "re-confirm `recalculate_watch_streak`'s output is what's rendered on the profile screen" item doesn't apply to this specific screen.
+
+### Files
+`client-mobile/app/(tabs)/profile.tsx`.
+
+### Verification
+`tsc --noEmit` — zero errors (removed the now-unused `useEffect` import in the same pass). **Not verifiable this session:** no device — the stats card updating instantly on a real on-device toggle, and `useFocusEffect` firing correctly on a real tab switch.
+
+---
+
+
+## 🔴 REAL BUG FOUND & FIXED — My Shows/My Movies filter sheet rendered inline behind the list instead of as an overlay; wrong button placement; status tabs misplaced into the sheet (2026-07-24, master fix prompt Batch 3, Phase 63 — full rework of Phase 57)
+
+### 🔴 Root cause
+User screenshot showed the filter panel's content (Language/Anime labels, the X, the sheet's own header) rendering interleaved with show/movie cards behind it, at low opacity, still scrollable through — not a real modal/overlay at all. Traced this to the exact opposite of what it looked like: `WatchlistFilterSheet.tsx` itself was already a **structurally correct** absolute-positioned overlay, built on the identical Reanimated backdrop/sheet primitive as the already-working `DiscoverFilterSheet.tsx` (confirmed by reading both files side by side). The actual bug was render **order** in the parent screens (`app/profile/shows.tsx`/`movies.tsx`): `<WatchlistFilterSheet>` was mounted *before* the screen's `<FlashList>` in JSX. React Native has no implicit z-index across siblings — paint order follows JSX order, so a later sibling (the FlashList) always paints over an earlier one (the sheet) regardless of `position: absolute`. `discover.tsx`'s own `<DiscoverFilterSheet>` is deliberately the very last child in its tree — that's the actual reason it worked and this one didn't, not a difference in the sheet primitives themselves. Separately, this phase's spec had been inverted: the status tabs (All/Continuing/Ended, etc.) had been moved *into* the sheet as a "Status" section, when the intent (confirmed against the master fix prompt) was for them to stay a normal top-of-screen pill row outside the sheet.
+
+### ✅ RESOLVED
+Moved `<WatchlistFilterSheet>` to render *after* the `<FlashList>`/empty-state block in both screens (last, alongside `<FloatingFilterButton>`), matching `discover.tsx`'s placement exactly — no change to the sheet component's own internals was needed for this part, since it was never actually broken. Restored the status tabs to a top-of-screen horizontal pill row (new local `TabPill` component, same visual/interaction convention as the Shows Hub's own pre-existing `FilterPill`), removing the "Status" and "Sort" sections from `WatchlistFilterSheet.tsx` entirely — the sheet now holds only Language + tag toggles (Anime for Shows; Anime + Animation for Movies), per the batch's explicit instruction. The "Last Watched" sort (added in the original Phase 57) was folded into the same single-select tab row as a 4th option (Shows: All/Continuing/Last Watched/Ended; Movies: All/Watch Next/Watched/Last Watched) rather than kept as a separate independent toggle — selecting it doesn't narrow the list by status, it sorts the full list by recency; `lastWatchedSort` is now a `const` derived from `filter === 'LAST_WATCHED'`, not separate state that could desync from the tab selection. `FloatingFilterButton.tsx`: rebuilt bottom-centered (`left: 0, right: 0, alignItems: 'center'`, safe-area aware via `useSafeAreaInsets`) and always solid `c.accentFill`/`c.onAccent` (was previously right-pinned and only accent-colored when a filter was active) — a small dot on `c.onAccent` now indicates "filters applied" instead of a full color swap.
+
+### Regression audit
+Confirmed the Language modal, Anime/Animation toggles, and the per-item "Up to Date" status badge are all unaffected — only the top-level filter surface changed. Confirmed the removed `FilterKey` type usage stays module-local on both screens, matching Phase 57's original confirmation that it doesn't leak into the Shows Hub tab's own separate `FilterKey`.
+
+### Files
+`client-mobile/components/WatchlistFilterSheet.tsx`, `client-mobile/components/FloatingFilterButton.tsx`, `client-mobile/app/profile/shows.tsx`, `client-mobile/app/profile/movies.tsx`.
+
+### Verification
+`tsc --noEmit` — zero errors.  **Not verifiable this session:** no device — the actual paint-order fix follows directly from React Native's documented stacking behavior, but the visual result (no bleed-through, correct button/tab placement) is unconfirmed on a real screen.
+
+---
+
+
 ## 🟢 FINAL PERFORMANCE PASS + PRE-PUSH AUDIT + CONSOLIDATED DEVICE-VERIFICATION GAP LIST (2026-07-24, master fix prompt Batch 2 — closing phase of the Phase 54–62 batch)
 
 ### 🟢 (a) Pre-push audit — every checklist item, all clean
@@ -52,6 +193,9 @@ Audited all 5 `syncWidgetData()` call sites in `store/watchStore.ts` (`fetchWatc
 
 ## 🔴 REAL BUG FOUND & FIXED — Analytics dashboard/streak/heatmap went stale after watching elsewhere and returning to the Profile tab; no admin recovery path existed for total_time_watched drift (2026-07-24, master fix prompt Batch 2, Phase 60)
 
+### ⚠️ CORRECTION (2026-07-24, Batch 3, Phase 65) — this phase's "RESOLVED" claim was wrong for the screen that actually mattered
+This entry's own audit was real and its two fixes (the `useFocusEffect` on `analytics.tsx`, the admin recalculation actions) are still correct and still in the code — but the user-visible bug report was about the **Profile Hub tab's own stats card** (Months/Days/Hours/Mins, `app/(tabs)/profile.tsx`), not Analytics, and this phase never looked at that file at all. Two real, previously-undiagnosed bugs were still live there until Phase 65 (Batch 3): (1) `watched_days`/`watched_hours`/`watched_minutes` are `SerializerMethodField`s derived from `total_time_watched` (`backend/core/serializers.py`) — every toggle/bulk-toggle/movie-toggle endpoint's response only ever returns `total_time_watched` itself, never those three derived fields, so once a user left the initial `fetchProfile()` load, the Hours/Mins/Days/Months card froze forever regardless of how many episodes got marked watched afterward, even though `total_time_watched` was (correctly, per this phase's own audit) staying fresh underneath it. (2) `profile.tsx` itself still had a mount-only `useEffect` fetching profile — the exact staleness class this phase fixed on `analytics.tsx` — never applied to the actual Profile Hub tab. See Phase 65 below for the full fix (derive Months/Days/Hours/Mins client-side straight from `total_time_watched`, plus `useFocusEffect` on `profile.tsx`). Lesson: "profile stats" as a bug report can mean the Profile tab's own header stats, not just Analytics one hop away — verify against the literal screen named, not the nearest screen already fixed.
+
 ### 🔴 Root cause
 `app/analytics.tsx` fetched its dashboard/streak/heatmap/genres/completion/monthly-recap exactly once, in a mount-only `useEffect`. This screen's stack lives inside the Profile tab and is frozen rather than unmounted on tab switch (same architecture as every other tab), so watching an episode or movie on a different tab and switching back to Profile left every one of these server-computed stats showing what they were at last mount — the identical staleness class Phase 56 already fixed for the Watch History tab. Separately: `total_time_watched` itself is kept correct in real time by consistently-guarded F()-expression updates on every mutation path (verified: single/cascade episode toggle, movie toggle, remove-show, remove-movie, TV Time import — all identical pattern, no gap), but unlike `WatchStreak` (which has `recalculate_watch_streak` as an idempotent Celery safety net) there was no way for an admin to recover a profile whose stored value had drifted from actual watch history for any other reason.
 
@@ -89,6 +233,9 @@ Added an `onSaved?: (message: string) => void` prop, firing "Rating saved" / "No
 
 ## 🔴 REAL BUG FOUND & FIXED — Discover/Watchlist filter sheets clipping tail content + sort pills missing toggle-off (2026-07-24, master fix prompt Batch 2, Phase 58)
 
+### ⚠️ CORRECTION (2026-07-24, Batch 3, Phase 64) — user re-tested on-device, still broken
+User confirmed the symptom persisted after this phase shipped. Re-reading the current live `DiscoverFilterSheet.tsx` from scratch (not this entry) found the `flex: 1`/toggle-off code from this phase genuinely present and structurally correct — but found two real gaps this phase's static-only verification (`tsc` + code tracing, no device) missed: (1) the ScrollView's `contentContainerStyle` used a flat `paddingBottom: 48`, not accounting for `useSafeAreaInsets().bottom` — on a device with a tall gesture-nav/home-indicator inset, the tail content (Reset button) could sit right at or under that inset, reading as "can't reach it" even though technically scrollable; fixed by padding with `48 + insets.bottom`, and made the scrollbar persistent/visible (`showsVerticalScrollIndicator` + Android `persistentScrollbar`) since a hidden scrollbar on a long sheet gives no visual cue that more content exists below the fold. (2) The literal "Trending still can't be tapped off" complaint: `SORT_OPTIONS`' `active` prop rendered Trending as highlighted/selected by default (`sortOrder === 'trending'` is the sheet's own default state) — meaning Trending visually looked permanently "on" with seemingly no way to turn it off, even though the underlying toggle-off logic this phase added was already functioning correctly. Fixed by never rendering Trending as `active` (it's the neutral/no-sort state per `isFilterActive()`'s own existing convention — the highlight was the bug, not the tap handler). See Phase 64 below for the full fix, applied to both `DiscoverFilterSheet.tsx` and `WatchlistFilterSheet.tsx`.
+
 ### 🔴 Root cause
 `components/DiscoverFilterSheet.tsx`, the new `components/WatchlistFilterSheet.tsx` (Phase 57, this batch), and `components/LanguageFilterModal.tsx` all had a `ScrollView` with no `style` prop — only `contentContainerStyle`. Without an explicit `flex`/height, a `ScrollView` sizes itself to its full content rather than the space actually available. The two sheets sit in a parent `View` with a real fixed pixel height (`Dimensions`-derived); once genre + language + anime + reset content exceeded it, the tail was silently clipped — Android implicitly clips overflow once `borderRadius` is set on a `View` (both sheets round their top corners), so there was no scrollbar and no way to reach the cut-off content. Separately, Discover's Sort By pills only ever set `sortOrder` forward — tapping the already-active pill (including "Trending") was a no-op, unlike the Genre/Anime pills in the same sheet which already supported deselect-by-retap.
 
@@ -107,6 +254,9 @@ Confirmed `setSortOrder`'s existing `isFilterActive()`-gated fetch-or-clear bran
 ---
 
 ## 🔴 REAL BUG FOUND & FIXED — My Shows/My Movies filter-pill row height regression + floating "FILTERS" sheet + tab-set changes (2026-07-24, master fix prompt Batch 2, Phase 57)
+
+### ⚠️ CORRECTION (2026-07-24, Batch 3, Phase 63) — shipped in a new, worse-broken state
+User's on-device screenshot showed the new `WatchlistFilterSheet` rendering **inline, interleaved with the list content behind it** — not a real overlay at all: filter text/controls visible at low opacity, overlapping card titles and progress bars, with the list still scrolling through it. Root cause, found by reading the actual render order in `app/profile/shows.tsx`/`movies.tsx`, not by re-diagnosing the sheet component itself: `WatchlistFilterSheet` (already a structurally correct absolute-positioned overlay, built on the identical primitive as `DiscoverFilterSheet`) was mounted **before** the screen's `FlashList` in JSX. React Native has no implicit z-index across siblings — a later sibling always paints over an earlier one regardless of `position: absolute` — so the FlashList, rendered after, painted directly over the sheet. `discover.tsx`'s own `<DiscoverFilterSheet>` is deliberately the *last* child in its tree, which is exactly why that one worked and this one didn't; Phase 57 built a copy of the right primitive but mounted it in the wrong place. This was compounded by a spec reversal this phase also got backwards: the status tabs (All/Continuing/Ended, etc.) were moved *into* the sheet as a "Status" section, when the original intent (confirmed against the master fix prompt) was for them to stay a normal top-of-screen pill row, with the sheet holding only the genuinely supplementary filters (Language, Anime/Animation). See Phase 63 below for the full rework: sheet moved to render after the list (fixing the paint-order bug), status tabs restored to a top pill row (with "Last Watched" folded in as a 4th single-select tab option rather than a separate toggle), and the sheet trimmed to Language + tags only.
 
 ### 🔴 Root cause
 Both `app/profile/shows.tsx` and `app/profile/movies.tsx`'s filter row was a horizontally-scrolling `ScrollView` that had simply kept absorbing new pills across successive phases (status filters, then Language, then Anime), with nothing checking the row's total height against anything else on screen — each addition made the row a little taller/busier with no shared layout budget. That's the pill-row height regression this batch named.

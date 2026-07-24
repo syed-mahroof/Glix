@@ -195,6 +195,14 @@ export interface RemovedMovieSnapshot {
   wasWatched: boolean;
 }
 
+/** Phase 67 — payload for the series-finished celebration. See
+ *  WatchStoreState.completedShow. */
+export interface CompletedShowInfo {
+  showId: number;
+  title: string;
+  posterPath: string | null;
+}
+
 export interface MovieEntry {
   tmdb_id: number;
   title: string;
@@ -444,6 +452,17 @@ interface WatchStoreState extends AnalyticsSlice {
   popUnlockedBadge: () => void;
   syncWidgetData: () => Promise<void>;
   clearWidgetData: () => Promise<void>;
+
+  /** Phase 67: set exactly when a toggle/bulk-toggle action detects a real
+   *  incomplete→complete transition for an Ended show (see toggleWatchState/
+   *  bulkToggleWatchState) — never derived from a render/refetch, so it
+   *  can't retroactively fire for a show that was already 100% watched
+   *  before this feature shipped, and can't refire just from reopening the
+   *  show's screen. Single value, not a queue like unlockedBadges — a show
+   *  can only make this transition once, and the two current bulk call
+   *  sites (Catch-Up cascade, Mark Season Watched) are both single-show. */
+  completedShow: CompletedShowInfo | null;
+  clearCompletedShow: () => void;
 }
 
 function findEntryAndEpisode(
@@ -498,9 +517,11 @@ export const useWatchStore = create<WatchStoreState>()(
   isLoadingAnalytics: false,
   analyticsError: null,
   unlockedBadges: [],
+  completedShow: null,
 
   clearUnlockedBadges: () => set({ unlockedBadges: [] }),
   popUnlockedBadge: () => set((state) => ({ unlockedBadges: state.unlockedBadges.slice(1) })),
+  clearCompletedShow: () => set({ completedShow: null }),
 
   fetchWatchlist: async () => {
     set({ isLoadingWatchlist: true, error: null });
@@ -607,6 +628,26 @@ export const useWatchStore = create<WatchStoreState>()(
         entry.aired_episode_count > 0
           ? Math.round((entry.watched_episode_count / entry.aired_episode_count) * 1000) / 10
           : 0;
+
+      // Phase 67: series-finished celebration. Fires only on the specific
+      // mutation that crosses incomplete -> complete for a show whose
+      // status is 'ENDED' at this moment — computed from this action's own
+      // before (entrySnapshot)/after (entry) counts, never from a render or
+      // refetch, so it can't retroactively fire for a show that was already
+      // 100% watched before this shipped, and can't refire just from
+      // reopening the show. aired_episode_count is the same denominator
+      // progress_percentage already uses above; for an Ended show every
+      // episode has aired, so "aired" here means "every episode of the
+      // series." Only the marking direction can cross this threshold.
+      const justCompletedShow =
+        optimisticWatched &&
+        entry.show.status === 'ENDED' &&
+        entry.aired_episode_count > 0 &&
+        entrySnapshot.watched_episode_count < entrySnapshot.aired_episode_count &&
+        entry.watched_episode_count >= entry.aired_episode_count
+          ? { showId: entry.show.tmdb_id, title: entry.show.title, posterPath: entry.show.poster_path }
+          : null;
+
       results[entryIndex] = entry;
       nextWatchlist[bucketKey] = { ...nextWatchlist[bucketKey], results };
 
@@ -640,6 +681,7 @@ export const useWatchStore = create<WatchStoreState>()(
       return {
         watchlist: nextWatchlist,
         history,
+        completedShow: justCompletedShow ?? state.completedShow,
         profile: state.profile
           ? {
               ...state.profile,
@@ -997,9 +1039,18 @@ export const useWatchStore = create<WatchStoreState>()(
       // go through this path, and hit the exact same desync bug.
       const newHistoryEntries: HistoryEntry[] = [];
       const unwatchedEpisodeIds = new Set<number>();
+      // Phase 67: same series-finished celebration as toggleWatchState,
+      // for the bulk path (Catch-Up cascade, Mark Season Watched). Both
+      // current call sites are single-show, but episodeIds is generic
+      // across the whole watchlist, so this loop could in principle touch
+      // more than one show — first genuine completion found wins, since
+      // only one celebration can show at a time anyway (completedShow is a
+      // single value, not a queue).
+      let bulkCompletedShow: CompletedShowInfo | null = null;
 
       for (const bucketKey of Object.keys(nextWatchlist) as (keyof WatchlistBuckets)[]) {
         nextWatchlist[bucketKey].results = nextWatchlist[bucketKey].results.map((entry) => {
+          const beforeWatchedCount = entry.watched_episode_count;
           let affected = false;
           const episodes = entry.show.episodes.map((ep) => {
             if (!idSet.has(ep.tmdb_id)) return ep;
@@ -1027,6 +1078,19 @@ export const useWatchStore = create<WatchStoreState>()(
             entry.aired_episode_count > 0
               ? Math.round((watchedCount / entry.aired_episode_count) * 1000) / 10
               : 0;
+
+          if (
+            !bulkCompletedShow &&
+            watched &&
+            affected &&
+            entry.show.status === 'ENDED' &&
+            entry.aired_episode_count > 0 &&
+            beforeWatchedCount < entry.aired_episode_count &&
+            watchedCount >= entry.aired_episode_count
+          ) {
+            bulkCompletedShow = { showId: entry.show.tmdb_id, title: entry.show.title, posterPath: entry.show.poster_path };
+          }
+
           return {
             ...entry,
             show: { ...entry.show, episodes },
@@ -1065,6 +1129,7 @@ export const useWatchStore = create<WatchStoreState>()(
       return {
         watchlist: nextWatchlist,
         history,
+        completedShow: bulkCompletedShow ?? state.completedShow,
         profile: state.profile
           ? { ...state.profile, total_time_watched: Math.max(0, state.profile.total_time_watched + totalRuntimeDelta) }
           : state.profile,

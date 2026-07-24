@@ -6,7 +6,7 @@ import { Image } from 'expo-image';
 import { useRouter } from 'expo-router';
 import { ArrowLeft, Clapperboard, Film, Palette, Search, Sparkles, X } from 'lucide-react-native';
 import React, { useEffect, useMemo, useState } from 'react';
-import { StyleSheet, Text, TextInput, View } from 'react-native';
+import { ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 import FloatingFilterButton from '../../components/FloatingFilterButton';
@@ -22,13 +22,46 @@ import { useWatchStore } from '../../store/watchStore';
 
 const POSTER_BASE = 'https://image.tmdb.org/t/p/w185';
 
-type FilterKey = 'ALL' | 'WATCH_NEXT' | 'WATCHED';
+// Last Watched is a single-select tab option here too (Phase 63), same as
+// shows.tsx — sorts the full list by recency (updated_at doubles as "last
+// watched" for movies, see toggleMovieWatchState) rather than narrowing it.
+type FilterKey = 'ALL' | 'WATCH_NEXT' | 'WATCHED' | 'LAST_WATCHED';
 
 const FILTERS: { key: FilterKey; label: string }[] = [
   { key: 'ALL', label: 'All' },
   { key: 'WATCH_NEXT', label: 'Watch Next' },
   { key: 'WATCHED', label: 'Watched' },
+  { key: 'LAST_WATCHED', label: 'Last Watched' },
 ];
+
+function TabPill({
+  label,
+  active,
+  onPress,
+}: {
+  label: string;
+  active: boolean;
+  onPress: () => void;
+}) {
+  const { theme } = useAppTheme();
+  const c = theme.colors;
+  return (
+    <PressableScale
+      style={[
+        styles.tabPill,
+        { backgroundColor: c.glassFill, borderColor: c.hairline },
+        active && { backgroundColor: c.accentFill, borderColor: c.accentFill },
+      ]}
+      onPress={onPress}
+      accessibilityRole="button"
+      accessibilityState={{ selected: active }}
+    >
+      <Text style={[styles.tabPillText, { color: c.textSecondary }, active && { color: c.onAccent }]}>
+        {label}
+      </Text>
+    </PressableScale>
+  );
+}
 
 function formatRuntime(minutes: number): string {
   if (!minutes || minutes <= 0) return '';
@@ -156,7 +189,9 @@ export default function ProfileMoviesScreen() {
   const [isFilterSheetVisible, setIsFilterSheetVisible] = useState(false);
   const [animeOnly, setAnimeOnly] = useState(false);
   const [animationOnly, setAnimationOnly] = useState(false);
-  const [lastWatchedSort, setLastWatchedSort] = useState(false);
+  // Derived from the tab selection, not independent state — see shows.tsx's
+  // identical comment (Phase 63).
+  const lastWatchedSort = filter === 'LAST_WATCHED';
 
   useEffect(() => {
     fetchMovieWatchlist();
@@ -208,14 +243,13 @@ export default function ProfileMoviesScreen() {
   }, [allItems, filter, selectedLanguage, animeOnly, animationOnly, movieWatchlist, query, lastWatchedSort]);
 
   const hasActiveFilters =
-    filter !== 'ALL' || selectedLanguage !== null || animeOnly || animationOnly || lastWatchedSort;
+    filter !== 'ALL' || selectedLanguage !== null || animeOnly || animationOnly;
 
   const handleReset = () => {
     setFilter('ALL');
     setLanguageFilter(null);
     setAnimeOnly(false);
     setAnimationOnly(false);
-    setLastWatchedSort(false);
   };
 
   return (
@@ -234,6 +268,25 @@ export default function ProfileMoviesScreen() {
         </View>
         <LayoutToggle />
       </View>
+
+      {/* Status/sort tabs — top-of-screen horizontal pill row (Phase 63),
+          not a filter-sheet section. Single-select; tapping the active
+          pill again returns to "All". */}
+      <ScrollView
+        horizontal
+        showsHorizontalScrollIndicator={false}
+        contentContainerStyle={styles.tabsContainer}
+        style={styles.tabsScroll}
+      >
+        {FILTERS.map((f) => (
+          <TabPill
+            key={f.key}
+            label={f.label}
+            active={filter === f.key}
+            onPress={() => setFilter(filter === f.key ? 'ALL' : f.key)}
+          />
+        ))}
+      </ScrollView>
 
       {/* Search — client-side filter over the already-loaded movie watchlist. */}
       <View style={styles.searchRow}>
@@ -262,38 +315,6 @@ export default function ProfileMoviesScreen() {
         selected={selectedLanguage}
         onSelect={setLanguageFilter}
         onClose={() => setIsLanguageModalVisible(false)}
-      />
-
-      <WatchlistFilterSheet
-        visible={isFilterSheetVisible}
-        onClose={() => setIsFilterSheetVisible(false)}
-        title="Filter Movies"
-        statusOptions={FILTERS}
-        statusFilter={filter}
-        onStatusChange={(key) => setFilter(key as FilterKey)}
-        lastWatchedSort={lastWatchedSort}
-        onToggleLastWatchedSort={() => setLastWatchedSort((prev) => !prev)}
-        selectedLanguage={selectedLanguage}
-        onOpenLanguagePicker={() => setIsLanguageModalVisible(true)}
-        languageDisplay={selectedLanguage ? languageDisplayName(selectedLanguage) : 'Any Language'}
-        tagToggles={[
-          {
-            key: 'anime',
-            label: 'Anime',
-            Icon: Sparkles,
-            active: animeOnly,
-            onPress: () => setAnimeOnly((prev) => !prev),
-          },
-          {
-            key: 'animation',
-            label: 'Animation',
-            Icon: Palette,
-            active: animationOnly,
-            onPress: () => setAnimationOnly((prev) => !prev),
-          },
-        ]}
-        hasActiveFilters={hasActiveFilters}
-        onReset={handleReset}
       />
 
       {/* List */}
@@ -329,6 +350,38 @@ export default function ProfileMoviesScreen() {
         </View>
       )}
 
+      {/* Filter sheet — rendered last (after the list), not before it. See
+          shows.tsx's identical comment for why (Phase 63): React Native has
+          no implicit z-index across siblings, so mounting an absolutely-
+          positioned overlay before the FlashList let the list paint over
+          it. Matches DiscoverFilterSheet's own placement in discover.tsx. */}
+      <WatchlistFilterSheet
+        visible={isFilterSheetVisible}
+        onClose={() => setIsFilterSheetVisible(false)}
+        title="Filter Movies"
+        selectedLanguage={selectedLanguage}
+        onOpenLanguagePicker={() => setIsLanguageModalVisible(true)}
+        languageDisplay={selectedLanguage ? languageDisplayName(selectedLanguage) : 'Any Language'}
+        tagToggles={[
+          {
+            key: 'anime',
+            label: 'Anime',
+            Icon: Sparkles,
+            active: animeOnly,
+            onPress: () => setAnimeOnly((prev) => !prev),
+          },
+          {
+            key: 'animation',
+            label: 'Animation',
+            Icon: Palette,
+            active: animationOnly,
+            onPress: () => setAnimationOnly((prev) => !prev),
+          },
+        ]}
+        hasActiveFilters={hasActiveFilters}
+        onReset={handleReset}
+      />
+
       <FloatingFilterButton onPress={() => setIsFilterSheetVisible(true)} active={hasActiveFilters} />
     </SafeAreaView>
   );
@@ -361,6 +414,25 @@ const styles = StyleSheet.create({
     fontSize: 20,
     fontWeight: '700',
     letterSpacing: -0.3,
+  },
+
+  tabsScroll: {
+    flexGrow: 0,
+    marginBottom: 12,
+  },
+  tabsContainer: {
+    paddingHorizontal: 16,
+    gap: 8,
+  },
+  tabPill: {
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    borderRadius: 16,
+    borderWidth: StyleSheet.hairlineWidth,
+  },
+  tabPillText: {
+    fontSize: 13,
+    fontWeight: '600',
   },
 
   searchRow: {

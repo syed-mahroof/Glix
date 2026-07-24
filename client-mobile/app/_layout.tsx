@@ -12,6 +12,7 @@ import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 
 import { BadgeUnlockModal } from '../components/BadgeUnlockModal';
+import CompletionCelebration from '../components/CompletionCelebration';
 import { ACCESS_TOKEN_KEY, api, setSessionExpiredHandler } from '../lib/api';
 import { BADGE_META } from '../lib/badges';
 import { registerForPushNotificationsAsync } from '../lib/notifications';
@@ -58,6 +59,13 @@ function RootLayoutInner() {
   // instance of it, since it sits above every other screen in the tree.
   const unlockedBadges = useWatchStore((s) => s.unlockedBadges);
   const popUnlockedBadge = useWatchStore((s) => s.popUnlockedBadge);
+  // Phase 67 — mounted at the root, same reasoning as unlockedBadges above:
+  // the mark-watched action that finishes a series can happen from the
+  // Shows Hub row, the season screen, or the episode screen, not just the
+  // show detail screen, so the celebration has to live above all of them
+  // rather than being wired into one screen.
+  const completedShow = useWatchStore((s) => s.completedShow);
+  const clearCompletedShow = useWatchStore((s) => s.clearCompletedShow);
 
   // "Akony" wordmark font (Phase J) — no custom font asset was loaded
   // anywhere in this app before this phase, so this is genuinely new
@@ -262,6 +270,12 @@ function RootLayoutInner() {
                 : "You've earned a new achievement!"
             }
             onClose={popUnlockedBadge}
+          />
+          <CompletionCelebration
+            visible={completedShow !== null}
+            title={completedShow?.title ?? ''}
+            posterPath={completedShow?.posterPath ?? null}
+            onDismiss={clearCompletedShow}
           />
         </ThemeProvider>
       </SafeAreaProvider>
