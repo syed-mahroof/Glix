@@ -5,6 +5,7 @@ import { Stack, useRouter } from 'expo-router';
 import * as SecureStore from 'expo-secure-store';
 import * as SplashScreen from 'expo-splash-screen';
 import { StatusBar } from 'expo-status-bar';
+import * as Updates from 'expo-updates';
 import React, { useEffect, useState } from 'react';
 import { ActivityIndicator, AppState, StyleSheet, View } from 'react-native';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
@@ -123,6 +124,26 @@ function RootLayoutInner() {
     setSessionExpiredHandler(() => router.replace('/login'));
     return () => setSessionExpiredHandler(null);
   }, [router]);
+
+  useEffect(() => {
+    // Default expo-updates behavior only applies a fetched OTA bundle on
+    // the *next* cold launch, so a published update silently needed two
+    // full app kills before it was visible. Checking + fetching + reloading
+    // here collapses that to one relaunch. Updates.isEnabled is false in
+    // Expo Go / dev client, so this is a no-op there.
+    if (__DEV__ || !Updates.isEnabled) return;
+    (async () => {
+      try {
+        const result = await Updates.checkForUpdateAsync();
+        if (result.isAvailable) {
+          await Updates.fetchUpdateAsync();
+          await Updates.reloadAsync();
+        }
+      } catch {
+        // best-effort — app just continues on the bundle it already has
+      }
+    })();
+  }, []);
 
   useEffect(() => {
     // The widget is only ever written to by explicit in-app actions
