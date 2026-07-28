@@ -1,3 +1,53 @@
+## 🟢 PHASE 69 — user-reported bundle: Overdue recency bound, widget rebuild, cold-start UX, action-button feedback, filter sheets, Trailer/Share, TMDB session reuse (2026-07-28)
+
+Full narrative in `context.md`'s Phase 69 entry; `PROJECT_STATUS.md` has the condensed summary. This entry is the resolution table + verification log + device-gap list.
+
+### Resolved this phase
+
+| # | Reported issue | Root cause | Fix | Files |
+|---|---|---|---|---|
+| 1 | Upcoming's Overdue section showed episodes 6506/3173 days old | Phase 54's gate asked "is the show active," not "is the missed episode itself recent" — an actively-watched show could still leak one ancient buried episode | Gate purely on the episode's own air date, `PAST_WINDOW_DAYS = 30`; bucketed into collapsible LAST WEEK/LAST MONTH | `lib/dateFormat.ts`, `lib/upcoming.ts`, `app/(tabs)/index.tsx` |
+| 2a | Widgets never redraw reliably | Android headless handler called `requestWidgetUpdate` by *name* instead of the per-instance `props.renderWidget` the pending OS transaction was actually waiting on | Switched to `props.renderWidget`; verified safe against the installed library's own `RNWidgetBackgroundTaskWorker.java` (task completion ties to the JS function returning, not to renderWidget being called) | `widgets/android/WidgetProvider.tsx` |
+| 2b | Widget dead until first app-side sync | No fallback data source when the SharedPreferences snapshot was empty | `readPersistedStore()` falls back to the Zustand `watchtracker-store` AsyncStorage blob | `widgets/android/WidgetProvider.tsx`, new `lib/widgetPayload.ts` |
+| 2c | Upcoming widget showed only 1 item even with several same-day releases | iOS hard-capped at hero+1 compact row regardless of family; Android had no per-row day grouping | Day-grouped rows, iOS budget scales by family (`systemLarge` now supported, up to 7 rows), Android budget derives from OS-reported widget height | `widgets/android/UpcomingWidget.tsx`, `widgets/ios/UpcomingWidget.tsx`, `app.json` |
+| 2d | Widget resize "didn't work" | `app.json`'s Android size envelope (`maxResizeWidth`/`maxResizeHeight`/`minWidth`) was tight enough to plausibly clamp requested resizes back down | Widened envelope (180dp min, 500x800dp max, targetCellHeight 3) | `app.json` |
+| 2e | Widget row design "boxed-in," gaps at right edge | Per-row card fill/border/margins from Phase 55 | Flat rows on the widget's own black ground, matching the old design's spirit with the right-aligned day-count kept | `widgets/android/UpcomingWidget.tsx`, `widgets/ios/UpcomingWidget.tsx` |
+| 3 | Long spinner then permanent "Can't reach Glix" banner on Render cold boot | `fetchProfile()`/`fetchWatchlist()` swallow errors and always resolve — `loading.tsx` flipped `ready` true unconditionally even when both failed | New `GET /api/v1/health/` + `waitForBackend()` warmup poll + a real `'connecting'\|'waking'\|'error'` state machine with a Retry button | `backend/core/views.py`, `backend/core/urls.py`, `lib/warmup.ts` (new), `app/loading.tsx`, `app/_layout.tsx`, `components/AnimatedSplash.tsx` |
+| 3b | (perf, found while investigating #3) Every TMDB call paid a full TCP+TLS handshake | `TMDBService()` built a brand-new `requests.Session` per instantiation (24+ call sites) | Shared, lazily-built, process-level session (`_get_shared_tmdb_session()`) | `backend/core/services.py` |
+| 4 | Delete/add-to-watchlist (movie), favorite/archive (show) buttons "don't work" | Investigated and found correctly wired end-to-end; real gap was `disabled` giving zero visual feedback during a slow request | Busy state: dimmed + `ActivityIndicator` per button, for the exact duration its own in-flight flag is true | `app/show/[id].tsx`, `app/movie/[id].tsx` |
+| 5 | My Movies "Last Watched" showed every movie | Fell through to `allItems` instead of filtering to `movieWatchlist.watched` | Routed `LAST_WATCHED` (like `WATCHED`) to the watched-only bucket before the recency sort | `app/profile/movies.tsx` |
+| 7a | Discover filter sheet can't scroll to Language/Reset (still, after Phase 58/64) | Mechanics re-verified genuinely intact; hardened the tail padding defensively regardless | `paddingBottom` floor 48→96 (+ safe area) | `components/DiscoverFilterSheet.tsx`, `components/WatchlistFilterSheet.tsx` |
+| 7b | Discover "Trending" pill can't be toggled | Phase 64 deliberately suppressed its own highlight, reading as permanently un-selectable even though the tap always worked | Reverted the suppression — Trending highlights like every other pill | `components/DiscoverFilterSheet.tsx` |
+| 8 | My Shows/My Movies filter sheet "too glassy" | Flat `glassFill` (0.65 alpha) with no blur backing, over busy list/poster content | New `glassFillStrong` token + the same two-layer BlurView+tint recipe `LiquidTabBar` already uses | `lib/theme.ts`, `components/WatchlistFilterSheet.tsx` |
+| 9 | (new feature) YouTube trailer + Share on detail screens | — | `videos` added to existing `append_to_response` calls (zero extra requests), new `get_show_trailer()`/`get_movie_trailer()`, new `trailer_key` field on both detail responses, new `TrailerButton.tsx`; native `Share` icon added to both screens' header rows | `backend/core/services.py`, `backend/core/search_views.py`, `components/TrailerButton.tsx` (new), `app/show/[id].tsx`, `app/movie/[id].tsx`, `store/watchStore.ts` |
+
+### Investigated, not changed (correctly working / correctly scoped out)
+
+- Show/movie detail action-button *wiring* (item 4) — confirmed correct end-to-end before touching anything; only the missing visual feedback was fixed.
+- `achievements.tsx`/`year-review.tsx` — previously flagged (Phase 60) as sharing Profile/Analytics' mount-only-fetch staleness. Re-checked: both are root-`Stack` routes (`app/_layout.tsx`), not nested under `(tabs)/`, so they genuinely remount fresh on every visit — the flagged staleness class doesn't apply. Doc note corrected in `context.md`'s Phase 69 entry rather than left open.
+- Shows-side "Last Watched" (`app/profile/shows.tsx`) — deliberately left as-is; it sorts the full entry list with never-watched shows sunk to the bottom rather than excluded, a different and already-intentional design the user's report never named.
+- Discover filter sheet's background opacity — item 8 was scoped to My Shows/My Movies specifically; Discover's sheet wasn't reported as having the same issue, left on the plain `glassFill` token.
+
+### Verification log
+
+- `tsc --noEmit` (`node --stack-size=8000 ./node_modules/typescript/lib/tsc.js --noEmit`): zero errors, checked repeatedly after each item, not just once at the end.
+- `python manage.py check`: clean.
+- `python manage.py makemigrations --check --dry-run`: no changes detected.
+- `pytest`: 65/65 passing.
+- **Environment note:** the backend trio above was run **inside the `watchtracker_backend` Docker container**, not the host venv — the host venv's Postgres connection was discovered to be landing on a stray native Windows `postgres.exe` service (PID confirmed via `tasklist`) bound to port 5432 alongside Docker Desktop's own port mapping to the same port, a pre-existing machine-level quirk unrelated to this session, worked around rather than fixed (stopping a system service was out of this task's scope without explicit instruction).
+- Live TMDB verification: `GET /api/v1/health/` → `200 {"status":"ok"}`; `TMDBService().get_show_trailer(94997)` → House of the Dragon's real "Official Trailer" (`DotnJ7tTA34`); `get_movie_trailer(27205)` → Inception's real trailer (`JE9z-gy4De4`); confirmed two separate `TMDBService()` instances share the same underlying session object post-fix, and watched urllib3's own retry logic self-heal a real stale-pooled-connection `SSLEOFError` mid-session (recovered in ~1s across two calls — expected connection-pooling behavior, not a regression).
+- Native contract verification: read `node_modules/react-native-android-widget`'s actual installed `WidgetTaskHandlerProps` type and `RNWidgetBackgroundTaskWorker.java` source directly, rather than assuming the render-skip-on-click optimization was safe.
+
+### Not verifiable this session (no physical device or emulator)
+
+- Both home-screen widgets' actual on-device rendering, resize behavior, and the headless-fallback data path (item 2) — the native widget config itself changed, so this needs a fresh EAS/dev-client build to reach a device at all.
+- The cold-start warmup UX feel — the "Waking up the server" message timing, and whether 55s is a comfortable wait budget on a real Render free-tier boot (item 3).
+- The new busy-state spinners' on-screen timing/feel (item 4).
+- The Trailer button's YouTube hand-off behavior and the Share sheet's native appearance (item 9).
+- Whether the Discover/Watchlist filter sheet scroll reports (item 7) were actually still-live code bugs or a stale installed build predating Phase 58/64's fixes — indistinguishable without the user's real device.
+
+---
+
 ## 🟢 FINAL RE-AUDIT + CROSS-CHECK + DEVICE-VERIFICATION GAP LIST (2026-07-24, master fix prompt Batch 3 — closing phase of the Phase 63–68 batch)
 
 ### 🟢 Bootstrap re-verification (before Phase 63 started)

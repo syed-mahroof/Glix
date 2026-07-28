@@ -16,6 +16,7 @@ import CompletionCelebration from '../components/CompletionCelebration';
 import { ACCESS_TOKEN_KEY, api, setSessionExpiredHandler } from '../lib/api';
 import { BADGE_META } from '../lib/badges';
 import { registerForPushNotificationsAsync } from '../lib/notifications';
+import { pingHealth } from '../lib/warmup';
 import { AppThemeProvider, useAppTheme, toNavigationTheme } from '../lib/theme';
 import { useWatchStore } from '../store/watchStore';
 import { Platform } from 'react-native';
@@ -32,6 +33,14 @@ if (Platform.OS === 'android') {
 // painted its first frame -- avoids a blank flash between the native splash
 // disappearing and RootLayoutInner's boot loader appearing.
 SplashScreen.preventAutoHideAsync().catch(() => {});
+
+// Fire the instant the JS bundle evaluates — a Render free-tier dyno's cold
+// boot (20-50s) starts the moment any request reaches it, so pinging here
+// (overlapping with font load and the local SecureStore auth check below,
+// both of which take real time on their own) buys back several seconds of
+// wake time before app/loading.tsx's own waitForBackend() starts polling.
+// Fire-and-forget: nothing downstream awaits this specific call.
+pingHealth(4000).catch(() => {});
 
 // The whole tree is wrapped in AppThemeProvider so every screen can read the
 // resolved theme via useAppTheme(). The actual layout lives in RootLayoutInner
@@ -166,6 +175,14 @@ function RootLayoutInner() {
     // the OS potentially suspends the process. Gated on auth so a
     // logged-out background doesn't push stale/empty pre-login state.
     if (!isAuthenticated) return;
+    // Also flush once on mount: the persisted store is rehydrated by now, so
+    // even a cold start with the backend unreachable pushes the last known
+    // watchlist to the widget instead of leaving whatever it had.
+    try {
+      useWatchStore.getState().syncWidgetData();
+    } catch {
+      // best-effort, same reasoning as the background flush below
+    }
     const subscription = AppState.addEventListener('change', (nextState) => {
       if (nextState === 'background') {
         try {

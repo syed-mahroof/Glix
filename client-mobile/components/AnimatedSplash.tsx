@@ -49,9 +49,13 @@ type Props = {
   ready: boolean;
   /** Called after the exit animation finishes -- unmount this overlay / navigate here. */
   onExitComplete: () => void;
+  /** Optional line under the wordmark for a slow boot (Render free-tier
+   *  cold start) or a genuine failure -- absent in the common fast-boot
+   *  path, so it never competes with the core choreography above. */
+  statusText?: string;
 };
 
-export default function AnimatedSplash({ ready, onExitComplete }: Props) {
+export default function AnimatedSplash({ ready, onExitComplete, statusText }: Props) {
   const reducedMotion = useReducedMotion();
   const mountedAt = useMemo(() => Date.now(), []);
 
@@ -209,7 +213,22 @@ export default function AnimatedSplash({ ready, onExitComplete }: Props) {
           <LetterReveal key={letter + i} letter={letter} progress={letterProgress[i]} />
         ))}
       </View>
+
+      {statusText ? <StatusLine text={statusText} /> : null}
     </Animated.View>
+  );
+}
+
+function StatusLine({ text }: { text: string }) {
+  const opacity = useSharedValue(0);
+  useEffect(() => {
+    opacity.value = withTiming(1, { duration: 300 });
+  }, [text, opacity]);
+  const style = useAnimatedStyle(() => ({ opacity: opacity.value }));
+  return (
+    <Animated.Text style={[styles.statusText, style]} numberOfLines={2}>
+      {text}
+    </Animated.Text>
   );
 }
 
@@ -273,5 +292,13 @@ const styles = StyleSheet.create({
     fontWeight: 'normal',
     fontSize: 24,
     letterSpacing: 6,
+  },
+  statusText: {
+    marginTop: 22,
+    paddingHorizontal: 40,
+    color: 'rgba(255,255,255,0.55)',
+    fontSize: 13,
+    textAlign: 'center',
+    lineHeight: 18,
   },
 });

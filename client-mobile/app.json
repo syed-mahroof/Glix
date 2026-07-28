@@ -54,12 +54,12 @@
               "name": "WatchlistWidget",
               "label": "Watchlist",
               "description": "Your next-up shows, tap one to jump right in.",
-              "minWidth": "250dp",
+              "minWidth": "180dp",
               "minHeight": "110dp",
               "targetCellWidth": 4,
-              "targetCellHeight": 2,
-              "maxResizeWidth": "400dp",
-              "maxResizeHeight": "350dp",
+              "targetCellHeight": 3,
+              "maxResizeWidth": "500dp",
+              "maxResizeHeight": "800dp",
               "resizeMode": "horizontal|vertical",
               "updatePeriodMillis": 1800000
             },
@@ -67,12 +67,12 @@
               "name": "UpcomingWidget",
               "label": "Upcoming",
               "description": "What's airing soon, tap one to jump right in.",
-              "minWidth": "250dp",
+              "minWidth": "180dp",
               "minHeight": "110dp",
               "targetCellWidth": 4,
-              "targetCellHeight": 2,
-              "maxResizeWidth": "400dp",
-              "maxResizeHeight": "350dp",
+              "targetCellHeight": 3,
+              "maxResizeWidth": "500dp",
+              "maxResizeHeight": "800dp",
               "resizeMode": "horizontal|vertical",
               "updatePeriodMillis": 1800000
             }
@@ -103,7 +103,8 @@
               "ios": {
                 "supportedFamilies": [
                   "systemSmall",
-                  "systemMedium"
+                  "systemMedium",
+                  "systemLarge"
                 ]
               }
             }

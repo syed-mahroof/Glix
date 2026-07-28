@@ -12,6 +12,7 @@ import {
   CheckCircle,
   Clock,
   MessageCircle,
+  Share2,
   Star,
   Trash2,
   WifiOff,
@@ -21,6 +22,7 @@ import {
   ActivityIndicator,
   Dimensions,
   ScrollView,
+  Share,
   StyleSheet,
   Text,
   View,
@@ -40,6 +42,7 @@ import PressableScale from '../../components/PressableScale';
 import { ProviderBadge } from '../../components/ProviderBadge';
 import RatingReviewCard from '../../components/RatingReviewCard';
 import Snackbar from '../../components/Snackbar';
+import TrailerButton from '../../components/TrailerButton';
 import { api } from '../../lib/api';
 import { extractErrorMessage } from '../../lib/errors';
 import { useAppTheme } from '../../lib/theme';
@@ -61,6 +64,7 @@ interface MovieDetail {
   runtime_minutes: number;
   genres: string[];
   vote_average: number;
+  trailer_key: string | null;
 }
 
 interface CastMember {
@@ -189,6 +193,7 @@ export default function MovieDetailScreen() {
         runtime_minutes: 0,
         genres: [],
         vote_average: Number(fallbackVote) || 0,
+        trailer_key: null,
       }
     : null);
 
@@ -284,6 +289,12 @@ export default function MovieDetailScreen() {
     await undoRemoveMovie(snapshot);
   };
 
+  const handleShare = () => {
+    const title = displayMovie?.title;
+    if (!title) return;
+    Share.share({ message: `Check out ${title} on Glix!` }).catch(() => {});
+  };
+
   if (isLoading && !displayMovie) {
     return (
       <View style={[styles.container, { backgroundColor: c.bg }]}>
@@ -369,27 +380,44 @@ export default function MovieDetailScreen() {
               <ArrowLeft color="#FFF" size={22} />
             </PressableScale>
             <View style={styles.backdropActionsRow}>
+              <PressableScale
+                onPress={handleShare}
+                hitSlop={8}
+                style={styles.iconBtn}
+                accessibilityRole="button"
+                accessibilityLabel="Share"
+              >
+                <Share2 color="#FFF" size={20} />
+              </PressableScale>
               {isInWatchlist && (
                 <PressableScale
                   onPress={handleRemoveFromWatchlist}
                   disabled={isRemoving}
                   hitSlop={8}
-                  style={styles.iconBtn}
+                  style={[styles.iconBtn, isRemoving && styles.iconBtnBusy]}
                   accessibilityRole="button"
                   accessibilityLabel="Remove from Watchlist"
                 >
-                  <Trash2 color="#FFF" size={20} />
+                  {isRemoving ? (
+                    <ActivityIndicator color="#FFF" size="small" />
+                  ) : (
+                    <Trash2 color="#FFF" size={20} />
+                  )}
                 </PressableScale>
               )}
               <PressableScale
                 onPress={handlePrimaryAction}
+                disabled={isTogglingWatch || isAddingToWatchlist}
                 hitSlop={8}
-                style={styles.iconBtn}
+                style={[styles.iconBtn, (isTogglingWatch || isAddingToWatchlist) && styles.iconBtnBusy]}
+                accessibilityRole="button"
                 accessibilityLabel={
                   !isInWatchlist ? 'Add to Watchlist' : isWatched ? 'Watched' : 'Mark as Watched'
                 }
               >
-                {isWatched ? (
+                {isTogglingWatch || isAddingToWatchlist ? (
+                  <ActivityIndicator color="#FFF" size="small" />
+                ) : isWatched ? (
                   <CheckCircle color={c.accentFill} size={22} />
                 ) : (
                   <BookmarkPlus color={isInWatchlist ? c.accentFill : '#FFF'} size={22} />
@@ -439,24 +467,29 @@ export default function MovieDetailScreen() {
             )}
 
             {/* Add to Watchlist / Mark as Watched / Watched button */}
-            <PressableScale
-              style={[
-                styles.watchBtn,
-                { backgroundColor: c.accentDim, borderColor: c.accentInk },
-                isWatched && { backgroundColor: c.accentFill, borderColor: c.accentFill },
-              ]}
-              onPress={handlePrimaryAction}
-              disabled={isTogglingWatch || isAddingToWatchlist}
-            >
-              {isWatched ? (
-                <CheckCircle color={c.onAccent} size={15} strokeWidth={2.5} />
-              ) : (
-                <BookmarkPlus color={c.accentInk} size={15} strokeWidth={2.5} />
-              )}
-              <Text style={[styles.watchBtnText, { color: c.accentInk }, isWatched && { color: c.onAccent }]}>
-                {!isInWatchlist ? 'Add to Watchlist' : isWatched ? 'Watched' : 'Mark as Watched'}
-              </Text>
-            </PressableScale>
+            <View style={styles.actionRow}>
+              <PressableScale
+                style={[
+                  styles.watchBtn,
+                  { backgroundColor: c.accentDim, borderColor: c.accentInk },
+                  isWatched && { backgroundColor: c.accentFill, borderColor: c.accentFill },
+                ]}
+                onPress={handlePrimaryAction}
+                disabled={isTogglingWatch || isAddingToWatchlist}
+              >
+                {isTogglingWatch || isAddingToWatchlist ? (
+                  <ActivityIndicator color={isWatched ? c.onAccent : c.accentInk} size="small" />
+                ) : isWatched ? (
+                  <CheckCircle color={c.onAccent} size={15} strokeWidth={2.5} />
+                ) : (
+                  <BookmarkPlus color={c.accentInk} size={15} strokeWidth={2.5} />
+                )}
+                <Text style={[styles.watchBtnText, { color: c.accentInk }, isWatched && { color: c.onAccent }]}>
+                  {!isInWatchlist ? 'Add to Watchlist' : isWatched ? 'Watched' : 'Mark as Watched'}
+                </Text>
+              </PressableScale>
+              <TrailerButton trailerKey={movie?.trailer_key} />
+            </View>
           </View>
         </View>
 
@@ -672,6 +705,12 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
+  // Visible in-flight state — a tap that's actually working (just waiting on
+  // a slow/cold backend) previously looked identical to a dead button, since
+  // `disabled` alone gives no visual feedback and the icon never changed.
+  iconBtnBusy: {
+    opacity: 0.55,
+  },
   backdropActionsRow: {
     flexDirection: 'row',
     gap: 8,
@@ -734,6 +773,12 @@ const styles = StyleSheet.create({
   genreText: { fontSize: 11, fontWeight: '600' },
 
   // Watch button
+  actionRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    flexWrap: 'wrap',
+  },
   watchBtn: {
     flexDirection: 'row',
     alignItems: 'center',

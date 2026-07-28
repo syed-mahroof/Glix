@@ -9,6 +9,7 @@ import {
   Heart,
   MessageCircle,
   Plus,
+  Share2,
   Star,
   Trash2,
   WifiOff,
@@ -17,6 +18,7 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   ActivityIndicator,
   ScrollView,
+  Share,
   StyleSheet,
   Text,
   View,
@@ -27,6 +29,7 @@ import CascadeModal from '../../components/CascadeModal';
 import { CastCard } from '../../components/CastCard';
 import GlassSurface from '../../components/GlassSurface';
 import PressableScale from '../../components/PressableScale';
+import TrailerButton from '../../components/TrailerButton';
 import { ProgressRing } from '../../components/ProgressRing';
 import { ProviderBadge } from '../../components/ProviderBadge';
 import RatingReviewCard from '../../components/RatingReviewCard';
@@ -282,6 +285,12 @@ export default function ShowDetailScreen() {
     await undoRemoveShow(snapshot);
   };
 
+  const handleShare = () => {
+    const title = show?.title ?? displayShow?.title;
+    if (!title) return;
+    Share.share({ message: `Check out ${title} on Glix!` }).catch(() => {});
+  };
+
   const displayShow = show || watchlistEntry?.show || (fallbackTitle ? {
     tmdb_id: tmdbId,
     title: fallbackTitle,
@@ -444,12 +453,25 @@ export default function ShowDetailScreen() {
                 <MessageCircle color="#FFFFFF" size={20} />
               </PressableScale>
               <PressableScale
+                onPress={handleShare}
+                hitSlop={8}
+                style={styles.iconButton}
+                accessibilityRole="button"
+                accessibilityLabel="Share"
+              >
+                <Share2 color="#FFFFFF" size={20} />
+              </PressableScale>
+              <PressableScale
                 onPress={handleToggleArchive}
                 disabled={isTogglingArchive}
                 hitSlop={8}
-                style={styles.iconButton}
+                style={[styles.iconButton, isTogglingArchive && styles.iconButtonBusy]}
+                accessibilityRole="button"
+                accessibilityLabel={isArchived ? 'Unarchive' : 'Archive'}
               >
-                {isArchived ? (
+                {isTogglingArchive ? (
+                  <ActivityIndicator color="#FFFFFF" size="small" />
+                ) : isArchived ? (
                   <ArchiveRestore color={c.accentFill} size={20} />
                 ) : (
                   <Archive color="#FFFFFF" size={20} />
@@ -459,24 +481,34 @@ export default function ShowDetailScreen() {
                 onPress={handleToggleFavorite}
                 disabled={isTogglingFavorite}
                 hitSlop={8}
-                style={styles.iconButton}
+                style={[styles.iconButton, isTogglingFavorite && styles.iconButtonBusy]}
+                accessibilityRole="button"
+                accessibilityLabel={isFavorite ? 'Remove favorite' : 'Add favorite'}
               >
-                <Heart
-                  color={isFavorite ? c.accentFill : '#FFFFFF'}
-                  fill={isFavorite ? c.accentFill : 'transparent'}
-                  size={20}
-                />
+                {isTogglingFavorite ? (
+                  <ActivityIndicator color="#FFFFFF" size="small" />
+                ) : (
+                  <Heart
+                    color={isFavorite ? c.accentFill : '#FFFFFF'}
+                    fill={isFavorite ? c.accentFill : 'transparent'}
+                    size={20}
+                  />
+                )}
               </PressableScale>
               {watchlistEntry && (
                 <PressableScale
                   onPress={handleRemoveFromWatchlist}
                   disabled={isRemoving}
                   hitSlop={8}
-                  style={styles.iconButton}
+                  style={[styles.iconButton, isRemoving && styles.iconButtonBusy]}
                   accessibilityRole="button"
                   accessibilityLabel="Remove from Watchlist"
                 >
-                  <Trash2 color="#FFFFFF" size={20} />
+                  {isRemoving ? (
+                    <ActivityIndicator color="#FFFFFF" size="small" />
+                  ) : (
+                    <Trash2 color="#FFFFFF" size={20} />
+                  )}
                 </PressableScale>
               )}
             </View>
@@ -509,26 +541,29 @@ export default function ShowDetailScreen() {
             ) : null}
 
             {!Number.isNaN(tmdbId) && (
-              <PressableScale
-                style={[
-                  styles.addBtn,
-                  { backgroundColor: c.accentDim, borderColor: c.accentInk },
-                  watchlistEntry && { backgroundColor: c.accentFill, borderColor: c.accentFill },
-                ]}
-                onPress={handleAddToWatchlist}
-                disabled={isAddingToWatchlist || !!watchlistEntry}
-                accessibilityRole="button"
-                accessibilityLabel={watchlistEntry ? 'In Watchlist' : 'Add to Watchlist'}
-              >
-                {watchlistEntry ? (
-                  <CheckCircle color={c.onAccent} size={15} strokeWidth={2.5} />
-                ) : (
-                  <Plus color={c.accentInk} size={15} strokeWidth={2.5} />
-                )}
-                <Text style={[styles.addBtnText, { color: c.accentInk }, watchlistEntry && { color: c.onAccent }]}>
-                  {watchlistEntry ? 'In Watchlist' : 'Add to Watchlist'}
-                </Text>
-              </PressableScale>
+              <View style={styles.actionRow}>
+                <PressableScale
+                  style={[
+                    styles.addBtn,
+                    { backgroundColor: c.accentDim, borderColor: c.accentInk },
+                    watchlistEntry && { backgroundColor: c.accentFill, borderColor: c.accentFill },
+                  ]}
+                  onPress={handleAddToWatchlist}
+                  disabled={isAddingToWatchlist || !!watchlistEntry}
+                  accessibilityRole="button"
+                  accessibilityLabel={watchlistEntry ? 'In Watchlist' : 'Add to Watchlist'}
+                >
+                  {watchlistEntry ? (
+                    <CheckCircle color={c.onAccent} size={15} strokeWidth={2.5} />
+                  ) : (
+                    <Plus color={c.accentInk} size={15} strokeWidth={2.5} />
+                  )}
+                  <Text style={[styles.addBtnText, { color: c.accentInk }, watchlistEntry && { color: c.onAccent }]}>
+                    {watchlistEntry ? 'In Watchlist' : 'Add to Watchlist'}
+                  </Text>
+                </PressableScale>
+                <TrailerButton trailerKey={show?.trailer_key} />
+              </View>
             )}
           </View>
         </View>
@@ -774,6 +809,12 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
+  // Visible in-flight state — `disabled` alone gave zero visual feedback,
+  // so a tap that was genuinely working (just waiting on a slow/cold
+  // backend) looked identical to a dead button.
+  iconButtonBusy: {
+    opacity: 0.55,
+  },
   heroRow: {
     flexDirection: 'row',
     gap: 14,
@@ -809,6 +850,13 @@ const styles = StyleSheet.create({
   metaDot: {
     fontSize: 12,
   },
+  actionRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    marginTop: 8,
+    flexWrap: 'wrap',
+  },
   addBtn: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -818,7 +866,6 @@ const styles = StyleSheet.create({
     paddingVertical: 8,
     paddingHorizontal: 12,
     alignSelf: 'flex-start',
-    marginTop: 8,
   },
   addBtnText: { fontSize: 12, fontWeight: '700' },
   genreRow: {

@@ -2,7 +2,7 @@
 // Shared "upcoming episode" item shape + builder, used by the Shows Hub's
 // Upcoming tab (List + Calendar views).
 
-import { formatUpcomingHeaderLabel, todayLocalIso } from './dateFormat';
+import { PAST_WINDOW_DAYS, formatUpcomingHeaderLabel, isPastUpcomingLabel, todayLocalIso } from './dateFormat';
 import type { Episode, WatchlistEntry } from '../store/watchStore';
 
 /** Same "next episode" rule the Shows Hub row uses: earliest aired-unwatched,
@@ -40,11 +40,7 @@ export interface UpcomingItem {
   episodeId: number | null;
 }
 
-// Same 14-day recency window buildRows() (app/(tabs)/index.tsx) already uses
-// to split a started-but-behind show into WATCH NEXT vs HAVEN'T WATCHED FOR A
-// WHILE — reused here rather than a second, arbitrary threshold, so "counts
-// as actively behind" means the same thing on both screens (Phase 54).
-const OVERDUE_RECENCY_MS = 14 * 24 * 60 * 60 * 1000;
+const PAST_WINDOW_MS = PAST_WINDOW_DAYS * 24 * 60 * 60 * 1000;
 
 export function buildUpcomingItems(entries: WatchlistEntry[]): UpcomingItem[] {
   const todayIso = todayLocalIso();
@@ -54,54 +50,43 @@ export function buildUpcomingItems(entries: WatchlistEntry[]): UpcomingItem[] {
     const show = entry.show;
     const seen = new Set<string>();
 
-    // Aired-but-unwatched (Phase G, TV Time-style): previously any episode
-    // whose air_date passed simply fell out of this list forever once
-    // unwatched, even though the user never actually marked it — matching
-    // the "next episode" definition pickNextEpisode() already uses (earliest
-    // aired-unwatched), surface only that ONE episode per show as an
-    // overdue item, not the entire unwatched backlog. Once it's marked
-    // watched (or a later episode becomes the new "next"), it stops
-    // qualifying here on the next recompute — it doesn't need to be tracked
-    // as "dismissed" separately.
-    //
-    // Phase 54: this alone wasn't enough — every show in the watchlist with
-    // ANY unwatched-and-aired episode qualified, no matter how stale, which
-    // turned Upcoming into a full backlog dump for anyone with an imported
-    // library. Two bounds now gate it: (1) a show the user has never started
-    // (watched_episode_count === 0) never counts as "overdue" — that's what
-    // the Shows Hub's own HAVEN'T STARTED pill is for, Upcoming shouldn't
-    // become a second copy of it; (2) even a started show only counts as
-    // genuinely "actively behind" if it was watched recently OR the missed
-    // episode itself aired recently — a show untouched for months isn't
-    // "behind," it's untouched backlog, same distinction buildRows() already
-    // draws for its own pills.
-    const overdue = show.episodes
-      .filter((ep) => ep.air_date && ep.air_date < todayIso && !ep.is_watched)
+    // Missed-but-recently-aired: the Upcoming tab is for what's coming and
+    // what just came out — a show's whole unwatched backlog belongs to the
+    // Watch List tab's own buckets, not here. So the only past-dated item a
+    // show can contribute is its earliest unwatched episode that aired
+    // *within the last PAST_WINDOW_DAYS* — an episode from years ago is
+    // backlog, not a missed release, no matter how recently the user last
+    // touched the show. Filtering by window before picking the earliest (not
+    // after) is what keeps a long-behind show's genuinely-recent episode
+    // visible instead of being represented by an ancient one that then gets
+    // discarded. Once marked watched it stops qualifying on the next
+    // recompute — nothing needs to track it as "dismissed".
+    const missed = show.episodes
+      .filter(
+        (ep) =>
+          ep.air_date &&
+          ep.air_date < todayIso &&
+          !ep.is_watched &&
+          nowMs - new Date(`${ep.air_date}T00:00:00`).getTime() <= PAST_WINDOW_MS
+      )
       .sort((a, b) => {
         if (a.air_date! !== b.air_date!) return a.air_date! < b.air_date! ? -1 : 1;
         if (a.season_number !== b.season_number) return a.season_number - b.season_number;
         return a.episode_number - b.episode_number;
       })[0];
-    if (overdue) {
-      const hasStarted = entry.watched_episode_count > 0;
-      const watchedRecently =
-        !!entry.last_watched_at && nowMs - new Date(entry.last_watched_at).getTime() <= OVERDUE_RECENCY_MS;
-      const airedRecently =
-        nowMs - new Date(`${overdue.air_date}T00:00:00`).getTime() <= OVERDUE_RECENCY_MS;
-      if (hasStarted && (watchedRecently || airedRecently)) {
-        seen.add(`${overdue.season_number}-${overdue.episode_number}`);
-        items.push({
-          key: String(overdue.tmdb_id),
-          showTitle: show.title,
-          posterPath: show.poster_path,
-          episodeTitle: overdue.title,
-          seasonNumber: overdue.season_number,
-          episodeNumber: overdue.episode_number,
-          airDate: overdue.air_date!,
-          tmdbShowId: show.tmdb_id,
-          episodeId: overdue.tmdb_id,
-        });
-      }
+    if (missed) {
+      seen.add(`${missed.season_number}-${missed.episode_number}`);
+      items.push({
+        key: String(missed.tmdb_id),
+        showTitle: show.title,
+        posterPath: show.poster_path,
+        episodeTitle: missed.title,
+        seasonNumber: missed.season_number,
+        episodeNumber: missed.episode_number,
+        airDate: missed.air_date!,
+        tmdbShowId: show.tmdb_id,
+        episodeId: missed.tmdb_id,
+      });
     }
 
     for (const episode of show.episodes) {
@@ -154,7 +139,7 @@ export function buildUpcomingItems(entries: WatchlistEntry[]): UpcomingItem[] {
  *  directly — a flat array of header + item entries rather than a nested
  *  sections structure, so both views can render it with one `data` prop. */
 export type UpcomingListEntry =
-  | { type: 'header'; key: string; label: string; count?: number }
+  | { type: 'header'; key: string; label: string; count: number; collapsible: boolean }
   | { type: 'item'; key: string; data: UpcomingItem };
 
 /**
@@ -166,12 +151,12 @@ export type UpcomingListEntry =
  * sharing an exact release date naturally land under the same header with
  * no extra bookkeeping.
  *
- * The OVERDUE header additionally carries a running `count` (Phase 54) so
- * the screen can render it as a collapsible "OVERDUE (N)" section instead of
- * a flat, unbounded block sitting ahead of every real future date — every
- * overdue item is guaranteed contiguous at the very front of the sorted
- * list (all have airDate < today), so a single running count is correct
- * without a second pass.
+ * Every header carries a running `count`; the past-dated ones (LAST WEEK /
+ * LAST MONTH) are additionally marked `collapsible` so the screen can render
+ * them as tap-to-expand sections that default closed, keeping a catch-up
+ * list from sitting ahead of and swallowing the real TODAY/TOMORROW sections.
+ * Items arrive sorted by airDate, so each bucket's items are contiguous and
+ * one running counter per header is correct without a second pass.
  */
 export function groupUpcomingItemsByDate(items: UpcomingItem[], now: Date): UpcomingListEntry[] {
   const entries: UpcomingListEntry[] = [];
@@ -180,14 +165,18 @@ export function groupUpcomingItemsByDate(items: UpcomingItem[], now: Date): Upco
 
   for (const item of items) {
     const label = formatUpcomingHeaderLabel(item.airDate, now);
-    if (label !== currentLabel) {
-      currentHeader = { type: 'header', key: `header-${label}`, label };
+    if (label !== currentLabel || !currentHeader) {
+      currentHeader = {
+        type: 'header',
+        key: `header-${label}`,
+        label,
+        count: 0,
+        collapsible: isPastUpcomingLabel(label),
+      };
       entries.push(currentHeader);
       currentLabel = label;
     }
-    if (label === 'OVERDUE' && currentHeader) {
-      currentHeader.count = (currentHeader.count ?? 0) + 1;
-    }
+    currentHeader.count += 1;
     entries.push({ type: 'item', key: item.key, data: item });
   }
   return entries;

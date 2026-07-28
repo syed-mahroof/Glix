@@ -212,8 +212,16 @@ export default function ProfileMoviesScreen() {
   }, [allItems]);
 
   const filtered = useMemo(() => {
+    // LAST_WATCHED is a recency sort over watched movies only, not a fourth
+    // status bucket — it previously fell through to `allItems` (every
+    // tracked movie, watched or not), so tapping it showed the entire list
+    // instead of "movies you've marked watched, most recent first".
     let result =
-      filter === 'WATCH_NEXT' ? movieWatchlist.watch_next : filter === 'WATCHED' ? movieWatchlist.watched : allItems;
+      filter === 'WATCH_NEXT'
+        ? movieWatchlist.watch_next
+        : filter === 'WATCHED' || filter === 'LAST_WATCHED'
+        ? movieWatchlist.watched
+        : allItems;
 
     if (selectedLanguage) {
       result = result.filter((item) => item.movie.original_language === selectedLanguage);

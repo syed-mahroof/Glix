@@ -54,6 +54,47 @@ if not any(isinstance(f, _RedactApiKeyFilter) for f in _urllib3_pool_logger.filt
     _urllib3_pool_logger.addFilter(_RedactApiKeyFilter())
 
 
+_shared_tmdb_session: Optional[requests.Session] = None
+
+
+def _get_shared_tmdb_session() -> requests.Session:
+    """
+    One `requests.Session` (with its connection pool + retry adapter) per
+    process, lazily built on first use and reused by every `TMDBService()`
+    instantiation after that — see the comment in `TMDBService.__init__`.
+    """
+    global _shared_tmdb_session
+    if _shared_tmdb_session is not None:
+        return _shared_tmdb_session
+
+    from requests.adapters import HTTPAdapter
+    from urllib3.util.retry import Retry
+
+    session = requests.Session()
+    # total=4/backoff_factor=1 previously had a worst case of 1+2+4+8=15s of
+    # pure backoff sleep alone (urllib3's exponential formula), on top of the
+    # actual request time per attempt — easily 15-20s+ for a single TMDB call
+    # that keeps hitting 429/5xx. Several views (DiscoverFeedView, movie/show
+    # detail's parallel credits/providers/recommendations fetches) make
+    # multiple TMDB calls per request, compounding the odds any one of them
+    # hits this. That could exceed the frontend's axios timeout (lib/api.ts)
+    # even though the backend was still working — surfacing as a raw
+    # "Network Error" to the user for what was actually a transient TMDB
+    # rate-limit. Tightened to keep worst-case backoff bounded
+    # (0.5+1+2=3.5s) while still absorbing a transient blip.
+    retry_strategy = Retry(
+        total=3,
+        status_forcelist=[429, 500, 502, 503, 504],
+        allowed_methods=["HEAD", "GET", "OPTIONS"],
+        backoff_factor=0.5,
+    )
+    adapter = HTTPAdapter(max_retries=retry_strategy, pool_maxsize=20)
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
+    _shared_tmdb_session = session
+    return session
+
+
 class TMDBServiceError(Exception):
     """Raised when TMDB is unreachable AND no local cache fallback exists."""
 
@@ -87,31 +128,18 @@ class TMDBService:
                 "serve from local cache and will raise on cache misses."
             )
         self.timeout = timeout
-        
-        self.session = requests.Session()
-        from requests.adapters import HTTPAdapter
-        from urllib3.util.retry import Retry
-        # total=4/backoff_factor=1 previously had a worst case of
-        # 1+2+4+8=15s of pure backoff sleep alone (urllib3's exponential
-        # formula), on top of the actual request time per attempt — easily
-        # 15-20s+ for a single TMDB call that keeps hitting 429/5xx. Several
-        # views (DiscoverFeedView, movie/show detail's parallel credits/
-        # providers/recommendations fetches) make multiple TMDB calls per
-        # request, compounding the odds any one of them hits this. That
-        # could exceed the frontend's axios timeout (lib/api.ts) even
-        # though the backend was still working — surfacing as a raw
-        # "Network Error" to the user for what was actually a transient
-        # TMDB rate-limit. Tightened to keep worst-case backoff bounded
-        # (0.5+1+2=3.5s) while still absorbing a transient blip.
-        retry_strategy = Retry(
-            total=3,
-            status_forcelist=[429, 500, 502, 503, 504],
-            allowed_methods=["HEAD", "GET", "OPTIONS"],
-            backoff_factor=0.5,
-        )
-        adapter = HTTPAdapter(max_retries=retry_strategy)
-        self.session.mount("https://", adapter)
-        self.session.mount("http://", adapter)
+        # Every view/task instantiates `TMDBService()` fresh per call (by
+        # design — it's a thin, stateless-except-for-the-session wrapper).
+        # Building a brand new `requests.Session` + `HTTPAdapter` each time
+        # meant every single TMDB call paid a full TCP+TLS handshake to
+        # TMDB's servers instead of reusing a warm keep-alive connection —
+        # real, measurable latency on every request, worst on pages that
+        # fire several TMDB calls in parallel (DiscoverFeedView, show/movie
+        # detail's credits+providers+recommendations). Shared once per
+        # process instead — safe: gunicorn workers are long-lived, urllib3's
+        # connection pool is safe to share across a worker's requests, and
+        # nothing about the retry/adapter config varies per instance.
+        self.session = _get_shared_tmdb_session()
 
     # ------------------------------------------------------------------
     # Internal request helper
@@ -168,7 +196,9 @@ class TMDBService:
         if cached is not None and not self._is_stale(cached.last_synced_at):
             return cached
 
-        payload = self._request(f"/tv/{tmdb_id}", params={"append_to_response": "aggregate_credits,watch/providers"})
+        payload = self._request(
+            f"/tv/{tmdb_id}", params={"append_to_response": "aggregate_credits,watch/providers,videos"}
+        )
         if payload is None:
             if cached is not None:
                 logger.info("TMDB unreachable, serving stale cache for show %s", tmdb_id)
@@ -215,6 +245,8 @@ class TMDBService:
             cache.set(f"tmdb_show_credits_{tmdb_id}", payload["aggregate_credits"], timeout=43200)
         if "watch/providers" in payload:
             cache.set(f"tmdb_show_providers_{tmdb_id}", payload["watch/providers"], timeout=43200)
+        if "videos" in payload:
+            cache.set(f"tmdb_show_videos_{tmdb_id}", payload["videos"].get("results", []), timeout=43200)
 
         return show
 
@@ -234,7 +266,9 @@ class TMDBService:
         if cached is not None and not self._is_stale(cached.last_synced_at):
             return cached
 
-        payload = self._request(f"/movie/{tmdb_id}", params={"append_to_response": "credits,watch/providers"})
+        payload = self._request(
+            f"/movie/{tmdb_id}", params={"append_to_response": "credits,watch/providers,videos"}
+        )
         if payload is None:
             if cached is not None:
                 logger.info("TMDB unreachable, serving stale cache for movie %s", tmdb_id)
@@ -261,6 +295,8 @@ class TMDBService:
             cache.set(f"tmdb_movie_credits_{tmdb_id}", payload["credits"], timeout=43200)
         if "watch/providers" in payload:
             cache.set(f"tmdb_movie_providers_{tmdb_id}", payload["watch/providers"], timeout=43200)
+        if "videos" in payload:
+            cache.set(f"tmdb_movie_videos_{tmdb_id}", payload["videos"].get("results", []), timeout=43200)
 
         return movie
 
@@ -898,6 +934,58 @@ class TMDBService:
             }
             for p in providers
         ]
+
+    # ------------------------------------------------------------------
+    # Trailers (YouTube, via TMDB's videos endpoint)
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _pick_best_video(videos: list[dict[str, Any]]) -> dict[str, Any] | None:
+        """
+        Picks one YouTube video to feature as "the trailer" out of TMDB's
+        `videos.results` — which can contain bloopers, clips, featurettes,
+        and multiple trailers in multiple languages, not just one obvious
+        choice. Preference order: an official Trailer, then any Trailer,
+        then an official Teaser, then any Teaser, then whatever's first.
+        Non-YouTube entries (Vimeo, etc.) are dropped — the client only
+        ever deep-links to YouTube.
+        """
+        youtube_videos = [v for v in videos if v.get("site") == "YouTube"]
+        if not youtube_videos:
+            return None
+
+        def rank(v: dict[str, Any]) -> tuple[int, int]:
+            type_rank = {"Trailer": 0, "Teaser": 1}.get(v.get("type"), 2)
+            official_rank = 0 if v.get("official") else 1
+            return (type_rank, official_rank)
+
+        best = min(youtube_videos, key=rank)
+        return {
+            "key": best.get("key"),
+            "name": best.get("name", ""),
+            "type": best.get("type", ""),
+        }
+
+    def get_show_trailer(self, tmdb_id: int) -> dict[str, Any] | None:
+        """Best YouTube trailer/teaser for a show, from the videos block cached during get_show_details."""
+        cached_payload = cache.get(f"tmdb_show_videos_{tmdb_id}")
+        if cached_payload is None:
+            payload = self._request(f"/tv/{tmdb_id}/videos")
+            if payload is None:
+                return None
+            cached_payload = payload.get("results", [])
+            cache.set(f"tmdb_show_videos_{tmdb_id}", cached_payload, timeout=43200)
+        return self._pick_best_video(cached_payload)
+
+    def get_movie_trailer(self, tmdb_id: int) -> dict[str, Any] | None:
+        """Best YouTube trailer/teaser for a movie, from the videos block cached during get_movie_details."""
+        cached_payload = cache.get(f"tmdb_movie_videos_{tmdb_id}")
+        if cached_payload is None:
+            payload = self._request(f"/movie/{tmdb_id}/videos")
+            if payload is None:
+                return None
+            cached_payload = payload.get("results", [])
+            cache.set(f"tmdb_movie_videos_{tmdb_id}", cached_payload, timeout=43200)
+        return self._pick_best_video(cached_payload)
 
     # ------------------------------------------------------------------
     # External ID Lookup

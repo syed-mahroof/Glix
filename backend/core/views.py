@@ -16,7 +16,7 @@ from django.db.models import Count, F, Max, Prefetch, Q
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from rest_framework import generics, status
-from rest_framework.permissions import IsAuthenticated
+from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
@@ -46,6 +46,28 @@ from core.serializers import (
 )
 from core.services import ANIME_GENRE_ID, ANIME_ORIGINAL_LANGUAGE, TMDBService, TMDBServiceError
 from core.tasks import run_tvtime_import
+
+class HealthCheckView(APIView):
+    """
+    GET /api/v1/health/
+
+    Unauthenticated, no database or TMDB access — deliberately the cheapest
+    possible response so the mobile client can fire it at launch to wake a
+    sleeping free-tier dyno while the splash screen is still up, and so a
+    connectivity failure can be distinguished from a slow-but-alive server.
+    """
+
+    permission_classes = [AllowAny]
+    authentication_classes: list = []
+    # No throttle: the client's own warmup loop (lib/warmup.ts) polls this
+    # repeatedly while waiting out a cold Render boot, by design — the
+    # default anon throttle (20/min) exists to protect real endpoints, not
+    # to rate-limit the one endpoint whose entire job is being hit often.
+    throttle_classes: list = []
+
+    def get(self, request):
+        return Response({"status": "ok"})
+
 
 class DiscoverFeedView(APIView):
     """

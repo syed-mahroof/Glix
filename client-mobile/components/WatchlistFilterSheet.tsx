@@ -16,6 +16,7 @@
 // in JSX paints underneath it regardless of `position: absolute`. Fixed at
 // the call site (rendered last, after the list) — see shows.tsx/movies.tsx.
 
+import { BlurView } from 'expo-blur';
 import { Languages, type LucideIcon, X } from 'lucide-react-native';
 import React, { useEffect } from 'react';
 import { Dimensions, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
@@ -127,9 +128,20 @@ export default function WatchlistFilterSheet({
         <Pressable style={StyleSheet.absoluteFill} onPress={onClose} />
       </Animated.View>
 
-      <Animated.View
-        style={[styles.sheet, { backgroundColor: c.glassFill, borderColor: c.hairline }, sheetStyle]}
-      >
+      <Animated.View style={[styles.sheet, { borderColor: c.hairline }, sheetStyle]}>
+        {/* Two-layer blur+tint (same recipe as LiquidTabBar) instead of a
+            flat glassFill background — this sheet floats over poster/photo-
+            heavy list content, and the plain 0.65-alpha fill alone read as
+            "too see-through" against it. Blur handles whatever's behind it;
+            the tint on top is what actually keeps text legible. */}
+        <BlurView
+          intensity={90}
+          tint={theme.blurTint}
+          style={[StyleSheet.absoluteFill, styles.sheetClip]}
+        />
+        <View
+          style={[StyleSheet.absoluteFill, styles.sheetClip, { backgroundColor: c.glassFillStrong }]}
+        />
         <View style={[styles.handle, { backgroundColor: c.hairline }]} />
 
         <View style={[styles.sheetHeader, { borderBottomColor: c.hairline }]}>
@@ -204,6 +216,13 @@ const styles = StyleSheet.create({
     borderTopLeftRadius: 24,
     borderTopRightRadius: 24,
     borderTopWidth: StyleSheet.hairlineWidth,
+    overflow: 'hidden',
+  },
+  // The blur/tint background layers need their own explicit clip — iOS
+  // (unlike Android) doesn't auto-clip a child to its parent's borderRadius.
+  sheetClip: {
+    borderTopLeftRadius: 24,
+    borderTopRightRadius: 24,
   },
   handle: {
     width: 40,

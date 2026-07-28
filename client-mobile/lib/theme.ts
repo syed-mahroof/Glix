@@ -42,6 +42,11 @@ export interface ThemeColors {
   bgElevated: string;
   /** Solid-ish glass card fill (used directly, or under a BlurView). */
   glassFill: string;
+  /** Higher-opacity variant of `glassFill` for surfaces that float over
+   *  busy, image-heavy content (bottom sheets over poster grids/lists) and
+   *  need stronger legibility than the standard card fill — same neutral,
+   *  paired with a BlurView layer underneath, not a new hue. */
+  glassFillStrong: string;
   /** Two-stop gradient for the premium glass recipe. */
   glassGradTop: string;
   glassGradBot: string;
@@ -95,6 +100,7 @@ const darkColors: ThemeColors = {
   bg: '#000000',
   bgElevated: '#0A0A0A',
   glassFill: 'rgba(30, 30, 30, 0.65)',
+  glassFillStrong: 'rgba(24, 24, 24, 0.88)',
   glassGradTop: 'rgba(52, 52, 52, 0.72)',
   glassGradBot: 'rgba(22, 22, 22, 0.66)',
   hairline: 'rgba(255, 255, 255, 0.12)',
@@ -125,6 +131,7 @@ const lightColors: ThemeColors = {
   bg: '#EDEEEA',
   bgElevated: '#FBFBF8',
   glassFill: 'rgba(251, 251, 248, 0.88)',
+  glassFillStrong: 'rgba(251, 251, 248, 0.96)',
   glassGradTop: 'rgba(255, 255, 255, 0.94)',
   glassGradBot: 'rgba(248, 248, 244, 0.86)',
   hairline: 'rgba(17, 19, 8, 0.10)',

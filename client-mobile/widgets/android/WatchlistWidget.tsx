@@ -1,13 +1,8 @@
 import React from 'react';
 import { FlexWidget, TextWidget, ImageWidget, ListWidget } from 'react-native-android-widget';
+import type { WidgetPayload, WidgetWatchlistItem } from '../../lib/widgetPayload';
 
-interface WatchlistWidgetItem {
-  id?: number;
-  episode_id?: number | null;
-  title: string;
-  poster_path: string | null;
-  next_episode: string;
-}
+type WatchlistWidgetItem = Partial<WidgetWatchlistItem> & Pick<WidgetWatchlistItem, 'title' | 'next_episode' | 'poster_path'>;
 
 // Each row deep-links via the app's own `watchtracker://` scheme (app.json)
 // straight to the specific next episode (`app/episode/[id].tsx`) when one's
@@ -56,7 +51,7 @@ function WatchlistRow({ show }: { show: WatchlistWidgetItem }) {
   );
 }
 
-export function WatchlistWidget({ data }: { data: any }) {
+export function WatchlistWidget({ data, height }: { data: WidgetPayload | null; height?: number }) {
   const items: WatchlistWidgetItem[] = data?.watchlist ?? [];
 
   if (items.length === 0) {
@@ -104,12 +99,11 @@ export function WatchlistWidget({ data }: { data: any }) {
         text="NEXT UP"
         style={{ fontSize: 12, color: '#E4FA1A', fontWeight: 'bold', marginLeft: 16, marginTop: 12, marginBottom: 4 }}
       />
-      {/* Scrollable — up to 5 shows (store/watchStore.ts's syncWidgetData
-          caps it there). At the widget's default 4x2 size only ~1.5 rows
-          are visible; the list itself scrolls, and the widget can also be
-          resized taller from the home screen. */}
+      {/* Scrolls through the synced list; the row budget is derived from the
+          measured widget height the OS reports on every redraw, so resizing
+          taller genuinely builds more rows instead of a fixed count. */}
       <ListWidget style={{ height: 'match_parent', width: 'match_parent' }}>
-        {items.map((show, idx) => (
+        {items.slice(0, height ? Math.max(3, Math.ceil((height - 34) / 64) + 2) : 6).map((show, idx) => (
           <WatchlistRow key={show.id ?? idx} show={show} />
         ))}
       </ListWidget>

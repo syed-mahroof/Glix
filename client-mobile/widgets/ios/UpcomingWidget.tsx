@@ -3,8 +3,8 @@ import React from 'react';
 import { createWidget } from 'expo-widgets';
 import type { WidgetEnvironment } from 'expo-widgets';
 import { VStack, HStack, Text, Image, Spacer } from '@expo/ui/swift-ui';
-import { background, border, cornerRadius, font, foregroundColor, lineLimit, padding, shapes } from '@expo/ui/swift-ui/modifiers';
-import { formatDayBadge } from '../../lib/dateFormat';
+import { background, font, foregroundColor, lineLimit, padding } from '@expo/ui/swift-ui/modifiers';
+import { formatDayBadge, formatUpcomingHeaderLabel } from '../../lib/dateFormat';
 
 export interface UpcomingWidgetShow {
   title: string;
@@ -47,46 +47,42 @@ function countdownText(show: UpcomingWidgetShow): string {
   return show.countdown ?? new Date(show.air_date).toLocaleDateString();
 }
 
-// Hero row redesign (Phase 55): a real card — glassmorphism tokens shared
-// with the in-app dark theme (lib/theme.ts's `glassFill`/`hairline`, passed
-// as raw rgba strings since this SwiftUI bridge can't import the theme
-// module's React Native color helpers) instead of bare text floating on the
-// widget's black background, plus a bigger, right-aligned day-count badge —
-// previously the countdown was buried as small trailing text next to the
-// episode line, easy to miss at a glance.
-function HeroRow({ show }: { show: UpcomingWidgetShow }) {
+// Flat rows on the widget's own black ground — no nested card fill, border
+// or inset margins, which is what produced the boxed-in look and the dead
+// gap along the right edge. The day count stays as the big right-aligned
+// number, matching the Android widget exactly.
+function UpcomingRowView({ show, compact }: { show: UpcomingWidgetShow; compact?: boolean }) {
   const dayBadge = formatDayBadge(show.air_date, new Date());
   return (
-    <HStack
-      alignment="center"
-      spacing={12}
-      modifiers={[
-        padding({ all: 12 }),
-        background('rgba(30, 30, 30, 0.65)', shapes.roundedRectangle({ cornerRadius: 14 })),
-        border({ color: 'rgba(255, 255, 255, 0.12)', width: 1 }),
-        cornerRadius(14),
-      ]}
-    >
+    <HStack alignment="center" spacing={10} modifiers={[padding({ vertical: compact ? 4 : 6 })]}>
       {/* @expo/ui's SwiftUI `Image` bridge (installed ~0.2.0-beta.9) only
           renders SF Symbols via `systemName` — there is no remote-URL image
           loading anywhere in this package (confirmed against its own type
           defs, not assumed), so an actual TMDB poster can't be shown here
           at all. A real capability gap in the dependency version, not a
           regression introduced this pass — a generic glyph stands in. */}
-      <Image systemName="calendar.badge.clock" size={26} color={ACCENT} />
-      <VStack alignment="leading" spacing={2}>
-        <Text modifiers={[foregroundColor('#FFFFFF'), font({ size: 16, weight: 'semibold' }), lineLimit(1)]}>
+      <Image systemName="play.tv" size={compact ? 16 : 20} color={ACCENT} />
+      <VStack alignment="leading" spacing={1}>
+        <Text
+          modifiers={[
+            foregroundColor('#FFFFFF'),
+            font({ size: compact ? 13 : 15, weight: 'semibold' }),
+            lineLimit(1),
+          ]}
+        >
           {show.title}
         </Text>
-        <Text modifiers={[foregroundColor('rgba(255, 255, 255, 0.7)'), font({ size: 13 }), lineLimit(1)]}>
-          {show.next_episode} • {countdownText(show)}
+        <Text
+          modifiers={[foregroundColor('rgba(255, 255, 255, 0.55)'), font({ size: compact ? 11 : 12 }), lineLimit(1)]}
+        >
+          {compact ? show.next_episode : `${show.next_episode} • ${countdownText(show)}`}
         </Text>
       </VStack>
       <Spacer />
       <Text
         modifiers={[
           foregroundColor(ACCENT),
-          font({ size: dayBadge === 'TODAY' ? 14 : 22, weight: 'bold' }),
+          font({ size: dayBadge === 'TODAY' ? 13 : compact ? 15 : 20, weight: 'bold' }),
           lineLimit(1),
         ]}
       >
@@ -96,33 +92,18 @@ function HeroRow({ show }: { show: UpcomingWidgetShow }) {
   );
 }
 
-// A compact single-row card for the 2nd item on systemMedium — same card
-// treatment as HeroRow at a smaller scale, not a second full hero (see the
-// matching note in widgets/ios/WatchlistWidget.tsx on why one hero + one
-// compact row, not a scrollable list, is the real ceiling for a home-screen
-// widget here).
-function CompactRow({ show }: { show: UpcomingWidgetShow }) {
-  const dayBadge = formatDayBadge(show.air_date, new Date());
+/** Day label above each group, so several shows landing on the same date
+ *  read as one day's releases instead of repeating a countdown per row. */
+function DayLabel({ label, count }: { label: string; count: number }) {
   return (
-    <HStack
-      alignment="center"
-      modifiers={[
-        padding({ all: 10 }),
-        background('rgba(30, 30, 30, 0.65)', shapes.roundedRectangle({ cornerRadius: 12 })),
-        border({ color: 'rgba(255, 255, 255, 0.12)', width: 1 }),
-        cornerRadius(12),
-      ]}
-    >
-      <VStack alignment="leading" spacing={0}>
-        <Text modifiers={[foregroundColor('#FFFFFF'), font({ size: 13, weight: 'semibold' }), lineLimit(1)]}>
-          {show.title}
+    <HStack alignment="center" spacing={6}>
+      <Text modifiers={[foregroundColor(ACCENT), font({ size: 10, weight: 'bold' }), lineLimit(1)]}>{label}</Text>
+      {count > 1 ? (
+        <Text modifiers={[foregroundColor('rgba(255, 255, 255, 0.45)'), font({ size: 10 }), lineLimit(1)]}>
+          {String(count)}
         </Text>
-        <Text modifiers={[foregroundColor('rgba(255, 255, 255, 0.7)'), font({ size: 11 }), lineLimit(1)]}>
-          {show.next_episode}
-        </Text>
-      </VStack>
+      ) : null}
       <Spacer />
-      <Text modifiers={[foregroundColor(ACCENT), font({ size: 13, weight: 'bold' }), lineLimit(1)]}>{dayBadge}</Text>
     </HStack>
   );
 }
@@ -138,25 +119,41 @@ function Layout(props: UpcomingWidgetProps, environment: WidgetEnvironment) {
     );
   }
 
-  const hero = shows[0];
-  // Home-screen widgets can't scroll (WidgetKit platform constraint) and
-  // systemSmall/systemMedium share the same fixed height (app.json's
-  // "supportedFamilies" doesn't opt into systemLarge, the one family with
-  // real extra vertical room) — so a genuine "next 2 weeks" list can't fit
-  // regardless of family. What systemMedium's extra width buys is one
-  // compact second row instead of silently dropping the 2nd item.
-  const second = environment.widgetFamily === 'systemMedium' ? shows[1] : undefined;
+  // Home-screen widgets can't scroll (a WidgetKit platform constraint), so
+  // how many rows fit is purely a function of the family's fixed height.
+  // systemLarge (now opted into in app.json) is the only one with room for a
+  // real multi-day list; small/medium get progressively fewer.
+  const family = environment.widgetFamily;
+  const maxRows = family === 'systemLarge' ? 7 : family === 'systemMedium' ? 3 : 2;
+  const compact = family !== 'systemLarge';
+  const visible = shows.slice(0, maxRows);
+
+  // Group by day so two shows releasing on the same date sit under one
+  // label instead of each repeating its own countdown.
+  const now = new Date();
+  const rows: React.ReactNode[] = [];
+  let lastLabel: string | null = null;
+  visible.forEach((show, idx) => {
+    const label = formatUpcomingHeaderLabel(show.air_date, now);
+    if (label !== lastLabel) {
+      const count = visible.filter((s) => formatUpcomingHeaderLabel(s.air_date, now) === label).length;
+      rows.push(<DayLabel key={`head-${label}`} label={label} count={count} />);
+      lastLabel = label;
+    }
+    rows.push(<UpcomingRowView key={`${show.title}-${show.air_date}-${idx}`} show={show} compact={compact} />);
+  });
 
   return (
-    <VStack alignment="leading" spacing={8} modifiers={[background('#000000'), padding({ all: 16 })]}>
+    <VStack
+      alignment="leading"
+      spacing={compact ? 2 : 4}
+      modifiers={[background('#000000'), padding({ horizontal: 14, vertical: 12 })]}
+    >
       <HStack alignment="center">
-        <Text modifiers={[foregroundColor(ACCENT), font({ size: 12, weight: 'bold' })]}>AIRING SOON</Text>
+        <Text modifiers={[foregroundColor(ACCENT), font({ size: 11, weight: 'bold' })]}>AIRING SOON</Text>
         <Spacer />
       </HStack>
-
-      <HeroRow show={hero} />
-
-      {second ? <CompactRow show={second} /> : null}
+      {rows}
     </VStack>
   );
 }

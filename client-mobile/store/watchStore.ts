@@ -7,8 +7,7 @@ import { api } from '../lib/api';
 import { extractErrorMessage } from '../lib/errors';
 import { Platform } from 'react-native';
 import { requestWidgetUpdate } from 'react-native-android-widget';
-import { buildUpcomingItems, pickNextEpisode } from '../lib/upcoming';
-import { formatCountdown, todayLocalIso } from '../lib/dateFormat';
+import { buildWidgetPayload } from '../lib/widgetPayload';
 import { WatchlistWidget as AndroidWatchlistWidget } from '../widgets/android/WatchlistWidget';
 import { UpcomingWidget as AndroidUpcomingWidget } from '../widgets/android/UpcomingWidget';
 
@@ -76,6 +75,10 @@ export interface Show {
   next_episode_number: number | null;
   next_episode_name: string | null;
   episodes: Episode[];
+  /** YouTube video id for the best available trailer/teaser, only present
+   *  on the full ShowDetailView response (`GET /shows/{id}/`) — absent
+   *  (undefined) on the lighter show shape embedded in watchlist entries. */
+  trailer_key?: string | null;
 }
 
 export interface WatchlistEntry {
@@ -1263,65 +1266,18 @@ export const useWatchStore = create<WatchStoreState>()(
 
   syncWidgetData: async () => {
     try {
-      const entries = get().watchlist.to_watch.results;
+      const { to_watch, up_to_date } = get().watchlist;
+      // Upcoming episodes belong to caught-up shows just as much as behind
+      // ones — a show sitting in UP TO DATE is precisely the one whose next
+      // episode the user is waiting on, and excluding that bucket is why the
+      // widget could look empty for an otherwise-current watchlist.
+      const entries = [...to_watch.results, ...up_to_date.results];
 
-      // "Next up" per show — same chronological rule the Shows Hub row uses
-      // (earliest aired-unwatched, else nearest future episode), not just
-      // "first unwatched in array order." episode_id lets the widget deep
-      // link straight to that episode (app/episode/[id].tsx) instead of
-      // just the show's general page.
-      const toWatch = entries.slice(0, 5).map((entry) => {
-        const nextEp = pickNextEpisode(entry);
-        return {
-          id: entry.show.tmdb_id,
-          episode_id: nextEp?.tmdb_id ?? null,
-          title: entry.show.title,
-          poster_path: entry.show.poster_path,
-          next_episode: nextEp ? `S${nextEp.season_number} E${nextEp.episode_number}` : 'Up to date',
-        };
-      });
-
-      // "Airing soon" is genuinely upcoming (unaired, future, unwatched)
-      // episodes across the whole to-watch bucket — reuses the same builder
-      // the Upcoming tab/calendar already trust, sorted soonest-first.
-      // Windowed to the next 14 days (not a flat top-5 slice) so the widget
-      // actually covers "the next 2 weeks" as asked; capped at 30 as a sane
-      // payload bound — Android's ListWidget genuinely scrolls to reach all
-      // of it, iOS shows as many as its widget family's static space allows
-      // (see widgets/ios/UpcomingWidget.tsx — home-screen widgets can't
-      // scroll at all, a real WidgetKit platform constraint, not a gap
-      // here). Countdown text precomputed once here, reusing the exact
-      // formatCountdown() the in-app Upcoming tab uses, since the widget
-      // itself can't run a live per-second tick the way UpcomingRow does.
-      // Phase 54 bounded buildUpcomingItems()'s Overdue items to
-      // recently-active shows, but they're still interleaved into the same
-      // sorted array (airDate < today) — this filter's job is the strictly-
-      // future cut. Without the todayIso lower bound, every Overdue item
-      // passed `airDate <= windowEndIso` trivially (any past date is <= a
-      // future one), so the widget's "AIRING SOON" list re-flooded with
-      // backlog even after the in-app tab was fixed. The widget has no
-      // collapsible Overdue section to put them in (Phase 54's UI fix), so
-      // they're excluded here entirely rather than shown uncollapsed.
-      const now = new Date();
-      const todayIso = todayLocalIso(now);
-      const windowEndIso = todayLocalIso(new Date(now.getTime() + 14 * 86400000));
-      const upcoming = buildUpcomingItems(entries)
-        .filter((item) => item.airDate >= todayIso && item.airDate <= windowEndIso)
-        .slice(0, 30)
-        .map((item) => {
-          const { formatted, dayOfWeek } = formatCountdown(new Date(`${item.airDate}T00:00:00`), now);
-          return {
-            id: item.tmdbShowId,
-            episode_id: item.episodeId,
-            title: item.showTitle,
-            poster_path: item.posterPath,
-            next_episode: `S${item.seasonNumber} E${item.episodeNumber}`,
-            air_date: item.airDate,
-            countdown: `${formatted} (${dayOfWeek})`,
-          };
-        });
-
-      const widgetData = { watchlist: toWatch, upcoming };
+      // Payload shape and every rule behind it (next-episode pick, 14-day
+      // window, caps, precomputed countdown) live in lib/widgetPayload.ts,
+      // shared with the Android headless task handler so a widget redraw
+      // with the app closed builds exactly the same thing.
+      const widgetData = buildWidgetPayload(to_watch.results, entries);
 
       if (Platform.OS === 'android') {
         if (SharedPreferences) {
@@ -1355,7 +1311,12 @@ export const useWatchStore = create<WatchStoreState>()(
       // watchlist — both used to write the identical {watchlist: [],
       // upcoming: []} shape, so the widgets showed "Your watchlist is
       // empty" after logout instead of prompting the user to log back in.
-      const emptyData = { watchlist: [], upcoming: [], loggedOut: true };
+      const emptyData = {
+        watchlist: [],
+        upcoming: [],
+        loggedOut: true,
+        syncedAt: new Date().toISOString(),
+      };
       if (Platform.OS === 'android') {
         if (SharedPreferences) {
           SharedPreferences.setItem('widgetData', JSON.stringify(emptyData));

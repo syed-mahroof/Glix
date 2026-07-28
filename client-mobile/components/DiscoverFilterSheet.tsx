@@ -201,21 +201,17 @@ export default function DiscoverFilterSheet({ activeSegment }: Props) {
           style={styles.scroll}
           showsVerticalScrollIndicator
           persistentScrollbar
-          contentContainerStyle={[styles.scrollContent, { paddingBottom: 48 + insets.bottom }]}
+          contentContainerStyle={[styles.scrollContent, { paddingBottom: 96 + insets.bottom }]}
         >
-          {/* Sort By — tapping the already-active pill toggles back to the
-              'trending' default rather than being a no-op, matching every
-              other filter in this sheet (genre/language/anime). Trending
-              itself is the sheet's neutral/no-sort state (same convention
-              isFilterActive() already uses: sortOrder !== 'trending' is
-              what "a sort is applied" means) — it must never render as
-              "selected," or it reads as a filter permanently stuck on with
-              no way to turn off (Phase 64: this was the real bug behind
-              "Trending still can't be tapped off" — the toggle-off logic
-              itself already worked, but Trending highlighting as active by
-              default made it look un-toggleable). Tapping it still works
-              exactly like every other pill (reverts to 'trending'); it's
-              only the highlight that's suppressed. */}
+          {/* Sort By — every pill, including Trending, highlights exactly
+              when it's the current sort (Trending is also the default, so
+              it reads as selected on first open — accurate, since it is).
+              Tapping the already-active pill resets to 'trending'; tapping
+              a different one selects it. A prior pass suppressed Trending's
+              own highlight on the theory that it's a "neutral" state with
+              nothing to turn off, but that read as the pill being dead —
+              tapping it did work, it just never looked selected either way,
+              which is what "can't toggle Trending" actually meant. */}
           <Text style={[styles.sectionLabel, { color: c.textSecondary }]}>Sort By</Text>
           <View style={styles.pillRow}>
             {SORT_OPTIONS.map((opt) => (
@@ -223,7 +219,7 @@ export default function DiscoverFilterSheet({ activeSegment }: Props) {
                 key={opt.key}
                 label={opt.label}
                 Icon={opt.Icon}
-                active={opt.key !== 'trending' && sortOrder === opt.key}
+                active={sortOrder === opt.key}
                 onPress={() => setSortOrder(sortOrder === opt.key ? 'trending' : opt.key)}
               />
             ))}

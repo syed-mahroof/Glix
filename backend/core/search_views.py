@@ -206,7 +206,16 @@ class ShowDetailView(APIView):
             return Response({"detail": str(exc)}, status=status.HTTP_502_BAD_GATEWAY)
 
         serializer = CachedShowSerializer(show, context={"request": request})
-        return Response(serializer.data, status=status.HTTP_200_OK)
+        data = dict(serializer.data)
+        # Best-effort — a trailer lookup failure shouldn't fail the whole
+        # detail screen (same "degrade, don't fail" precedent as
+        # EpisodeDetailView's credits block).
+        try:
+            trailer = TMDBService().get_show_trailer(tmdb_id)
+        except TMDBServiceError:
+            trailer = None
+        data["trailer_key"] = trailer["key"] if trailer else None
+        return Response(data, status=status.HTTP_200_OK)
 
 
 class SeasonEpisodesView(APIView):
@@ -393,6 +402,11 @@ class MovieDetailView(APIView):
         except TMDBServiceError as exc:
             return Response({"detail": str(exc)}, status=status.HTTP_502_BAD_GATEWAY)
 
+        try:
+            trailer = TMDBService().get_movie_trailer(tmdb_id)
+        except TMDBServiceError:
+            trailer = None
+
         return Response(
             {
                 "tmdb_id": movie.tmdb_id,
@@ -404,6 +418,7 @@ class MovieDetailView(APIView):
                 "runtime_minutes": movie.runtime_minutes,
                 "genres": [g.strip() for g in movie.genres_string.split(",") if g.strip()],
                 "vote_average": movie.vote_average,
+                "trailer_key": trailer["key"] if trailer else None,
             },
             status=status.HTTP_200_OK,
         )

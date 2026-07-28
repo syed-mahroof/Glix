@@ -30,7 +30,7 @@ import { SegmentedControl } from '../../components/SegmentedControl';
 import ShowPosterCard from '../../components/ShowPosterCard';
 import ShowRow from '../../components/ShowRow';
 import Snackbar from '../../components/Snackbar';
-import { formatCountdown, pad, todayLocalIso } from '../../lib/dateFormat';
+import { formatCountdown, formatDaysAgo, pad, todayLocalIso } from '../../lib/dateFormat';
 import { useAppTheme } from '../../lib/theme';
 import {
   buildUpcomingItems,
@@ -370,7 +370,7 @@ function UpcomingRow({
             isOverdue && { color: c.negative },
           ]}
         >
-          {isOverdue ? 'OVERDUE' : `${formatted} (${dayOfWeek})`}
+          {isOverdue ? formatDaysAgo(item.airDate, now) : `${formatted} (${dayOfWeek})`}
         </Text>
       </View>
       {canMarkWatched && (
@@ -393,24 +393,27 @@ function UpcomingRow({
 
 // ─── Upcoming Section Header (day-wise grouping) ───────────────────────────────
 
-/** The OVERDUE header (Phase 54) is collapsible — a bounded catch-up section
- *  that defaults closed so it can never swallow the screen ahead of the
- *  genuinely future TODAY/TOMORROW/weekday sections — every other header is
- *  a plain, non-interactive date label, unchanged from Phase 18. */
+/** Past-dated headers (LAST WEEK / LAST MONTH — recently-aired episodes the
+ *  user hasn't marked) are collapsible and default closed, so a catch-up
+ *  section can never swallow the screen ahead of the genuinely future
+ *  TODAY/TOMORROW/weekday sections. Every future header is a plain,
+ *  non-interactive date label, unchanged from Phase 18. */
 function UpcomingSectionHeader({
   label,
   count,
+  collapsible,
   collapsed,
   onToggleCollapse,
 }: {
   label: string;
-  count?: number;
+  count: number;
+  collapsible?: boolean;
   collapsed?: boolean;
   onToggleCollapse?: () => void;
 }) {
   const { theme } = useAppTheme();
   const c = theme.colors;
-  const isOverdue = label === 'OVERDUE' && onToggleCollapse != null;
+  const isCollapsible = !!collapsible && onToggleCollapse != null;
 
   const pill = (
     <View style={styles.upcomingSectionHeaderRow}>
@@ -418,13 +421,18 @@ function UpcomingSectionHeader({
         style={[
           styles.upcomingSectionPill,
           { backgroundColor: c.glassFill, borderColor: c.hairline },
-          isOverdue && { borderColor: c.negative },
+          isCollapsible && { borderColor: c.negative },
         ]}
       >
-        <Text style={[styles.upcomingSectionPillText, { color: isOverdue ? c.negative : c.textSecondary }]}>
-          {isOverdue ? `OVERDUE (${count ?? 0})` : label}
+        <Text
+          style={[
+            styles.upcomingSectionPillText,
+            { color: isCollapsible ? c.negative : c.textSecondary },
+          ]}
+        >
+          {isCollapsible ? `${label} (${count})` : label}
         </Text>
-        {isOverdue &&
+        {isCollapsible &&
           (collapsed ? (
             <ChevronDown size={14} color={c.negative} style={styles.upcomingSectionChevron} />
           ) : (
@@ -434,13 +442,13 @@ function UpcomingSectionHeader({
     </View>
   );
 
-  if (!isOverdue) return pill;
+  if (!isCollapsible) return pill;
 
   return (
     <PressableScale
       onPress={onToggleCollapse}
       accessibilityRole="button"
-      accessibilityLabel={`Overdue episodes, ${count ?? 0}`}
+      accessibilityLabel={`${label}, ${count} missed episodes`}
       accessibilityState={{ expanded: !collapsed }}
     >
       {pill}
@@ -476,9 +484,10 @@ export default function ShowsScreen() {
   const [upcomingView, setUpcomingView] = useState<UpcomingView>('list');
   const [filter, setFilter] = useState<FilterKey>('WATCH_NEXT');
   const [isRefreshing, setIsRefreshing] = useState(false);
-  // Overdue section (Phase 54) defaults closed — a bounded catch-up list the
-  // user opts into, not a wall of backlog ahead of real future dates.
-  const [overdueCollapsed, setOverdueCollapsed] = useState(true);
+  // Past sections (LAST WEEK / LAST MONTH) default closed — a bounded
+  // catch-up list the user opts into, not a wall of backlog ahead of real
+  // future dates. Only labels the user has explicitly opened live in here.
+  const [expandedPastLabels, setExpandedPastLabels] = useState<string[]>([]);
   const now = useNow(1000, activeTab === 'upcoming' && upcomingView === 'list');
 
   // Arriving from "Add to Watchlist" (show detail) passes highlightFilter
@@ -526,27 +535,31 @@ export default function ShowsScreen() {
     [upcomingItems, now]
   );
 
-  // The OVERDUE header itself always renders (it's the toggle affordance);
-  // only the item rows beneath it hide while collapsed (Phase 54) — every
-  // overdue item is contiguous right after that header (buildUpcomingItems
-  // sorts by airDate, and all overdue airDates are < today), so a single
-  // pass tracking "am I inside the header I just hid" is correct.
+  // A collapsible header itself always renders (it's the toggle affordance);
+  // only the item rows beneath it hide while collapsed. Items of one bucket
+  // are contiguous right after their header (buildUpcomingItems sorts by
+  // airDate), so a single pass tracking "am I inside a hidden section" works.
   const visibleUpcomingEntries = useMemo(() => {
-    if (!overdueCollapsed) return upcomingEntries;
     const result: UpcomingListEntry[] = [];
     let hidingItems = false;
     for (const entry of upcomingEntries) {
       if (entry.type === 'header') {
-        hidingItems = entry.label === 'OVERDUE';
+        hidingItems = entry.collapsible && !expandedPastLabels.includes(entry.label);
         result.push(entry);
         continue;
       }
       if (!hidingItems) result.push(entry);
     }
     return result;
-  }, [upcomingEntries, overdueCollapsed]);
+  }, [upcomingEntries, expandedPastLabels]);
 
-  const toggleOverdueCollapsed = useCallback(() => setOverdueCollapsed((v) => !v), []);
+  const togglePastSection = useCallback(
+    (label: string) =>
+      setExpandedPastLabels((prev) =>
+        prev.includes(label) ? prev.filter((l) => l !== label) : [...prev, label]
+      ),
+    []
+  );
 
   const handleCheckPress = useCallback(
     (
@@ -709,13 +722,14 @@ export default function ShowsScreen() {
         <UpcomingSectionHeader
           label={entry.label}
           count={entry.count}
-          collapsed={overdueCollapsed}
-          onToggleCollapse={entry.label === 'OVERDUE' ? toggleOverdueCollapsed : undefined}
+          collapsible={entry.collapsible}
+          collapsed={!expandedPastLabels.includes(entry.label)}
+          onToggleCollapse={entry.collapsible ? () => togglePastSection(entry.label) : undefined}
         />
       ) : (
         <UpcomingRow item={entry.data} now={now} onMarkWatched={handleUpcomingMarkWatched} />
       ),
-    [now, handleUpcomingMarkWatched, overdueCollapsed, toggleOverdueCollapsed]
+    [now, handleUpcomingMarkWatched, expandedPastLabels, togglePastSection]
   );
 
   const renderUpcomingGridEntry = useCallback(
@@ -725,8 +739,9 @@ export default function ShowsScreen() {
           <UpcomingSectionHeader
             label={entry.label}
             count={entry.count}
-            collapsed={overdueCollapsed}
-            onToggleCollapse={entry.label === 'OVERDUE' ? toggleOverdueCollapsed : undefined}
+            collapsible={entry.collapsible}
+            collapsed={!expandedPastLabels.includes(entry.label)}
+            onToggleCollapse={entry.collapsible ? () => togglePastSection(entry.label) : undefined}
           />
         );
       const item = entry.data;
@@ -740,7 +755,7 @@ export default function ShowsScreen() {
           showId={item.tmdbShowId}
           title={item.showTitle}
           posterPath={item.posterPath}
-          overlayBadge={isOverdue ? 'OVERDUE' : `${formatted} (${dayOfWeek})`}
+          overlayBadge={isOverdue ? formatDaysAgo(item.airDate, now) : `${formatted} (${dayOfWeek})`}
           overlayBadgeHighlighted={isImminent}
           subtitle={`S${pad(item.seasonNumber)}E${pad(item.episodeNumber)} · ${item.episodeTitle}`}
           checkmark={
@@ -751,7 +766,7 @@ export default function ShowsScreen() {
         />
       );
     },
-    [now, handleUpcomingMarkWatched, overdueCollapsed, toggleOverdueCollapsed]
+    [now, handleUpcomingMarkWatched, expandedPastLabels, togglePastSection]
   );
 
   const upcomingItemType = useCallback(
@@ -998,7 +1013,7 @@ export default function ShowsScreen() {
               getItemType={upcomingItemType}
               overrideItemLayout={preferredLayout === 'grid' ? upcomingOverrideLayout : undefined}
               numColumns={preferredLayout === 'grid' ? 3 : 1}
-              extraData={[preferredLayout, overdueCollapsed]}
+              extraData={[preferredLayout, expandedPastLabels]}
               contentContainerStyle={styles.listContent}
               refreshControl={
                 <RefreshControl

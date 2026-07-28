@@ -38,6 +38,7 @@ from core.views import (
     CatchupPreferenceView,
     ContinueWatchingView,
     DiscoverFilterView,
+    HealthCheckView,
     DiscoverGenresView,
     EpisodeInteractionView,
     FavoriteToggleView,
@@ -57,6 +58,7 @@ from core.views import (
 )
 
 urlpatterns = [
+    path("health/", HealthCheckView.as_view(), name="health-check"),
     # Auth
     path("auth/register/", RegisterView.as_view(), name="auth-register"),
     path("auth/login/", LoginView.as_view(), name="auth-login"),

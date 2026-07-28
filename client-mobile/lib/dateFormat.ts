@@ -72,6 +72,30 @@ export function formatDayBadge(airDate: string, now: Date): string {
   return `${diffDays}D`;
 }
 
+/** "3 DAYS AGO" / "YESTERDAY" for an already-aired, unmarked episode — more
+ *  useful than a flat "OVERDUE" label now that these are bounded to recent
+ *  releases and the user's question is "how far behind am I?". */
+export function formatDaysAgo(airDate: string, now: Date): string {
+  const target = new Date(`${airDate}T00:00:00`);
+  const todayMidnight = new Date(`${todayLocalIso(now)}T00:00:00`);
+  const diffDays = Math.round((todayMidnight.getTime() - target.getTime()) / 86400000);
+  if (diffDays <= 0) return 'TODAY';
+  if (diffDays === 1) return 'YESTERDAY';
+  return `${diffDays} DAYS AGO`;
+}
+
+/** How far back a missed-but-aired episode can be and still count as a
+ *  "recent release you haven't marked" rather than plain backlog. Shared by
+ *  the Upcoming tab's past-bucket labels and buildUpcomingItems()'s own gate
+ *  so the two can never disagree about what qualifies. */
+export const PAST_WINDOW_DAYS = 30;
+
+/** True for the past-air-date buckets, which the Upcoming tab renders as
+ *  collapsible sections (every future bucket is a plain, static label). */
+export function isPastUpcomingLabel(label: string): boolean {
+  return label === 'LAST WEEK' || label === 'LAST MONTH' || label === 'EARLIER';
+}
+
 /**
  * Buckets a single upcoming episode's air date into the day-wise header
  * label used by the Shows Hub's UPCOMING tab (List + Grid views): TODAY /
@@ -91,10 +115,15 @@ export function formatUpcomingHeaderLabel(airDate: string, now: Date): string {
   const todayMidnight = new Date(`${todayIso}T00:00:00`);
   const diffDays = Math.round((target.getTime() - todayMidnight.getTime()) / 86400000);
 
-  // Aired-but-unwatched items (Phase G) now stay in this list past their air
-  // date instead of disappearing — without this branch they fell through to
-  // the "LATER" catch-all, which reads as a future date, not a past-due one.
-  if (diffDays < 0) return 'OVERDUE';
+  // Aired-but-unwatched items stay in this list past their air date instead of
+  // disappearing. They're bucketed by how recently they aired so the section
+  // reads as "recent releases you missed", not an unbounded past-due dump —
+  // buildUpcomingItems() never emits anything older than PAST_WINDOW_DAYS.
+  if (diffDays < 0) {
+    if (diffDays >= -7) return 'LAST WEEK';
+    if (diffDays >= -PAST_WINDOW_DAYS) return 'LAST MONTH';
+    return 'EARLIER';
+  }
   if (diffDays === 1) return 'TOMORROW';
   if (diffDays >= 2 && diffDays <= 6) {
     return new Intl.DateTimeFormat('en-US', { weekday: 'long' }).format(target).toUpperCase();
