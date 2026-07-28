@@ -78,7 +78,16 @@ export default function ProfileScreen() {
     title: string;
     message: string;
     stats?: { shows: number; movies: number; episodes: number; errors: number };
+    // The backend already computes exactly why each skipped item failed
+    // (ImportJobSerializer's `errors`, e.g. "Show not found on TMDB: 'X'")
+    // — previously only the bare count above was ever rendered, so seeing
+    // *which* titles were skipped and *why* meant digging through backend
+    // logs. Capped for modal readability; the backend itself caps the full
+    // list at 50 (IMPORT_ERROR_CAP).
+    errorMessages?: string[];
   }>({ visible: false, type: 'success', title: '', message: '' });
+
+  const MAX_VISIBLE_IMPORT_ERRORS = 6;
 
   // Phase 65: was a mount-only useEffect — profile.tsx is itself a bottom
   // tab, and switching tabs doesn't unmount it (React Navigation keeps tab
@@ -87,10 +96,19 @@ export default function ProfileScreen() {
   // fixed for Watch History and Phase 60 fixed for Analytics — this exact
   // screen (the Profile Hub itself, not just Analytics one hop further in)
   // was the one still missing it.
+  //
+  // watchlist/movieWatchlist refetch alongside profile so "My Shows"/"My
+  // Movies" can't sit on a stale cached count while Analytics (which
+  // refetches its own totals on every focus) shows a fresher number for the
+  // same underlying data — toggling a show's watch state on another tab and
+  // tabbing back here previously could show two different counts for what
+  // should be identical totals.
   useFocusEffect(
     useCallback(() => {
       fetchProfile();
-    }, [fetchProfile])
+      fetchWatchlist();
+      fetchMovieWatchlist();
+    }, [fetchProfile, fetchWatchlist, fetchMovieWatchlist])
   );
 
   const initials = useMemo(() => {
@@ -162,6 +180,7 @@ export default function ProfileScreen() {
           title: 'Import Failed',
           message:
             job.detail || 'The import could not be completed. Please try again.',
+          errorMessages: job.errors?.length ? job.errors : undefined,
         });
         return;
       }
@@ -177,6 +196,7 @@ export default function ProfileScreen() {
           episodes: job.episodes_marked,
           errors: job.shows_skipped + job.movies_skipped,
         },
+        errorMessages: job.errors?.length ? job.errors : undefined,
       });
 
       // Repopulate the UI so imported data is visible immediately rather
@@ -533,6 +553,25 @@ export default function ProfileScreen() {
               </View>
             )}
 
+            {importModal.errorMessages && importModal.errorMessages.length > 0 && (
+              <View style={[styles.modalStatsBox, { backgroundColor: c.glassFill, borderColor: c.hairline, alignItems: 'flex-start' }]}>
+                {importModal.errorMessages.slice(0, MAX_VISIBLE_IMPORT_ERRORS).map((msg, idx) => (
+                  <Text
+                    key={idx}
+                    style={[styles.modalErrorLine, { color: c.textSecondary }]}
+                    numberOfLines={2}
+                  >
+                    • {msg}
+                  </Text>
+                ))}
+                {importModal.errorMessages.length > MAX_VISIBLE_IMPORT_ERRORS && (
+                  <Text style={[styles.modalErrorLine, { color: c.textTertiary }]}>
+                    +{importModal.errorMessages.length - MAX_VISIBLE_IMPORT_ERRORS} more
+                  </Text>
+                )}
+              </View>
+            )}
+
             <PressableScale
               style={[styles.modalCloseBtn, { backgroundColor: c.accentFill }]}
               onPress={() => setImportModal((prev) => ({ ...prev, visible: false }))}
@@ -840,6 +879,10 @@ const styles = StyleSheet.create({
   modalStatValue: {
     fontSize: 16,
     fontWeight: '700',
+  },
+  modalErrorLine: {
+    fontSize: 12,
+    lineHeight: 17,
   },
   modalCloseBtn: {
     width: '100%',

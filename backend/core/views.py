@@ -1399,6 +1399,39 @@ class MovieRemoveView(APIView):
         )
 
 
+def _sorted_import_payload(payload: dict) -> dict:
+    """
+    Normalises a submitted TV Time export's top-level ordering before
+    comparing it against a resumable FAILED job's stored payload.
+
+    Only the `shows`/`movies` array ORDER is normalised — every field
+    (including per-episode watched flags/dates) is still compared as-is,
+    so this cannot mask a genuine content difference (e.g. more episodes
+    marked watched since the failed attempt still correctly fails to
+    match and starts a fresh job). TV Time's export ordering isn't
+    guaranteed stable across runs; without this, re-exporting the exact
+    same watch history in a different row order silently fell through to
+    a brand new job instead of resuming — safe (the diff-aware dedup in
+    tasks.py still prevents duplicates either way) but threw away the
+    resume optimization for no reason. Resuming itself always continues
+    from the STORED job's own payload/cursor (see run_tvtime_import) —
+    this function is only ever used for the equality check below, never
+    as a data source, so it can't cause a resume to process the wrong
+    item.
+    """
+
+    def show_key(s):
+        return (str(s.get("tvdb_id") or ""), str(s.get("imdb_id") or ""), s.get("title") or "")
+
+    def movie_key(m):
+        return (str(m.get("tvdb_id") or ""), str(m.get("imdb_id") or ""), m.get("title") or "")
+
+    return {
+        "shows": sorted(payload.get("shows") or [], key=show_key),
+        "movies": sorted(payload.get("movies") or [], key=movie_key),
+    }
+
+
 class TVTimeImportView(APIView):
     """
     POST /api/import/tvtime/
@@ -1528,7 +1561,7 @@ class TVTimeImportView(APIView):
         if (
             resumable is not None
             and resumable.processed > 0
-            and resumable.payload == submitted_payload
+            and _sorted_import_payload(resumable.payload) == _sorted_import_payload(submitted_payload)
         ):
             resumable.status = ImportJob.Status.RUNNING
             resumable.detail = ""

@@ -24,6 +24,7 @@ from rest_framework.test import APIClient
 
 from core.models import ImportJob, Watchlist, WatchState
 from core.tasks import IMPORT_CHUNK_SIZE, run_tvtime_import
+from core.views import _sorted_import_payload
 
 User = get_user_model()
 
@@ -266,6 +267,29 @@ def test_view_resumes_matching_failed_job_instead_of_restarting(user):
     assert failed_job.status == ImportJob.Status.RUNNING
     assert failed_job.processed == 2  # cursor preserved, not reset to 0
     assert failed_job.payload == payload
+
+
+def test_sorted_import_payload_ignores_top_level_order():
+    """The resume-match gate must not be fooled by a re-exported file
+    listing the same shows/movies in a different order (no DB needed —
+    this is a pure comparison helper, see views.py)."""
+    a = {"shows": [_show_item(1), _show_item(2)], "movies": [_movie_item(101)]}
+    b = {"shows": [_show_item(2), _show_item(1)], "movies": [_movie_item(101)]}
+    assert _sorted_import_payload(a) == _sorted_import_payload(b)
+
+
+def test_sorted_import_payload_still_detects_real_content_differences():
+    """Reordering is ignored, but an actual difference (e.g. more episodes
+    watched since the failed attempt) must still be caught — otherwise a
+    resume would silently continue from a stale cursor instead of
+    correctly starting a fresh job with the newer data."""
+    a = {"shows": [_show_item(1, watched=True)], "movies": []}
+    b = {"shows": [_show_item(1, watched=False)], "movies": []}
+    assert _sorted_import_payload(a) != _sorted_import_payload(b)
+
+    c = {"shows": [_show_item(1)], "movies": [_movie_item(101)]}
+    d = {"shows": [_show_item(1)], "movies": [_movie_item(101), _movie_item(102)]}
+    assert _sorted_import_payload(c) != _sorted_import_payload(d)
 
 
 @pytest.mark.django_db

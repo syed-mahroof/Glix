@@ -41,10 +41,16 @@ export interface WidgetPayload {
 }
 
 /** How far ahead "AIRING SOON" looks, and the payload's item cap. Android's
- *  ListWidget genuinely scrolls through all of it; iOS shows as many as the
- *  widget family's fixed height allows (WidgetKit widgets can't scroll). */
-const UPCOMING_WINDOW_DAYS = 14;
-const UPCOMING_CAP = 30;
+ *  ListWidget genuinely scrolls through all of it (widgets/android/
+ *  UpcomingWidget.tsx renders the full capped list into the native
+ *  RemoteViews collection, not a further-truncated slice); iOS shows as many
+ *  as the widget family's fixed height allows (WidgetKit widgets can't
+ *  scroll). Widened from the original 14 days / 30 items — with several
+ *  tracked shows airing weekly, 14 days routinely ran out of content after
+ *  one or two rows. Both stay well under Android's per-widget RemoteViews
+ *  transaction size limit even at the cap. */
+const UPCOMING_WINDOW_DAYS = 45;
+const UPCOMING_CAP = 50;
 const WATCHLIST_CAP = 8;
 
 /**

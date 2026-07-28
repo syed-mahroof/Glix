@@ -30,6 +30,8 @@ import {
 import Animated, {
   Extrapolation,
   interpolate,
+  runOnJS,
+  useAnimatedReaction,
   useAnimatedScrollHandler,
   useAnimatedStyle,
   useSharedValue,
@@ -135,6 +137,11 @@ export default function MovieDetailScreen() {
   const [recommendations, setRecommendations] = useState<RecItem[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
+  // Mirrors show/[id].tsx's sectionError — without this, a genuine failure
+  // (network blip, cold backend) on share/remove/add/toggle was completely
+  // invisible: the optimistic UI change (if any) just silently reverted,
+  // indistinguishable from the button never having worked at all.
+  const [sectionError, setSectionError] = useState<string | null>(null);
   const [isTogglingWatch, setIsTogglingWatch] = useState(false);
   const [isAddingToWatchlist, setIsAddingToWatchlist] = useState(false);
   const [isRemoving, setIsRemoving] = useState(false);
@@ -172,6 +179,25 @@ export default function MovieDetailScreen() {
   const headerOpacity = useAnimatedStyle(() => ({
     opacity: interpolate(scrollY.value, [160, 220], [0, 1], Extrapolation.CLAMP),
   }));
+
+  // headerOpacity only fades the sticky header visually — opacity 0 does NOT
+  // remove it from hit-testing in React Native. Left always-on, this
+  // absolutely-positioned, zIndex:10 strip silently ate every tap meant for
+  // the backdrop's real share/remove/watchlist buttons underneath (they
+  // occupy the same top strip of the screen) — the actual "movie buttons do
+  // nothing" bug. show/[id].tsx never had this problem because it has no
+  // equivalent sticky header at all. Gate hit-testing on the same threshold
+  // the opacity fade uses, so the invisible strip is truly inert until it's
+  // actually visible.
+  const [headerInteractive, setHeaderInteractive] = useState(false);
+  useAnimatedReaction(
+    () => scrollY.value > 190,
+    (isPast, wasPast) => {
+      if (isPast !== wasPast) {
+        runOnJS(setHeaderInteractive)(isPast);
+      }
+    }
+  );
 
   const backdropScale = useAnimatedStyle(() => ({
     transform: [
@@ -217,6 +243,7 @@ export default function MovieDetailScreen() {
 
   const loadSecondary = useCallback(async () => {
     if (Number.isNaN(tmdbId)) return;
+    setSectionError(null);
     const [creditsRes, providersRes, recsRes] = await Promise.allSettled([
       api.get<{ cast: CastMember[]; crew: CrewMember[] }>(`/movies/${tmdbId}/credits/`),
       api.get<ProviderItem[]>(`/movies/${tmdbId}/watch-providers/`),
@@ -231,6 +258,16 @@ export default function MovieDetailScreen() {
     }
     if (recsRes.status === 'fulfilled') {
       setRecommendations(recsRes.value.data.results ?? []);
+    }
+    // Only surface a banner if every section failed — a single missing
+    // section (e.g. no providers in this region) is normal, same rule
+    // show/[id].tsx's loadSecondaryData uses.
+    if (
+      creditsRes.status === 'rejected' &&
+      providersRes.status === 'rejected' &&
+      recsRes.status === 'rejected'
+    ) {
+      setSectionError(extractErrorMessage((creditsRes as PromiseRejectedResult).reason));
     }
   }, [tmdbId]);
 
@@ -257,14 +294,19 @@ export default function MovieDetailScreen() {
       setIsAddingToWatchlist(false);
       if (success) {
         setAddedSnackbarVisible(true);
+      } else {
+        setSectionError('Could not add to watchlist — try again.');
       }
       return;
     }
 
     if (isTogglingWatch) return;
     setIsTogglingWatch(true);
-    await toggleMovieWatchState(tmdbId);
+    const ok = await toggleMovieWatchState(tmdbId);
     setIsTogglingWatch(false);
+    if (!ok) {
+      setSectionError('Could not update watched status — try again.');
+    }
   };
 
   /** Full-delete "Remove from Watchlist" (Phase F) — mirrors show/[id].tsx's
@@ -278,6 +320,8 @@ export default function MovieDetailScreen() {
     if (snapshot) {
       setRemoveSnapshot(snapshot);
       setRemoveSnackbarVisible(true);
+    } else {
+      setSectionError('Could not remove from watchlist — try again.');
     }
   };
 
@@ -335,7 +379,10 @@ export default function MovieDetailScreen() {
           photo has scrolled past — this sits over the app's own blurred
           chrome, not the photo, so it's fully themed unlike the backdrop
           row below). ─────────────────────────────────────────────────── */}
-      <Animated.View style={[styles.stickyHeader, headerOpacity]}>
+      <Animated.View
+        style={[styles.stickyHeader, headerOpacity]}
+        pointerEvents={headerInteractive ? 'auto' : 'none'}
+      >
         <BlurView intensity={90} tint={theme.blurTint} style={StyleSheet.absoluteFill} />
         <View style={[StyleSheet.absoluteFill, { backgroundColor: c.glassFill }]} />
         <SafeAreaView edges={['top']}>
@@ -507,6 +554,12 @@ export default function MovieDetailScreen() {
             <Text style={[styles.overview, { color: c.textSecondary }]}>{d.overview}</Text>
           </View>
         ) : null}
+
+        {sectionError && (
+          <View style={[styles.errorBanner, { backgroundColor: c.negativeDim, borderColor: 'rgba(255, 69, 58, 0.3)' }]}>
+            <Text style={[styles.errorBannerText, { color: c.negative }]}>{sectionError}</Text>
+          </View>
+        )}
 
         {/* Loading shimmer for secondary data */}
         {isLoading && !movie && (
@@ -804,6 +857,16 @@ const styles = StyleSheet.create({
     paddingHorizontal: 20,
   },
   hList: { paddingHorizontal: 20, gap: 12 },
+  errorBanner: {
+    marginHorizontal: 20,
+    marginTop: 16,
+    padding: 12,
+    borderRadius: 12,
+    borderWidth: StyleSheet.hairlineWidth,
+  },
+  errorBannerText: {
+    fontSize: 12,
+  },
 
   // Loading shimmer
   shimmerRow: {

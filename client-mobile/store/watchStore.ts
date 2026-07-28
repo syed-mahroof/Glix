@@ -436,7 +436,7 @@ interface WatchStoreState extends AnalyticsSlice {
 
   // Movie actions
   fetchMovieWatchlist: () => Promise<void>;
-  toggleMovieWatchState: (movieId: number) => Promise<void>;
+  toggleMovieWatchState: (movieId: number) => Promise<boolean>;
   addMovieToWatchlist: (movieId: number) => Promise<boolean>;
   removeMovieFromWatchlist: (movieId: number) => Promise<RemovedMovieSnapshot | null>;
   undoRemoveMovie: (snapshot: RemovedMovieSnapshot) => Promise<void>;
@@ -755,7 +755,7 @@ export const useWatchStore = create<WatchStoreState>()(
     const inWatchNext = prev.watch_next.find((item) => item.movie.tmdb_id === movieId);
     const inWatched = prev.watched.find((item) => item.movie.tmdb_id === movieId);
     const entry = inWatchNext ?? inWatched;
-    if (!entry) return;
+    if (!entry) return false;
 
     const wasWatched = entry.movie.is_watched;
     const runtimeDelta = wasWatched ? -entry.movie.runtime_minutes : entry.movie.runtime_minutes;
@@ -811,8 +811,10 @@ export const useWatchStore = create<WatchStoreState>()(
             : state.unlockedBadges,
         };
       });
+      return true;
     } catch (error) {
       set({ movieWatchlist: prev, profile: prevProfile, error: extractErrorMessage(error) });
+      return false;
     }
   },
 
@@ -1345,6 +1347,13 @@ export const useWatchStore = create<WatchStoreState>()(
       storage: createJSONStorage(() => AsyncStorage),
       partialize: (state) => ({
         watchlist: state.watchlist,
+        // Without this, movieWatchlist never survived an app restart (unlike
+        // watchlist, right above) — a cold launch always started it back at
+        // the empty default until whatever screen first fetches it (Movies
+        // tab / profile/movies) happened to mount, which meant Profile's "My
+        // Movies" badge could read 0 immediately next to a watch-time stat
+        // that already includes those same movies' minutes.
+        movieWatchlist: state.movieWatchlist,
         profile: state.profile,
         preferredLayout: state.preferredLayout,
         selectedLanguage: state.selectedLanguage,

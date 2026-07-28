@@ -3,8 +3,10 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import type { WidgetTaskHandlerProps } from 'react-native-android-widget';
 import { WatchlistWidget } from './WatchlistWidget';
 import { UpcomingWidget } from './UpcomingWidget';
+import { api } from '../../lib/api';
 import { buildWidgetPayload } from '../../lib/widgetPayload';
 import type { WidgetPayload } from '../../lib/widgetPayload';
+import type { WatchlistEntry } from '../../store/watchStore';
 
 // Attempt a safe import of SharedPreferences — the native module is only
 // available after a full native build (EAS / expo run:android), so during
@@ -69,6 +71,64 @@ async function readWidgetData(): Promise<WidgetPayload | null> {
   return (await readPersistedStore()) ?? cached;
 }
 
+interface WatchlistBucketsResponse {
+  to_watch: { results: WatchlistEntry[] };
+  up_to_date: { results: WatchlistEntry[] };
+  archived: { results: WatchlistEntry[] };
+}
+
+// The native headless task itself is hard-killed at ~30s
+// (RNWidgetBackgroundTaskWorker.java) and the backend's free-tier dyno can
+// take 20-50s to wake from cold — comfortably longer than that ceiling. This
+// stays well clear of it so a slow/cold backend falls back to the cached
+// read below instead of the whole redraw getting killed mid-request.
+const BACKGROUND_FETCH_TIMEOUT_MS = 15000;
+
+function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('widget background fetch timed out')), ms);
+    promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (err) => {
+        clearTimeout(timer);
+        reject(err);
+      }
+    );
+  });
+}
+
+/** Genuinely refreshes the widget's data over the network when the OS wakes
+ *  this headless task. Previously widgetTaskHandler only ever re-rendered
+ *  whatever the foreground app last wrote via syncWidgetData() — a widget
+ *  could go stale, or stay on "Open Glix to sync" indefinitely, for as long
+ *  as the app stayed closed, since nothing else ever refreshed the
+ *  underlying data. `api`'s request interceptor (lib/api.ts) attaches the
+ *  SecureStore-backed access token the same way it does for any in-app
+ *  request — no separate auth path needed here. Returns null on any
+ *  failure (offline, dead refresh token, or the bounded timeout above
+ *  tripping) so the caller falls back to the cached read instead of
+ *  crashing the redraw. */
+async function fetchFreshWidgetData(): Promise<WidgetPayload | null> {
+  try {
+    const response = await withTimeout(
+      api.get<WatchlistBucketsResponse>('/watchlist/?page_size=all'),
+      BACKGROUND_FETCH_TIMEOUT_MS
+    );
+    const { to_watch, up_to_date } = response.data;
+    const entries = [...to_watch.results, ...up_to_date.results];
+    const payload = buildWidgetPayload(to_watch.results, entries);
+    if (SharedPreferences) {
+      SharedPreferences.setItem('widgetData', JSON.stringify(payload));
+    }
+    return payload;
+  } catch {
+    return null;
+  }
+}
+
 // The normal write side lives in store/watchStore.ts's syncWidgetData() — it
 // needs the full watchlist state (Zustand `get()`), which this module has no
 // access to while the app is running. This file runs headless: the OS invokes
@@ -80,8 +140,15 @@ export async function widgetTaskHandler(props: WidgetTaskHandlerProps) {
     // would just cost a headless JS round trip for no visual change.
     if (props.widgetAction === 'WIDGET_DELETED' || props.widgetAction === 'WIDGET_CLICK') return;
 
-    const data = await readWidgetData();
-    const { widgetName, height } = props.widgetInfo;
+    // Periodic tick (WIDGET_UPDATE, driven by app.json's updatePeriodMillis)
+    // and a freshly-added widget are both worth a network round trip — this
+    // is precisely the "app hasn't been opened in a while" case a stale
+    // cache can't fix. A resize is purely a layout event (the user is
+    // mid-drag), so it redraws from whatever's already cached rather than
+    // adding a network round trip to every resize frame.
+    const shouldRefetch = props.widgetAction === 'WIDGET_UPDATE' || props.widgetAction === 'WIDGET_ADDED';
+    const data = (shouldRefetch ? await fetchFreshWidgetData() : null) ?? (await readWidgetData());
+    const { widgetName } = props.widgetInfo;
 
     // props.renderWidget is the API that actually fulfils the pending render
     // for THIS widget id. The previous implementation called
@@ -91,10 +158,10 @@ export async function widgetTaskHandler(props: WidgetTaskHandlerProps) {
     // showing its old, wrongly-sized layout or nothing at all.
     switch (widgetName) {
       case 'WatchlistWidget':
-        props.renderWidget(<WatchlistWidget data={data} height={height} />);
+        props.renderWidget(<WatchlistWidget data={data} />);
         break;
       case 'UpcomingWidget':
-        props.renderWidget(<UpcomingWidget data={data} height={height} />);
+        props.renderWidget(<UpcomingWidget data={data} />);
         break;
       default:
         break;

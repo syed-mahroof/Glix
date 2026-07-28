@@ -51,7 +51,7 @@ function WatchlistRow({ show }: { show: WatchlistWidgetItem }) {
   );
 }
 
-export function WatchlistWidget({ data, height }: { data: WidgetPayload | null; height?: number }) {
+export function WatchlistWidget({ data }: { data: WidgetPayload | null }) {
   const items: WatchlistWidgetItem[] = data?.watchlist ?? [];
 
   if (items.length === 0) {
@@ -99,11 +99,11 @@ export function WatchlistWidget({ data, height }: { data: WidgetPayload | null; 
         text="NEXT UP"
         style={{ fontSize: 12, color: '#E4FA1A', fontWeight: 'bold', marginLeft: 16, marginTop: 12, marginBottom: 4 }}
       />
-      {/* Scrolls through the synced list; the row budget is derived from the
-          measured widget height the OS reports on every redraw, so resizing
-          taller genuinely builds more rows instead of a fixed count. */}
+      {/* Full synced list (lib/widgetPayload.ts's WATCHLIST_CAP) scrolls
+          natively — see UpcomingWidget.tsx for why this no longer
+          re-truncates by measured height on top of that cap. */}
       <ListWidget style={{ height: 'match_parent', width: 'match_parent' }}>
-        {items.slice(0, height ? Math.max(3, Math.ceil((height - 34) / 64) + 2) : 6).map((show, idx) => (
+        {items.map((show, idx) => (
           <WatchlistRow key={show.id ?? idx} show={show} />
         ))}
       </ListWidget>

@@ -16,6 +16,7 @@ export default function LoadingScreen() {
   const params = useLocalSearchParams<{ next?: string }>();
   const fetchWatchlist = useWatchStore((state) => state.fetchWatchlist);
   const fetchProfile = useWatchStore((state) => state.fetchProfile);
+  const fetchMovieWatchlist = useWatchStore((state) => state.fetchMovieWatchlist);
   const clearError = useWatchStore((state) => state.clearError);
   const [ready, setReady] = useState(false);
   const [status, setStatus] = useState<BootStatus>('connecting');
@@ -40,7 +41,10 @@ export default function LoadingScreen() {
     }
 
     setStatus('connecting');
-    await Promise.all([fetchProfile(), fetchWatchlist()]);
+    // movieWatchlist included so "My Movies" and the widget's movie data
+    // are populated from boot, not left at the empty default until the
+    // Movies tab happens to mount (see watchStore.ts's partialize comment).
+    await Promise.all([fetchProfile(), fetchWatchlist(), fetchMovieWatchlist()]);
 
     // fetchProfile/fetchWatchlist swallow their own request errors into
     // store.error and always resolve (never reject) — previously this meant
@@ -54,7 +58,7 @@ export default function LoadingScreen() {
     }
 
     setReady(true);
-  }, [fetchProfile, fetchWatchlist, clearError]);
+  }, [fetchProfile, fetchWatchlist, fetchMovieWatchlist, clearError]);
 
   useEffect(() => {
     let isMounted = true;

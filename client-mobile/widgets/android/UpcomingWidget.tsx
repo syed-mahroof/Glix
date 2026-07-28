@@ -108,7 +108,7 @@ function Divider() {
   return <FlexWidget style={{ height: 1, width: 'match_parent', backgroundColor: DIVIDER }} />;
 }
 
-export function UpcomingWidget({ data, height }: { data: WidgetPayload | null; height?: number }) {
+export function UpcomingWidget({ data }: { data: WidgetPayload | null }) {
   const items: WidgetUpcomingItem[] = data?.upcoming ?? [];
 
   if (items.length === 0) {
@@ -139,22 +139,20 @@ export function UpcomingWidget({ data, height }: { data: WidgetPayload | null; h
     );
   }
 
-  // Rendering every item as a RemoteViews tree costs real memory (Android
-  // hard-caps a widget's transaction size), and anything far past the
-  // visible area is unreachable anyway on a widget that only scrolls a
-  // little. Budget from the actual measured height the OS hands us on every
-  // redraw — a resized-taller widget genuinely gets more rows, which the
-  // old fixed cap never did.
-  const rowBudget = height ? Math.max(3, Math.ceil((height - 34) / 58) + 3) : 8;
-  const visible = items.slice(0, rowBudget);
-
+  // The full windowed/capped list (lib/widgetPayload.ts's UPCOMING_CAP)
+  // goes into the native ListWidget's children — it's a real scrolling
+  // RemoteViews collection (RNWidgetCollectionService), so anything beyond
+  // the visible rows is reached by scrolling, not by building more JS
+  // elements up front. Slicing again here by measured height used to throw
+  // away everything past the first screenful before the list ever got a
+  // chance to scroll to it.
   const now = new Date();
   const children: React.JSX.Element[] = [];
   let lastLabel: string | null = null;
-  visible.forEach((show, idx) => {
+  items.forEach((show, idx) => {
     const label = formatUpcomingHeaderLabel(show.air_date, now);
     if (label !== lastLabel) {
-      const count = visible.filter((s) => formatUpcomingHeaderLabel(s.air_date, now) === label).length;
+      const count = items.filter((s) => formatUpcomingHeaderLabel(s.air_date, now) === label).length;
       if (lastLabel !== null) children.push(<Divider key={`div-${label}`} />);
       children.push(<DayHeader key={`head-${label}`} label={label} count={count} />);
       lastLabel = label;

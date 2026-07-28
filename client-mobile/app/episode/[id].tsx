@@ -23,6 +23,7 @@ import Snackbar from '../../components/Snackbar';
 import { api } from '../../lib/api';
 import { pad, todayLocalIso } from '../../lib/dateFormat';
 import { extractErrorMessage } from '../../lib/errors';
+import { goBack } from '../../lib/navigation';
 import { useAppTheme } from '../../lib/theme';
 import { useCatchupCascade } from '../../lib/useCatchupCascade';
 import { Emotion, useWatchStore } from '../../store/watchStore';
@@ -256,7 +257,7 @@ export default function EpisodeDetailScreen() {
     return (
       <SafeAreaView style={[styles.container, { backgroundColor: c.bg }]}>
         <View style={styles.header}>
-          <PressableScale onPress={() => router.back()} hitSlop={8} style={[styles.backButton, { backgroundColor: c.glassFill, borderColor: c.hairline, borderWidth: StyleSheet.hairlineWidth }]}>
+          <PressableScale onPress={() => goBack(router)} hitSlop={8} style={[styles.backButton, { backgroundColor: c.glassFill, borderColor: c.hairline, borderWidth: StyleSheet.hairlineWidth }]}>
             <ArrowLeft color={c.textPrimary} size={22} />
           </PressableScale>
         </View>
@@ -292,7 +293,7 @@ export default function EpisodeDetailScreen() {
           />
           <View style={styles.stillOverlay} />
           <View style={styles.headerFloating}>
-            <PressableScale onPress={() => router.back()} hitSlop={8} style={styles.iconButton}>
+            <PressableScale onPress={() => goBack(router)} hitSlop={8} style={styles.iconButton}>
               <ArrowLeft color="#FFFFFF" size={22} />
             </PressableScale>
           </View>
