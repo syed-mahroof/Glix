@@ -13,6 +13,8 @@ from rest_framework import serializers
 from core.models import (
     CachedEpisode,
     CachedShow,
+    CustomList,
+    CustomListItem,
     EpisodeInteraction,
     ImportJob,
     MovieCache,
@@ -281,6 +283,10 @@ class MovieWatchlistSerializer(serializers.ModelSerializer):
     """
 
     movie = MovieCacheSerializer(read_only=True)
+    # Populated via the view's `watch_state_watched_at` Subquery annotation
+    # (MovieWatchlistView.get()) — None for entries with no annotation
+    # (e.g. any other caller of this serializer that doesn't annotate it).
+    watched_at = serializers.SerializerMethodField()
 
     class Meta:
         model = MovieWatchlist
@@ -289,7 +295,11 @@ class MovieWatchlistSerializer(serializers.ModelSerializer):
             "movie",
             "added_at",
             "updated_at",
+            "watched_at",
         ]
+
+    def get_watched_at(self, obj):
+        return getattr(obj, "watch_state_watched_at", None)
 class ImportJobSerializer(serializers.ModelSerializer):
     """
     Progress + result for one TV Time import run. `payload` is
@@ -324,3 +334,77 @@ class ImportJobSerializer(serializers.ModelSerializer):
         if not obj.total:
             return 0.0
         return round(min(obj.processed / obj.total, 1.0), 4)
+
+
+class CustomListItemSerializer(serializers.ModelSerializer):
+    """
+    title/poster_path come from the view's `cover_map` context (a bulk
+    CachedShow/MovieCache lookup keyed by (media_type, tmdb_id)) — never a
+    per-item query, so a list with many items stays O(1) queries for covers.
+    """
+
+    title = serializers.SerializerMethodField()
+    poster_path = serializers.SerializerMethodField()
+
+    class Meta:
+        model = CustomListItem
+        fields = ["id", "media_type", "tmdb_id", "title", "poster_path", "added_at"]
+
+    def _cover(self, obj):
+        return self.context.get("cover_map", {}).get((obj.media_type, obj.tmdb_id), {})
+
+    def get_title(self, obj):
+        return self._cover(obj).get("title", "")
+
+    def get_poster_path(self, obj):
+        return self._cover(obj).get("poster_path")
+
+
+class CustomListSerializer(serializers.ModelSerializer):
+    """
+    item_count/cover_posters read from context maps the view precomputes in
+    bulk (one query for all of the user's lists' items, one for covers) —
+    never a per-list query, so "My Lists" stays cheap regardless of how
+    many lists a user has.
+    """
+
+    item_count = serializers.SerializerMethodField()
+    cover_posters = serializers.SerializerMethodField()
+
+    class Meta:
+        model = CustomList
+        fields = [
+            "id", "name", "description", "is_private",
+            "item_count", "cover_posters", "created_at", "updated_at",
+        ]
+
+    def get_item_count(self, obj):
+        counts = self.context.get("item_counts", {})
+        return counts.get(obj.id, 0)
+
+    def get_cover_posters(self, obj):
+        cover_map = self.context.get("cover_map", {})
+        items = self.context.get("items_by_list", {}).get(obj.id, [])
+        posters = []
+        for item in items:
+            poster = cover_map.get((item.media_type, item.tmdb_id), {}).get("poster_path")
+            if poster:
+                posters.append(poster)
+        return posters[:4]
+
+
+class ForYouRecommendationSerializer(serializers.Serializer):
+    """
+    A plain (non-model) serializer: rows come from
+    recommendations_views.ForYouRecommendationsView's in-memory merge of
+    several TMDB recommendation calls, not a single queryset.
+    """
+
+    media_type = serializers.ChoiceField(choices=["tv", "movie"])
+    tmdb_id = serializers.IntegerField()
+    title = serializers.CharField()
+    poster_path = serializers.CharField(allow_null=True)
+    backdrop_path = serializers.CharField(allow_null=True)
+    overview = serializers.CharField(allow_blank=True)
+    vote_average = serializers.FloatField()
+    reason = serializers.CharField(help_text="e.g. 'Because you watched Breaking Bad'.")

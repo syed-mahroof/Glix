@@ -86,7 +86,7 @@ function UpcomingRow({ show }: { show: WidgetUpcomingItem }) {
           maxLines={1}
         />
         <TextWidget
-          text={show.next_episode}
+          text={show.countdown ? `${show.next_episode} • ${show.countdown}` : show.next_episode}
           style={{ fontSize: 11, color: SUBTLE, marginTop: 2 }}
           maxLines={1}
         />

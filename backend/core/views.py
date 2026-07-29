@@ -12,7 +12,7 @@ from datetime import timedelta
 
 from django.core.cache import cache
 from django.db import transaction
-from django.db.models import Count, F, Max, Prefetch, Q
+from django.db.models import Count, F, Max, OuterRef, Prefetch, Q, Subquery
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from rest_framework import generics, status
@@ -33,6 +33,7 @@ from core.models import (
     WatchState,
     NotificationPreference,
 )
+from core.cache_keys import CACHE_TTL_SECONDS, movie_watchlist_cache_key, watchlist_cache_key
 from core.pagination import StandardResultsPagination
 from core.serializers import (
     ContinueWatchingSerializer,
@@ -378,6 +379,18 @@ class WatchlistView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
+        # Full-fetch responses are the expensive path (annotate+prefetch
+        # across every tracked show's episodes/watch-states) and the one the
+        # Shows Hub always requests — cached briefly per user; see
+        # cache_keys.py and the signal-based invalidation in signals.py for
+        # how this stays fresh without becoming a new response-shape contract.
+        fetch_all = request.query_params.get("page_size") == "all"
+        cache_key = watchlist_cache_key(request.user.id)
+        if fetch_all:
+            cached = cache.get(cache_key)
+            if cached is not None:
+                return Response(cached, status=status.HTTP_200_OK)
+
         today = timezone.now().date()
 
         watch_state_prefetch = Prefetch(
@@ -440,7 +453,8 @@ class WatchlistView(APIView):
         # walk past page 1 anyway. Full DB work (prefetch of every entry's
         # episodes) already happens above regardless of pagination, so this
         # mode only adds serialization + payload — no extra queries.
-        fetch_all = request.query_params.get("page_size") == "all"
+        # (fetch_all itself is computed at the top of get(), alongside the
+        # cache-hit check, so it's available before the expensive query runs.)
 
         paginated = {}
         for key, items in buckets.items():
@@ -476,6 +490,9 @@ class WatchlistView(APIView):
                     "previous": None,
                     "results": serialized_results,
                 }
+
+        if fetch_all:
+            cache.set(cache_key, paginated, timeout=CACHE_TTL_SECONDS)
 
         return Response(paginated, status=status.HTTP_200_OK)
 
@@ -1200,9 +1217,27 @@ class MovieWatchlistView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
+        # Cached per user like WatchlistView's page_size=all path — see
+        # cache_keys.py and signals.py's invalidation receivers. This
+        # endpoint is always a full unpaginated fetch, so no fetch_all gate.
+        cache_key = movie_watchlist_cache_key(request.user.id)
+        cached = cache.get(cache_key)
+        if cached is not None:
+            return Response(cached, status=status.HTTP_200_OK)
+
+        # Powers the "Last Watched" pill (Movies Hub): when this movie was
+        # actually marked watched, distinct from MovieWatchlist's own
+        # -updated_at (bumped by any change to the tracking row, not just
+        # the watch toggle). One Subquery, not N+1 — same technique
+        # WatchlistView already uses for its own last_watched_at annotation.
+        watched_at_subq = MovieWatchState.objects.filter(
+            user=request.user, movie_id=OuterRef("movie_id")
+        ).values("watched_at")[:1]
+
         entries = (
             MovieWatchlist.objects.filter(user=request.user)
             .select_related("movie")
+            .annotate(watch_state_watched_at=Subquery(watched_at_subq))
             .order_by("-updated_at")
         )
 
@@ -1220,13 +1255,12 @@ class MovieWatchlistView(APIView):
                 watch_next.append(entry)
 
         context = {"request": request}
-        return Response(
-            {
-                "watch_next": MovieWatchlistSerializer(watch_next, many=True, context=context).data,
-                "watched": MovieWatchlistSerializer(watched, many=True, context=context).data,
-            },
-            status=status.HTTP_200_OK,
-        )
+        payload = {
+            "watch_next": MovieWatchlistSerializer(watch_next, many=True, context=context).data,
+            "watched": MovieWatchlistSerializer(watched, many=True, context=context).data,
+        }
+        cache.set(cache_key, payload, timeout=CACHE_TTL_SECONDS)
+        return Response(payload, status=status.HTTP_200_OK)
 
 
 class MovieWatchStateToggleView(APIView):

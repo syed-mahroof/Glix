@@ -24,6 +24,11 @@ export interface MediaItem {
   // without them.
   backdrop_path?: string | null;
   overview?: string;
+  /** Only set by the "For You" row (discoverStore's ForYouItem) — a short
+   *  "Because you watched X" caption. Omitted entirely by every other
+   *  caller (trending/popular/genre rows), so plain feed cards are
+   *  untouched. */
+  reason?: string;
 }
 
 interface Props {
@@ -89,6 +94,11 @@ export default function HorizontalMediaList({ title, items }: Props) {
                 <Text style={[styles.mediaTitle, { color: c.textPrimary }]} numberOfLines={2}>
                   {item.title}
                 </Text>
+                {item.reason && (
+                  <Text style={[styles.reasonText, { color: c.textTertiary }]} numberOfLines={1}>
+                    {item.reason}
+                  </Text>
+                )}
               </PressableScale>
             );
           }}
@@ -151,5 +161,10 @@ const styles = StyleSheet.create({
     fontSize: 13,
     fontWeight: '600',
     lineHeight: 18,
+  },
+  reasonText: {
+    fontSize: 10,
+    fontWeight: '500',
+    marginTop: -4,
   },
 });

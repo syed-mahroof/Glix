@@ -47,6 +47,12 @@ export interface GenreCover {
   poster_path: string | null;
 }
 
+export interface ForYouItem extends DiscoverMediaItem {
+  /** Human-readable "Because you watched X" string from the backend's
+   *  cross-library recommendation merge — see recommendations_views.py. */
+  reason: string;
+}
+
 // ─── Store ─────────────────────────────────────────────────────────────────────
 
 interface DiscoverState {
@@ -94,6 +100,13 @@ interface DiscoverState {
   genreCovers: Record<ActiveSegment, Record<number, GenreCover>>;
   isLoadingGenreCovers: boolean;
 
+  // "For You" cross-library recommendations — mixed tv/movie, independent
+  // of activeSegment, so it isn't keyed per-segment like feedData.
+  forYou: ForYouItem[];
+  hasFetchedForYou: boolean;
+  isLoadingForYou: boolean;
+  forYouError: string | null;
+
   // Actions
   setActiveSegment: (segment: ActiveSegment) => void;
   setSearchQuery: (query: string) => void;
@@ -112,6 +125,7 @@ interface DiscoverState {
   resetFilters: () => void;
   isFilterActive: () => boolean;
   fetchGenreCovers: (segment: ActiveSegment) => Promise<void>;
+  fetchForYou: () => Promise<void>;
 }
 
 export const useDiscoverStore = create<DiscoverState>((set, get) => ({
@@ -145,6 +159,11 @@ export const useDiscoverStore = create<DiscoverState>((set, get) => ({
 
   genreCovers: { tv: {}, movie: {} },
   isLoadingGenreCovers: false,
+
+  forYou: [],
+  hasFetchedForYou: false,
+  isLoadingForYou: false,
+  forYouError: null,
 
   // ── Actions ──────────────────────────────────────────────────────────────────
 
@@ -228,6 +247,20 @@ export const useDiscoverStore = create<DiscoverState>((set, get) => ({
       }));
     } catch (err) {
       set({ feedError: extractErrorMessage(err), isLoadingFeed: false });
+    }
+  },
+
+  fetchForYou: async () => {
+    // Backend caches the computed feed per-user for 6h already (see
+    // RECOMMENDATIONS_CACHE_TTL_SECONDS); this guard just avoids a redundant
+    // request within the same app session, same idea as fetchFeed's cache.
+    if (get().hasFetchedForYou) return;
+    set({ isLoadingForYou: true, forYouError: null });
+    try {
+      const response = await api.get<ForYouItem[]>('/recommendations/for-you/');
+      set({ forYou: response.data, hasFetchedForYou: true, isLoadingForYou: false });
+    } catch (err) {
+      set({ forYouError: extractErrorMessage(err), isLoadingForYou: false });
     }
   },
 

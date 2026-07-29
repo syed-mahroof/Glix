@@ -106,7 +106,6 @@ class CommentSerializer(serializers.ModelSerializer):
         # Only enforced for top-level comment creation; replies inherit
         # show/episode from their parent in comment_views.py's
         # perform_create, so `attrs` won't carry either key on that path.
-        is_reply_creation = self.instance is None and "parent" not in attrs and attrs.get("show") is None and attrs.get("episode") is None and self.context.get("is_reply", False)
         if self.instance is None and not self.context.get("is_reply", False):
             show = attrs.get("show")
             episode = attrs.get("episode")

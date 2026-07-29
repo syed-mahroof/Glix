@@ -11,6 +11,7 @@ import {
   BookmarkPlus,
   CheckCircle,
   Clock,
+  ListPlus,
   MessageCircle,
   Share2,
   Star,
@@ -38,6 +39,7 @@ import Animated, {
 } from 'react-native-reanimated';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
+import AddToListSheet from '../../components/AddToListSheet';
 import { CastCard } from '../../components/CastCard';
 import GlassSurface from '../../components/GlassSurface';
 import PressableScale from '../../components/PressableScale';
@@ -143,6 +145,7 @@ export default function MovieDetailScreen() {
   // indistinguishable from the button never having worked at all.
   const [sectionError, setSectionError] = useState<string | null>(null);
   const [isTogglingWatch, setIsTogglingWatch] = useState(false);
+  const [isAddToListVisible, setIsAddToListVisible] = useState(false);
   const [isAddingToWatchlist, setIsAddingToWatchlist] = useState(false);
   const [isRemoving, setIsRemoving] = useState(false);
   const [removeSnapshot, setRemoveSnapshot] = useState<RemovedMovieSnapshot | null>(null);
@@ -436,6 +439,15 @@ export default function MovieDetailScreen() {
               >
                 <Share2 color="#FFF" size={20} />
               </PressableScale>
+              <PressableScale
+                onPress={() => setIsAddToListVisible(true)}
+                hitSlop={8}
+                style={styles.iconBtn}
+                accessibilityRole="button"
+                accessibilityLabel="Add to List"
+              >
+                <ListPlus color="#FFF" size={20} />
+              </PressableScale>
               {isInWatchlist && (
                 <PressableScale
                   onPress={handleRemoveFromWatchlist}
@@ -674,6 +686,13 @@ export default function MovieDetailScreen() {
         visible={!!reviewSnackbarMessage}
         message={reviewSnackbarMessage ?? ''}
         onDismiss={() => setReviewSnackbarMessage(null)}
+      />
+
+      <AddToListSheet
+        visible={isAddToListVisible}
+        onClose={() => setIsAddToListVisible(false)}
+        mediaType="movie"
+        tmdbId={tmdbId}
       />
     </View>
   );

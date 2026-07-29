@@ -19,10 +19,12 @@ from datetime import date, timedelta
 from datetime import timezone as dt_timezone
 
 from celery import shared_task
+from django.core.cache import cache
 from django.db.models import Count, F
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 
+from core.cache_keys import movie_watchlist_cache_key, watchlist_cache_key
 from core.badge_constants import (
     ANIME_GENRES,
     BADGE_ANIME_FAN,
@@ -163,8 +165,17 @@ def send_weekly_digest():
     Weekly push summarizing a user's activity, sent to everyone with
     notify_weekly_digest enabled and a push token on file. Wired to
     Celery beat (CELERY_BEAT_SCHEDULE) rather than called directly.
+
+    Body is built from three real signals rather than a single raw
+    episode count: what got watched (episodes + movies — the original
+    version never counted MovieWatchState at all), which show dominated
+    the week, and what's airing in the next 7 days for shows still on
+    this user's active watchlist. Same "don't nag an inactive user"
+    skip as before when there's truly nothing to report.
     """
     week_ago = timezone.now() - timedelta(days=7)
+    today = timezone.now().date()
+    week_ahead = today + timedelta(days=7)
     prefs = NotificationPreference.objects.filter(
         notify_weekly_digest=True, push_token__isnull=False
     ).exclude(push_token="").select_related("user")
@@ -173,10 +184,51 @@ def send_weekly_digest():
         episodes_watched = WatchState.objects.filter(
             user_id=pref.user_id, watched_at__gte=week_ago
         ).count()
-        if episodes_watched == 0:
+        movies_watched = MovieWatchState.objects.filter(
+            user_id=pref.user_id, watched_at__gte=week_ago
+        ).count()
+        if episodes_watched == 0 and movies_watched == 0:
             continue  # nothing to report; don't nag an inactive user weekly
 
-        body = f"You watched {episodes_watched} episode{'s' if episodes_watched != 1 else ''} this week. Keep it up!"
+        top_show = (
+            WatchState.objects.filter(user_id=pref.user_id, watched_at__gte=week_ago)
+            .values("episode__show__title")
+            .annotate(c=Count("id"))
+            .order_by("-c")
+            .first()
+        )
+
+        # Episodes airing in the next 7 days for shows this user actively
+        # tracks (mirrors the client's own "upcoming" definition in
+        # lib/upcoming.ts: air_date strictly in the future, show not
+        # archived) — single filter()/exclude() calls so both conditions
+        # join the same Watchlist row rather than any row for the show.
+        upcoming_count = (
+            CachedEpisode.objects.filter(
+                show__watchlist_entries__user_id=pref.user_id,
+                air_date__gt=today,
+                air_date__lte=week_ahead,
+            )
+            .exclude(
+                show__watchlist_entries__user_id=pref.user_id,
+                show__watchlist_entries__status=Watchlist.Status.ARCHIVED,
+            )
+            .distinct()
+            .count()
+        )
+
+        watched_parts = []
+        if episodes_watched:
+            watched_parts.append(f"{episodes_watched} episode{'s' if episodes_watched != 1 else ''}")
+        if movies_watched:
+            watched_parts.append(f"{movies_watched} movie{'s' if movies_watched != 1 else ''}")
+        body = f"You watched {' and '.join(watched_parts)} this week"
+        if top_show:
+            body += f", mostly {top_show['episode__show__title']}"
+        body += "."
+        if upcoming_count:
+            body += f" {upcoming_count} new episode{'s' if upcoming_count != 1 else ''} airing in the next 7 days."
+
         notify_users(
             [pref.user_id],
             title="Your weekly recap",
@@ -748,6 +800,14 @@ def run_tvtime_import(self, job_id: str):
         # already off the request path.
         recalculate_user_badges(user.id)
         recalculate_watch_streak(user.id)
+
+        # Same bulk_create signal-bypass reason as above: signals.py's
+        # cache-invalidation receivers never fired for any of this job's
+        # writes, so the Shows/Movies Hub response cache needs an explicit
+        # bust here or it would keep serving pre-import data for up to
+        # CACHE_TTL_SECONDS after a big import completes.
+        cache.delete(watchlist_cache_key(user.id))
+        cache.delete(movie_watchlist_cache_key(user.id))
 
         job.status = ImportJob.Status.SUCCESS
         job.payload = {}  # staged input is dead weight once the run is truly over

@@ -15,7 +15,7 @@ from core.auth_views import (
     PasswordResetVerifyView,
     RegisterView,
 )
-from core.profile_views import AvatarOptionsView, ProfileView
+from core.profile_views import AvatarOptionsView, ProfileStatsResyncView, ProfileView
 from core.search_views import (
     EpisodeCreditsView,
     EpisodeDetailView,
@@ -89,6 +89,7 @@ urlpatterns = [
     # Profile & Settings
     path("profile/", ProfileView.as_view(), name="profile"),
     path("profile/avatar-options/", AvatarOptionsView.as_view(), name="profile-avatar-options"),
+    path("profile/resync-stats/", ProfileStatsResyncView.as_view(), name="profile-resync-stats"),
     path("notifications/preferences/", NotificationPreferenceView.as_view(), name="notification-preferences"),
     # Movies
     path("movies/watchlist/", MovieWatchlistView.as_view(), name="movies-watchlist"),
@@ -137,6 +138,10 @@ urlpatterns = [
     path("", include("core.review_urls")),
     # Analytics & Insights
     path("", include("core.analytics_urls")),
+    # User-created lists ("Movies2026", etc.)
+    path("", include("core.lists_urls")),
+    # Personalized cross-library recommendations
+    path("", include("core.recommendations_urls")),
     # Movie Detail Suite (TMDB proxy)
     path("movies/<int:tmdb_id>/detail/", MovieDetailView.as_view(), name="movie-detail"),
     path("movies/<int:tmdb_id>/credits/", MovieCreditsView.as_view(), name="movie-credits"),

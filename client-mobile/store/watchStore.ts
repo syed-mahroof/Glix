@@ -227,6 +227,10 @@ export interface MovieWatchlistItem {
   movie: MovieEntry;
   added_at: string;
   updated_at: string;
+  /** When this movie was actually marked watched (null if never/not yet) —
+   *  distinct from updated_at, which bumps on any change to the tracking
+   *  row. Powers the Movies Hub's "Last Watched" pill sort. */
+  watched_at: string | null;
 }
 
 export interface MovieWatchlistBuckets {
@@ -397,6 +401,7 @@ interface WatchStoreState extends AnalyticsSlice {
   isLoadingMovies: boolean;
   isLoadingHistory: boolean;
   isLoadingProfile: boolean;
+  isResyncingStats: boolean;
   error: string | null;
 
   /** List vs. large poster grid — shared across every primary media list
@@ -416,6 +421,11 @@ interface WatchStoreState extends AnalyticsSlice {
   fetchHistory: (page?: number) => Promise<void>;
   fetchProfile: () => Promise<void>;
   updateProfilePicture: (url: string) => Promise<boolean>;
+  /** Recomputes total_time_watched (+ returns verified shows/movies counts)
+   *  from source-of-truth rows on the backend, replacing whatever drift the
+   *  incremental F()-expression counter accumulated. See Profile Hub's
+   *  stats card — a tap-to-sync action, not a passive refetch. */
+  resyncStats: () => Promise<boolean>;
   toggleWatchState: (episodeId: number) => Promise<void>;
   bulkToggleWatchState: (episodeIds: number[], watched: boolean) => Promise<void>;
   setCatchupPreference: (showId: number, ignoreCatchup: boolean) => Promise<void>;
@@ -498,6 +508,7 @@ export const useWatchStore = create<WatchStoreState>()(
   isLoadingMovies: false,
   isLoadingHistory: false,
   isLoadingProfile: false,
+  isResyncingStats: false,
   error: null,
 
   preferredLayout: 'list',
@@ -581,6 +592,27 @@ export const useWatchStore = create<WatchStoreState>()(
       return true;
     } catch (error) {
       set({ profile: previousProfile, error: extractErrorMessage(error) });
+      return false;
+    }
+  },
+
+  resyncStats: async () => {
+    set({ isResyncingStats: true, error: null });
+    try {
+      const response = await api.post<{
+        total_time_watched: number;
+        shows_count: number;
+        movies_count: number;
+      }>('/profile/resync-stats/');
+      set((state) => ({
+        profile: state.profile
+          ? { ...state.profile, total_time_watched: response.data.total_time_watched }
+          : state.profile,
+        isResyncingStats: false,
+      }));
+      return true;
+    } catch (error) {
+      set({ error: extractErrorMessage(error), isResyncingStats: false });
       return false;
     }
   },

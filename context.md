@@ -221,6 +221,7 @@ watchtracker/                           ← project root
 | POST | `/api/episode/interaction/` | EpisodeInteractionView | Emotion + MVP vote |
 | GET/PATCH | `/api/profile/` | ProfileView | PATCH body `{"profile_picture": "https://..."}` |
 | **NEW** GET | `/api/profile/avatar-options/` | AvatarOptionsView | Real TMDB `/person/popular` headshots for the avatar picker's "Cast" tab (24h cache) |
+| **NEW (Phase 70)** POST | `/api/profile/resync-stats/` | ProfileStatsResyncView | Recomputes `total_time_watched` from a true `Sum()` over WatchState/MovieWatchState (not the incrementally-maintained counter); returns verified shows/movies counts too. Backs the Profile Hub's tap-to-sync stat cards |
 | GET/PATCH | `/api/notifications/preferences/` | NotificationPreferenceView | push_token + the 2 toggles now actually drive sends — see Phase 31 |
 | GET | `/api/movies/watchlist/` | MovieWatchlistView | |
 | POST | `/api/movies/watch-state/toggle/` | MovieWatchStateToggleView | |
@@ -261,6 +262,11 @@ watchtracker/                           ← project root
 | GET | `/api/analytics/achievements/` | | |
 | POST | `/api/import/tvtime/` | TVTimeImportView | Enqueues only — returns `202 {job_id, total, status}` |
 | GET | `/api/import/status/<uuid:job_id>/` | ImportJobStatusView | Poll progress + final counts; scoped to the requesting user |
+| **NEW (Phase 70)** GET/POST | `/api/lists/` | CustomListsView | User-created lists ("Movies2026", etc — distinct from Watchlist/MovieWatchlist). GET returns item_count + up to 4 cover posters per list in O(1) queries; POST quick-creates by name |
+| **NEW (Phase 70)** GET/PATCH/DELETE | `/api/lists/<id>/` | CustomListDetailView | List metadata + full items (GET), rename/description/privacy (PATCH), delete (DELETE) — ownership via inline `get_object_or_404(..., user=request.user)`, this codebase's established convention |
+| **NEW (Phase 70)** POST | `/api/lists/items/toggle/` | CustomListItemToggleView | Presence-based add/remove of a `{media_type, tmdb_id}` item to/from a list, same pattern as WatchStateToggleView |
+| **NEW (Phase 70)** GET | `/api/lists/membership/?media_type=&tmdb_id=` | CustomListMembershipView | Which of the user's lists already contain this item — powers AddToListSheet's checkmarks |
+| **NEW (Phase 71)** GET | `/api/recommendations/for-you/` | ForYouRecommendationsView | Cross-library personalized recs — seeds from the user's own top-watched shows/movies, merges TMDB's per-title `/recommendations` across seeds, ranks by cross-seed frequency. Excludes already-tracked titles. Cached 6h per user (no signal invalidation — staleness has no correctness cost here, unlike the watchlist cache) |
 
 ---
 
@@ -284,6 +290,8 @@ watchtracker/                           ← project root
 | `MovieWatchState` | user, movie, watched_at | Presence-based; `watched_at` is `default=timezone.now`, same reason as `WatchState` |
 | `MovieWatchlist` | user, movie, added_at | |
 | `ImportJob` (NEW) | user, status, payload, total, processed, shows_imported/skipped, movies_imported/skipped, episodes_marked, errors, detail, finished_at | One TV Time import run. `payload` stages the normalised export (cleared on finish) — a full export is ~3MB, too big for a Celery arg. Polled by `ImportJobStatusView` |
+| `CustomList` (NEW Phase 70) | user, name, description, is_private, created_at, updated_at | User-created list, e.g. "Movies2026" — distinct from Watchlist/MovieWatchlist's built-in "want to watch" trackers |
+| `CustomListItem` (NEW Phase 70) | list (FK), media_type (tv/movie), tmdb_id, added_at | Stores tmdb_id directly, not a DB FK to CachedShow/MovieCache — no contenttypes/GenericForeignKey precedent in this codebase; safe because those cache rows are only ever `update_or_create`'d, never deleted, and the only entry point (a detail screen) already forces the row to exist. `unique_together(list, media_type, tmdb_id)` |
 
 ---
 
@@ -379,6 +387,17 @@ vote quality:
 - **NEW** `resetFilters()` — clears genre/sort back to defaults + clears `filteredResults`
 - `setSelectedGenreId`/`setSortOrder` now auto-fetch (or clear, if back to fully-default) — **fixed**, previously set state with no effect on any list
 - **NEW** `genreCovers: Record<'tv'|'movie', Record<genreId, GenreCover>>` + `fetchGenreCovers(segment)` — real TMDB images for `GenreGrid.tsx`, cached per segment
+- **NEW (Phase 71)** `forYou: ForYouItem[]` / `isLoadingForYou` / `forYouError` / `hasFetchedForYou` — cross-library recommendations, independent of `activeSegment` (mixed tv/movie results); `fetchForYou()` calls `/api/recommendations/for-you/` once per session (backend already caches 6h server-side). Rendered as a "For You" row on the Discover Hub, above the curated sections
+
+### listsStore.ts (in-memory, NOT persisted) — NEW (Phase 70)
+Mirrors `discoverStore.ts`'s "kept separate to avoid polluting the persisted slice" precedent — nothing here is worth surviving an app restart offline.
+- `lists[]` / `isLoadingLists` — the user's custom lists (name, item_count, cover_posters, is_private)
+- `activeListDetail` / `isLoadingListDetail` — one list's full item detail, backing `app/lists/[id].tsx`
+- `membership: Record<"media_type:tmdb_id", listId[]>` — which lists contain the item currently open in `AddToListSheet`
+- `fetchLists()`, `createList(name, description?, isPrivate?)`, `renameList()`, `deleteList()`, `fetchListDetail(listId)`, `fetchMembership(mediaType, tmdbId)`
+- `toggleListItem(listId, mediaType, tmdbId)` — optimistic add/remove, same snapshot-then-rollback-on-error convention as `watchStore.ts`
+
+Also new on `watchStore.ts` (Phase 70): `resyncStats()` / `isResyncingStats` — calls `POST /profile/resync-stats/`, updates `profile.total_time_watched` from the verified recomputed value. Backs the Profile Hub's tap-to-sync stat cards.
 
 ---
 
@@ -998,9 +1017,18 @@ const BASE_URL = 'http://192.168.x.x:8000/api';
 
 ## Test Suite
 
-**Backend** (`pytest`): 6 tests, all passing as of 2026-07-13
+**Backend** (`pytest`): 93 tests across 12 files, all passing as of 2026-07-29 (Phase 71) — run inside the `watchtracker_backend` container (`docker exec watchtracker_backend python -m pytest core/`), not the host venv (see AUDIT.md Phase 69/70 notes on a stray native Postgres on port 5432)
 - `test_models.py`: UserProfile auto-creation, watchlist operations
-- `test_views.py`: Auth endpoints, watchlist CRUD, show detail
+- `test_views.py`: Auth endpoints, watchlist CRUD, show detail, discover filters
+- `test_analytics_views.py` (Phase 70): achievements/dashboard regression coverage
+- `test_watchlist_cache.py` (Phase 70): response-cache hit + signal-based invalidation on toggle
+- `test_profile_views.py` (Phase 70): stats resync recomputation
+- `test_lists_views.py` (Phase 70): Add-to-List CRUD, toggle, ownership
+- `test_tasks.py` (NEW Phase 71): weekly digest content (episodes+movies+top show, upcoming-count, archived-show exclusion, inactive-user skip)
+- `test_recommendations_views.py` (NEW Phase 71): For You auth/empty-library/exclusion/caching
+- `test_reviews.py`, `test_services.py`, `test_social_auth.py`, `test_password_reset.py`, `test_tvtime_import.py`
+
+**Frontend** (`jest`): 2 suites (`dateFormat.test.ts`, `watchStore.test.ts`), 3 tests, both passing as of Phase 71 — `watchStore.test.ts` was previously silently failing to even run (AsyncStorage has no native module under Jest); fixed via a new `jest.setup.js` mock. No component-level test added for the achievements/analytics `ErrorState` wiring (Phase 71) — this codebase has no component-rendering test precedent yet (both existing suites are non-component unit tests); verified via `tsc --noEmit` + manual code review instead, consistent with the "test suites verify correctness, not feature feel" caveat below.
 
 **Frontend** (Jest): Basic component tests configured via `jest-expo`
 

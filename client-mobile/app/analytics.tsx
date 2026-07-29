@@ -25,6 +25,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 
 import AmbientGlow from '../components/AmbientGlow';
 import CompletionRateCard from '../components/CompletionRateCard';
+import ErrorState from '../components/ErrorState';
 import GenreChart from '../components/GenreChart';
 import GlassSurface from '../components/GlassSurface';
 import PressableScale from '../components/PressableScale';
@@ -71,6 +72,7 @@ export default function AnalyticsScreen() {
   const completion = useWatchStore((s) => s.completion);
   const monthlyRecap = useWatchStore((s) => s.monthlyRecap);
   const isLoading = useWatchStore((s) => s.isLoadingAnalytics);
+  const analyticsError = useWatchStore((s) => s.analyticsError);
 
   // This screen's stack lives inside the Profile tab and is frozen (not
   // unmounted) when the user switches tabs — a mount-only fetch left every
@@ -130,78 +132,99 @@ export default function AnalyticsScreen() {
           {isLoading && <ActivityIndicator color={c.accentInk} size="small" />}
         </View>
 
-        {/* Hero stat */}
-        <GlassSurface radius={20} level={2} style={[styles.heroCard, { borderColor: c.accentDim }]}>
-          <AmbientGlow size={260} />
-          <Text style={[styles.heroValue, { color: c.accentInk }]}>{totalHoursWhole}</Text>
-          <View style={styles.heroUnitRow}>
-            <Text style={[styles.heroUnit, monoLabelStyle, { color: c.textSecondary }]}>hours watched</Text>
-            {hoursTrend && (
-              <TrendChip direction={hoursTrend.direction} label={hoursTrend.label} />
+        {/* A failed fetch left `dashboard` null while every stat below reads
+            `dashboard?.x ?? 0` — rendering a confident-looking all-zero
+            dashboard with no indication anything went wrong. Same silent-
+            failure class fixed on achievements.tsx/statistics.tsx; show a
+            real retry card instead of a fabricated "0 episodes, 0 shows". */}
+        {analyticsError && !dashboard && !isLoading ? (
+          <ErrorState
+            message={analyticsError}
+            onRetry={() => {
+              fetchDashboard();
+              fetchGenres();
+              fetchHeatmap();
+              fetchStreak();
+              fetchCompletion();
+              fetchMonthlyRecap();
+            }}
+          />
+        ) : (
+          <>
+            {/* Hero stat */}
+            <GlassSurface radius={20} level={2} style={[styles.heroCard, { borderColor: c.accentDim }]}>
+              <AmbientGlow size={260} />
+              <Text style={[styles.heroValue, { color: c.accentInk }]}>{totalHoursWhole}</Text>
+              <View style={styles.heroUnitRow}>
+                <Text style={[styles.heroUnit, monoLabelStyle, { color: c.textSecondary }]}>hours watched</Text>
+                {hoursTrend && (
+                  <TrendChip direction={hoursTrend.direction} label={hoursTrend.label} />
+                )}
+              </View>
+              <View style={[styles.heroDivider, { backgroundColor: c.hairline }]} />
+              <View style={styles.heroSubStats}>
+                <View style={styles.heroSubStat}>
+                  <Text style={[styles.heroSubValue, { color: c.textPrimary }]}>{dashboard?.total_episodes_watched ?? 0}</Text>
+                  <Text style={[styles.heroSubLabel, monoLabelStyle, { color: c.textTertiary }]}>Episodes</Text>
+                </View>
+                <View style={styles.heroSubStat}>
+                  <Text style={[styles.heroSubValue, { color: c.textPrimary }]}>{dashboard?.total_shows_tracked ?? 0}</Text>
+                  <Text style={[styles.heroSubLabel, monoLabelStyle, { color: c.textTertiary }]}>Shows</Text>
+                </View>
+                <View style={styles.heroSubStat}>
+                  <Text style={[styles.heroSubValue, { color: c.textPrimary }]}>{dashboard?.badges_earned ?? 0}</Text>
+                  <Text style={[styles.heroSubLabel, monoLabelStyle, { color: c.textTertiary }]}>Badges</Text>
+                </View>
+              </View>
+            </GlassSurface>
+
+            {/* Time breakdown */}
+            <TimeWatchedCard
+              days={Math.floor((dashboard?.total_minutes_watched ?? 0) / 1440)}
+              hours={Math.floor(((dashboard?.total_minutes_watched ?? 0) % 1440) / 60)}
+              minutes={(dashboard?.total_minutes_watched ?? 0) % 60}
+            />
+
+            {/* Quick stats row — sequenced entrance, not a dump */}
+            <View style={styles.statsRow}>
+              {quickStats.map((stat, index) => (
+                <Animated.View
+                  key={stat.label}
+                  entering={reduceMotion ? undefined : staggerEntering(index)}
+                  style={styles.statCard}
+                >
+                  <StatsCard label={stat.label} value={stat.value} Icon={stat.Icon} />
+                </Animated.View>
+              ))}
+            </View>
+
+            {/* Streak card */}
+            {streak && (
+              <WatchStreakCard
+                currentStreak={streak.current_streak}
+                longestStreak={streak.longest_streak}
+                totalDays={streak.total_streak_days}
+                recentActivity={streak.recent_activity}
+              />
             )}
-          </View>
-          <View style={[styles.heroDivider, { backgroundColor: c.hairline }]} />
-          <View style={styles.heroSubStats}>
-            <View style={styles.heroSubStat}>
-              <Text style={[styles.heroSubValue, { color: c.textPrimary }]}>{dashboard?.total_episodes_watched ?? 0}</Text>
-              <Text style={[styles.heroSubLabel, monoLabelStyle, { color: c.textTertiary }]}>Episodes</Text>
-            </View>
-            <View style={styles.heroSubStat}>
-              <Text style={[styles.heroSubValue, { color: c.textPrimary }]}>{dashboard?.total_shows_tracked ?? 0}</Text>
-              <Text style={[styles.heroSubLabel, monoLabelStyle, { color: c.textTertiary }]}>Shows</Text>
-            </View>
-            <View style={styles.heroSubStat}>
-              <Text style={[styles.heroSubValue, { color: c.textPrimary }]}>{dashboard?.badges_earned ?? 0}</Text>
-              <Text style={[styles.heroSubLabel, monoLabelStyle, { color: c.textTertiary }]}>Badges</Text>
-            </View>
-          </View>
-        </GlassSurface>
 
-        {/* Time breakdown */}
-        <TimeWatchedCard
-          days={Math.floor((dashboard?.total_minutes_watched ?? 0) / 1440)}
-          hours={Math.floor(((dashboard?.total_minutes_watched ?? 0) % 1440) / 60)}
-          minutes={(dashboard?.total_minutes_watched ?? 0) % 60}
-        />
+            {/* Completion rings */}
+            {completion && (
+              <CompletionRateCard
+                episodePct={completion.episode_completion_pct}
+                seasonPct={completion.season_completion_pct}
+                showPct={completion.show_completion_pct}
+                moviePct={0}
+              />
+            )}
 
-        {/* Quick stats row — sequenced entrance, not a dump */}
-        <View style={styles.statsRow}>
-          {quickStats.map((stat, index) => (
-            <Animated.View
-              key={stat.label}
-              entering={reduceMotion ? undefined : staggerEntering(index)}
-              style={styles.statCard}
-            >
-              <StatsCard label={stat.label} value={stat.value} Icon={stat.Icon} />
-            </Animated.View>
-          ))}
-        </View>
+            {/* Genre chart */}
+            {genres.length > 0 && <GenreChart data={genres} />}
 
-        {/* Streak card */}
-        {streak && (
-          <WatchStreakCard
-            currentStreak={streak.current_streak}
-            longestStreak={streak.longest_streak}
-            totalDays={streak.total_streak_days}
-            recentActivity={streak.recent_activity}
-          />
+            {/* Heatmap */}
+            {heatmap.length > 0 && <WatchHeatmap data={heatmap} />}
+          </>
         )}
-
-        {/* Completion rings */}
-        {completion && (
-          <CompletionRateCard
-            episodePct={completion.episode_completion_pct}
-            seasonPct={completion.season_completion_pct}
-            showPct={completion.show_completion_pct}
-            moviePct={0}
-          />
-        )}
-
-        {/* Genre chart */}
-        {genres.length > 0 && <GenreChart data={genres} />}
-
-        {/* Heatmap */}
-        {heatmap.length > 0 && <WatchHeatmap data={heatmap} />}
 
         {/* Navigation rows */}
         <Text style={[styles.sectionTitle, { color: c.textPrimary }]}>More Insights</Text>

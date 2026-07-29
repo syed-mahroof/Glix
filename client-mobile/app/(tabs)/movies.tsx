@@ -5,7 +5,7 @@
 // the same deferred-Zustand-update anti-jump pattern.
 
 import { FlashList } from '@shopify/flash-list';
-import { Film } from 'lucide-react-native';
+import { Film, ListChecks } from 'lucide-react-native';
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   ActivityIndicator,
@@ -24,16 +24,16 @@ import MoviePosterCard from '../../components/MoviePosterCard';
 import MovieRow from '../../components/MovieRow';
 import PressableScale from '../../components/PressableScale';
 import { useAppTheme } from '../../lib/theme';
-import { useDiscoverStore } from '../../store/discoverStore';
 import { MovieWatchlistItem, useWatchStore } from '../../store/watchStore';
 
 // ─── Filter categories ────────────────────────────────────────────────────────
 
-type FilterKey = 'WATCH_NEXT' | 'WATCHED';
+type FilterKey = 'WATCH_NEXT' | 'WATCHED' | 'LAST_WATCHED';
 
 const FILTERS: { key: FilterKey; label: string }[] = [
   { key: 'WATCH_NEXT', label: 'WATCH NEXT' },
   { key: 'WATCHED', label: 'WATCHED' },
+  { key: 'LAST_WATCHED', label: 'LAST WATCHED' },
 ];
 
 function formatRuntime(minutes: number): string {
@@ -118,6 +118,16 @@ export default function MoviesScreen() {
   // We keep items in the list until onAnimationComplete fires to avoid jumps.
   const rows = useMemo<MovieWatchlistItem[]>(() => {
     if (filter === 'WATCH_NEXT') return movieWatchlist.watch_next;
+    if (filter === 'LAST_WATCHED') {
+      // Client-side re-sort of the already-loaded (and typically short —
+      // see MovieWatchlistView's own docstring) watched bucket, by actual
+      // watch time rather than the list's default -updated_at order. Cheap
+      // enough in a useMemo that it isn't worth a new backend query param
+      // on a shared, already-cached endpoint (see cache_keys.py).
+      return [...movieWatchlist.watched].sort(
+        (a, b) => new Date(b.watched_at ?? 0).getTime() - new Date(a.watched_at ?? 0).getTime()
+      );
+    }
     return movieWatchlist.watched;
   }, [movieWatchlist, filter]);
 
@@ -198,12 +208,11 @@ export default function MoviesScreen() {
               styles.headerIcon,
               { backgroundColor: c.glassFill, borderColor: c.hairline },
             ]}
-            onPress={() => {
-              useDiscoverStore.getState().setActiveSegment('movie');
-              router.push('/(tabs)/discover');
-            }}
+            onPress={() => router.push('/lists' as any)}
+            accessibilityRole="button"
+            accessibilityLabel="My Lists"
           >
-            <Film color={c.accentInk} size={22} strokeWidth={2} />
+            <ListChecks color={c.accentInk} size={22} strokeWidth={2} />
           </PressableScale>
         </View>
       </View>

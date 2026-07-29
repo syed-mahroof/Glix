@@ -4,6 +4,7 @@
 // and the top-shows/top-genres rows, matching analytics.tsx's dashboard
 // treatment. No TrendChip: this screen doesn't fetch a prior-year figure to
 // compare hours against, so a verdict chip would have nothing real to show.
+import * as Sharing from 'expo-sharing';
 import { useRouter } from 'expo-router';
 import {
   Activity,
@@ -11,10 +12,11 @@ import {
   Calendar,
   Film,
   Flame,
+  Share2,
   Star,
   Trophy,
 } from 'lucide-react-native';
-import React, { useEffect } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Image,
@@ -25,10 +27,14 @@ import {
 } from 'react-native';
 import Animated from 'react-native-reanimated';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import { captureRef } from 'react-native-view-shot';
 
 import AmbientGlow from '../components/AmbientGlow';
+import ErrorState from '../components/ErrorState';
 import PressableScale from '../components/PressableScale';
+import Snackbar from '../components/Snackbar';
 import YearReviewCard from '../components/YearReviewCard';
+import { extractErrorMessage } from '../lib/errors';
 import { staggerEntering, usePrefersReducedMotion } from '../lib/motion';
 import { useAppTheme } from '../lib/theme';
 import { useWatchStore } from '../store/watchStore';
@@ -53,10 +59,36 @@ export default function YearReviewScreen() {
   const fetchYearReview = useWatchStore((s) => s.fetchYearReview);
   const yearReview = useWatchStore((s) => s.yearReview);
   const isLoading = useWatchStore((s) => s.isLoadingAnalytics);
+  const analyticsError = useWatchStore((s) => s.analyticsError);
+
+  const shareCardRef = useRef<View>(null);
+  const [isSharing, setIsSharing] = useState(false);
+  const [shareErrorMsg, setShareErrorMsg] = useState<string | null>(null);
 
   useEffect(() => {
     fetchYearReview(CURRENT_YEAR);
   }, [fetchYearReview]);
+
+  const handleShare = async () => {
+    if (isSharing || !shareCardRef.current) return;
+    setIsSharing(true);
+    try {
+      const available = await Sharing.isAvailableAsync();
+      if (!available) {
+        setShareErrorMsg('Sharing is not available on this device.');
+        return;
+      }
+      const uri = await captureRef(shareCardRef, { format: 'png', quality: 1 });
+      await Sharing.shareAsync(uri, {
+        mimeType: 'image/png',
+        dialogTitle: `My ${CURRENT_YEAR} on Glix`,
+      });
+    } catch (err) {
+      setShareErrorMsg(extractErrorMessage(err));
+    } finally {
+      setIsSharing(false);
+    }
+  };
 
   return (
     <SafeAreaView style={[styles.container, { backgroundColor: c.bg }]} edges={['top']}>
@@ -72,6 +104,14 @@ export default function YearReviewScreen() {
           </View>
           {isLoading ? (
             <ActivityIndicator color={c.accentInk} size="small" />
+          ) : yearReview ? (
+            <PressableScale onPress={handleShare} hitSlop={8} disabled={isSharing}>
+              {isSharing ? (
+                <ActivityIndicator color={c.accentInk} size="small" />
+              ) : (
+                <Share2 color={c.textPrimary} size={20} />
+              )}
+            </PressableScale>
           ) : (
             <View style={{ width: 22 }} />
           )}
@@ -82,6 +122,8 @@ export default function YearReviewScreen() {
             <ActivityIndicator color={c.accentInk} size="large" />
             <Text style={[styles.loadingText, { color: c.textTertiary }]}>Crunching your year...</Text>
           </View>
+        ) : analyticsError ? (
+          <ErrorState message={analyticsError} onRetry={() => fetchYearReview(CURRENT_YEAR)} />
         ) : !yearReview ? (
           <View style={styles.emptyState}>
             <Text style={styles.emptyEmoji}>🎬</Text>
@@ -90,14 +132,43 @@ export default function YearReviewScreen() {
           </View>
         ) : (
           <>
-            {/* Hero — hours watched */}
-            <View style={[styles.heroCard, { backgroundColor: c.glassFill, borderColor: c.accentDim }]}>
+            {/* Hero — hours watched. Also the share-card capture target:
+                collapsable={false} is required on Android or the view can
+                be optimized out of the native tree with nothing to snapshot,
+                a well-known react-native-view-shot gotcha. Brand label + the
+                two brag lines only render inside this card so the shared
+                image reads on its own outside the app (an Instagram Story,
+                no header/chrome around it) — same reason this uses the
+                opaque c.bg instead of the translucent c.glassFill token:
+                glassFill is designed to composite over the screen behind
+                it, which isn't there once captured standalone. */}
+            <View
+              ref={shareCardRef}
+              collapsable={false}
+              style={[styles.heroCard, { backgroundColor: c.bg, borderColor: c.accentDim }]}
+            >
               <AmbientGlow size={240} />
+              <Text style={[styles.shareBrand, { color: c.accentInk }]}>GLIX</Text>
               <Text style={[styles.heroLabel, { color: c.textSecondary }]}>You watched</Text>
               <Text style={[styles.heroValue, { color: c.accentInk }]}>{yearReview.hours_watched}h</Text>
               <Text style={[styles.heroSub, { color: c.textSecondary }]}>
                 across {yearReview.episodes_watched} episodes
               </Text>
+              {(yearReview.most_watched_show || yearReview.favorite_genre) && (
+                <View style={[styles.shareBragRow, { borderTopColor: c.hairline }]}>
+                  {yearReview.most_watched_show && (
+                    <Text style={[styles.shareBragText, { color: c.textPrimary }]} numberOfLines={1}>
+                      Most watched: {yearReview.most_watched_show.title}
+                    </Text>
+                  )}
+                  {yearReview.favorite_genre && (
+                    <Text style={[styles.shareBragText, { color: c.textPrimary }]} numberOfLines={1}>
+                      Favourite genre: {yearReview.favorite_genre}
+                    </Text>
+                  )}
+                </View>
+              )}
+              <Text style={[styles.shareYear, { color: c.textTertiary }]}>{CURRENT_YEAR}</Text>
             </View>
 
             {/* Horizontal card carousel — sequenced entrance */}
@@ -204,6 +275,11 @@ export default function YearReviewScreen() {
           </>
         )}
       </ScrollView>
+      <Snackbar
+        visible={!!shareErrorMsg}
+        message={shareErrorMsg ?? ''}
+        onDismiss={() => setShareErrorMsg(null)}
+      />
     </SafeAreaView>
   );
 }
@@ -277,6 +353,30 @@ const styles = StyleSheet.create({
   heroSub: {
     fontSize: 14,
     fontWeight: '500',
+  },
+  shareBrand: {
+    fontSize: 13,
+    fontWeight: '900',
+    letterSpacing: 3,
+    marginBottom: 4,
+  },
+  shareBragRow: {
+    marginTop: 14,
+    paddingTop: 14,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    alignItems: 'center',
+    gap: 4,
+    width: '100%',
+  },
+  shareBragText: {
+    fontSize: 13,
+    fontWeight: '600',
+  },
+  shareYear: {
+    fontSize: 12,
+    fontWeight: '700',
+    marginTop: 14,
+    letterSpacing: 1,
   },
   carousel: {
     marginHorizontal: -20,

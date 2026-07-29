@@ -2,23 +2,8 @@
 backend/core/permissions.py
 
 Object-level permission helpers layered on top of IsAuthenticated
-(the project-wide default in settings.REST_FRAMEWORK).
+(the project-wide default in settings.REST_FRAMEWORK). Every current
+endpoint does its per-object ownership check ad hoc inline instead
+(e.g. get_object_or_404(Model, pk=pk, user=request.user)) — no shared
+helper is in use yet, so none is defined here right now.
 """
-
-from rest_framework.permissions import BasePermission
-
-
-class IsOwner(BasePermission):
-    """
-    Grants access only when the object's `user` field matches the
-    requesting user. Used for any endpoint that accepts a primary key
-    for a row that must belong to the caller (e.g. a specific
-    WatchState or EpisodeInteraction), preventing IDOR-style access
-    to another user's tracking data.
-    """
-
-    message = "You do not have permission to access this resource."
-
-    def has_object_permission(self, request, view, obj) -> bool:
-        owner = getattr(obj, "user", None)
-        return owner is not None and owner == request.user

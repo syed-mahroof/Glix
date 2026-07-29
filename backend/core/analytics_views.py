@@ -230,16 +230,6 @@ def _compute_badge_progress(user, profile: UserProfile, streak: WatchStreak) -> 
     )
     max_per_show = max((r["c"] for r in per_show), default=0)
 
-    # Completed shows: aired == watched (aired > 0)
-    today = timezone.now().date()
-    completed_shows = Watchlist.objects.filter(user=user).annotate(
-        aired=Count("show__episodes", filter=Q(show__episodes__air_date__lte=today)),
-        watched=Count(
-            "show__episodes__watch_states",
-            filter=Q(show__episodes__watch_states__user=user),
-        ),
-    ).filter(aired__gt=0, watched__gte=models_aired()).count()
-
     def _pct(val, threshold):
         return min(1.0, round(val / threshold, 3)) if threshold else 0.0
 
@@ -357,11 +347,6 @@ def _compute_badge_progress(user, profile: UserProfile, streak: WatchStreak) -> 
     return results
 
 
-def models_aired():
-    """Placeholder for annotated field name — used in filter."""
-    return "watched"
-
-
 # ─── Views ────────────────────────────────────────────────────────────────
 
 class AnalyticsDashboardView(APIView):
@@ -390,11 +375,6 @@ class AnalyticsDashboardView(APIView):
                 distinct=True,
             ),
         )
-        shows_completed = completed_qs.filter(aired__gt=0, watched__gte=Count(
-            "show__episodes",
-            filter=Q(show__episodes__air_date__lte=today),
-            distinct=True,
-        )).count()
         # Simpler proxy: aired == watched for non-zero aired
         shows_completed = sum(
             1 for e in completed_qs if e.aired > 0 and e.watched >= e.aired

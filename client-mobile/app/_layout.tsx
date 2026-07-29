@@ -272,6 +272,14 @@ function RootLayoutInner() {
                 name="movie/[id]"
                 options={{ headerShown: false, animation: 'slide_from_right' }}
               />
+              <Stack.Screen
+                name="lists/index"
+                options={{ headerShown: false, animation: 'slide_from_right' }}
+              />
+              <Stack.Screen
+                name="lists/[id]"
+                options={{ headerShown: false, animation: 'slide_from_right' }}
+              />
             </Stack>
           )}
           <BadgeUnlockModal

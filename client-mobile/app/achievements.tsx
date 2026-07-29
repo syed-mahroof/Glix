@@ -20,6 +20,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 
 import AchievementCard from '../components/AchievementCard';
 import AmbientGlow from '../components/AmbientGlow';
+import ErrorState from '../components/ErrorState';
 import MilestoneCard from '../components/MilestoneCard';
 import PressableScale from '../components/PressableScale';
 import { staggerEntering, usePrefersReducedMotion } from '../lib/motion';
@@ -52,11 +53,32 @@ export default function AchievementsScreen() {
   const fetchAchievements = useWatchStore((s) => s.fetchAchievements);
   const achievements = useWatchStore((s) => s.achievements);
   const isLoading = useWatchStore((s) => s.isLoadingAnalytics);
+  const analyticsError = useWatchStore((s) => s.analyticsError);
   const [activeTab, setActiveTab] = useState<CategoryTab>('All');
 
   useEffect(() => {
     fetchAchievements();
   }, [fetchAchievements]);
+
+  // A failed fetch left `achievements` at its initial [] with no error UI —
+  // indistinguishable on screen from "you have earned zero badges" (backend
+  // always returns all BADGE_ORDER entries, so a genuine empty state is
+  // never actually 0 items). Show a real retry card instead of silently
+  // rendering "0 / 0, no badges" for what is really a network failure.
+  if (analyticsError && achievements.length === 0 && !isLoading) {
+    return (
+      <SafeAreaView style={[styles.container, { backgroundColor: c.bg }]} edges={['top']}>
+        <View style={styles.headerRow}>
+          <PressableScale onPress={() => router.back()} hitSlop={8}>
+            <ArrowLeft color={c.textPrimary} size={22} />
+          </PressableScale>
+          <Text style={[styles.headerTitle, { color: c.textPrimary }]}>Achievements</Text>
+          <View style={{ width: 22 }} />
+        </View>
+        <ErrorState message={analyticsError} onRetry={fetchAchievements} />
+      </SafeAreaView>
+    );
+  }
 
   const filteredItems = achievements.filter((item) => {
     if (activeTab === 'All') return true;

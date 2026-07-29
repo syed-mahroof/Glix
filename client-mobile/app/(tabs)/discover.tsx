@@ -335,6 +335,8 @@ export default function DiscoverScreen() {
     isFilterActive,
     setSelectedGenreId,
     fetchGenreCovers,
+    forYou,
+    fetchForYou,
   } = useDiscoverStore();
   const filterActive = isFilterActive();
   const { theme } = useAppTheme();
@@ -355,6 +357,7 @@ export default function DiscoverScreen() {
   // Initial feed fetch
   useEffect(() => {
     fetchFeed('tv');
+    fetchForYou();
   }, []);
 
   // Genre Grid cover images — fetched (and cached) per segment
@@ -622,6 +625,11 @@ export default function DiscoverScreen() {
             {currentFeed?.hero && currentFeed.hero.length > 0 && (
               <HeroCarousel items={currentFeed.hero} />
             )}
+
+            {/* For You — cross-library recommendations, independent of the
+                tv/movie segment toggle below (mixed media types), so it
+                sits above the segment-specific curated sections. */}
+            <HorizontalMediaList title="For You" items={forYou} />
 
             {/* Sections */}
             <View style={styles.feedContent}>

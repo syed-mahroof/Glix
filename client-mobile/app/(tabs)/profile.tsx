@@ -25,6 +25,7 @@ import {
   CheckCircle,
   XCircle,
   AlertTriangle,
+  RefreshCw,
 } from 'lucide-react-native';
 import React, { useCallback, useMemo, useState } from 'react';
 import {
@@ -42,6 +43,7 @@ import AvatarPickerModal from '../../components/AvatarPickerModal';
 import GlassSurface from '../../components/GlassSurface';
 import PressableScale from '../../components/PressableScale';
 import { ProgressRing } from '../../components/ProgressRing';
+import Snackbar from '../../components/Snackbar';
 import { BADGE_META } from '../../lib/badges';
 import {
   exportGlixData,
@@ -63,12 +65,15 @@ export default function ProfileScreen() {
   const fetchWatchlist = useWatchStore((state) => state.fetchWatchlist);
   const fetchMovieWatchlist = useWatchStore((state) => state.fetchMovieWatchlist);
   const updateProfilePicture = useWatchStore((state) => state.updateProfilePicture);
+  const resyncStats = useWatchStore((state) => state.resyncStats);
+  const isResyncingStats = useWatchStore((state) => state.isResyncingStats);
   const watchlist = useWatchStore((state) => state.watchlist);
   const movieWatchlist = useWatchStore((state) => state.movieWatchlist);
 
   const [isImporting, setIsImporting] = useState(false);
   const [isExporting, setIsExporting] = useState(false);
   const [avatarPickerVisible, setAvatarPickerVisible] = useState(false);
+  const [syncSnackbarVisible, setSyncSnackbarVisible] = useState(false);
   // Live job state while an import runs, driving the ProgressRing.
   // Null whenever no import is in flight.
   const [importJob, setImportJob] = useState<ImportResult | null>(null);
@@ -249,6 +254,24 @@ export default function ProfileScreen() {
     [updateProfilePicture]
   );
 
+  // ── Stats resync ─────────────────────────────────────────────────────────
+  // total_time_watched is an incrementally-maintained counter — correct in
+  // the common case, but with no built-in way to notice or correct drift.
+  // Shows/Movies counts can't actually drift (they're a plain length of the
+  // already-fetched arrays), but a full re-fetch is included anyway so one
+  // tap is a genuine "re-derive everything from source data right now", not
+  // just the one field that could theoretically be wrong. Small utility
+  // action, not a celebration moment — a brief Snackbar, not a modal.
+  const handleResyncStats = useCallback(async () => {
+    if (isResyncingStats) return;
+    const [ok] = await Promise.all([resyncStats(), fetchWatchlist(), fetchMovieWatchlist()]);
+    if (ok) {
+      setSyncSnackbarVisible(true);
+    } else {
+      Alert.alert('Sync Failed', 'Could not refresh your stats. Please try again.');
+    }
+  }, [isResyncingStats, resyncStats, fetchWatchlist, fetchMovieWatchlist]);
+
   return (
     <SafeAreaView style={[styles.container, { backgroundColor: c.bg }]} edges={['top']}>
       <ScrollView contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
@@ -287,40 +310,58 @@ export default function ProfileScreen() {
         </View>
 
         {/* ── Social Stats Bar — Shows/Movies only (real data) ──────────────── */}
-        <GlassSurface radius={16} style={styles.socialBar}>
-          <View style={styles.socialItem}>
-            <Text style={[styles.socialCount, monoValueStyle, { color: c.textPrimary }]}>{totalShows}</Text>
-            <Text style={[styles.socialLabel, monoLabelStyle, { color: c.textSecondary }]}>Shows</Text>
-          </View>
-          <View style={[styles.socialDivider, { backgroundColor: c.hairline }]} />
-          <View style={styles.socialItem}>
-            <Text style={[styles.socialCount, monoValueStyle, { color: c.textPrimary }]}>{totalMovies}</Text>
-            <Text style={[styles.socialLabel, monoLabelStyle, { color: c.textSecondary }]}>Movies</Text>
-          </View>
-        </GlassSurface>
+        <PressableScale onPress={handleResyncStats} disabled={isResyncingStats}>
+          <GlassSurface radius={16} style={[styles.socialBar, isResyncingStats && styles.syncingCard]}>
+            <View style={styles.socialItem}>
+              <Text style={[styles.socialCount, monoValueStyle, { color: c.textPrimary }]}>{totalShows}</Text>
+              <Text style={[styles.socialLabel, monoLabelStyle, { color: c.textSecondary }]}>Shows</Text>
+            </View>
+            <View style={[styles.socialDivider, { backgroundColor: c.hairline }]} />
+            <View style={styles.socialItem}>
+              <Text style={[styles.socialCount, monoValueStyle, { color: c.textPrimary }]}>{totalMovies}</Text>
+              <Text style={[styles.socialLabel, monoLabelStyle, { color: c.textSecondary }]}>Movies</Text>
+            </View>
+            {isResyncingStats && (
+              <View style={styles.syncOverlay} pointerEvents="none">
+                <ActivityIndicator color={c.accentInk} size="small" />
+              </View>
+            )}
+          </GlassSurface>
+        </PressableScale>
 
-        {/* ── Watch Time Stats Card ─────────────────────────────────────────── */}
-        <GlassSurface radius={18} style={[styles.statsCard, { borderColor: c.accentDim }]}>
-          <View style={styles.statItem}>
-            <Text style={[styles.statValue, monoValueStyle, { color: c.accentInk }]}>{watchedMonths}</Text>
-            <Text style={[styles.statLabel, monoLabelStyle, { color: c.textSecondary }]}>Months</Text>
-          </View>
-          <View style={[styles.statDivider, { backgroundColor: c.accentDim }]} />
-          <View style={styles.statItem}>
-            <Text style={[styles.statValue, monoValueStyle, { color: c.accentInk }]}>{remainderDays}</Text>
-            <Text style={[styles.statLabel, monoLabelStyle, { color: c.textSecondary }]}>Days</Text>
-          </View>
-          <View style={[styles.statDivider, { backgroundColor: c.accentDim }]} />
-          <View style={styles.statItem}>
-            <Text style={[styles.statValue, monoValueStyle, { color: c.accentInk }]}>{watchedHours}</Text>
-            <Text style={[styles.statLabel, monoLabelStyle, { color: c.textSecondary }]}>Hours</Text>
-          </View>
-          <View style={[styles.statDivider, { backgroundColor: c.accentDim }]} />
-          <View style={styles.statItem}>
-            <Text style={[styles.statValue, monoValueStyle, { color: c.accentInk }]}>{watchedMinutes}</Text>
-            <Text style={[styles.statLabel, monoLabelStyle, { color: c.textSecondary }]}>Mins</Text>
-          </View>
-        </GlassSurface>
+        {/* ── Watch Time Stats Card — tap to resync from source data ────────── */}
+        <PressableScale onPress={handleResyncStats} disabled={isResyncingStats}>
+          <GlassSurface radius={18} style={[styles.statsCard, { borderColor: c.accentDim }, isResyncingStats && styles.syncingCard]}>
+            <View style={styles.statItem}>
+              <Text style={[styles.statValue, monoValueStyle, { color: c.accentInk }]}>{watchedMonths}</Text>
+              <Text style={[styles.statLabel, monoLabelStyle, { color: c.textSecondary }]}>Months</Text>
+            </View>
+            <View style={[styles.statDivider, { backgroundColor: c.accentDim }]} />
+            <View style={styles.statItem}>
+              <Text style={[styles.statValue, monoValueStyle, { color: c.accentInk }]}>{remainderDays}</Text>
+              <Text style={[styles.statLabel, monoLabelStyle, { color: c.textSecondary }]}>Days</Text>
+            </View>
+            <View style={[styles.statDivider, { backgroundColor: c.accentDim }]} />
+            <View style={styles.statItem}>
+              <Text style={[styles.statValue, monoValueStyle, { color: c.accentInk }]}>{watchedHours}</Text>
+              <Text style={[styles.statLabel, monoLabelStyle, { color: c.textSecondary }]}>Hours</Text>
+            </View>
+            <View style={[styles.statDivider, { backgroundColor: c.accentDim }]} />
+            <View style={styles.statItem}>
+              <Text style={[styles.statValue, monoValueStyle, { color: c.accentInk }]}>{watchedMinutes}</Text>
+              <Text style={[styles.statLabel, monoLabelStyle, { color: c.textSecondary }]}>Mins</Text>
+            </View>
+            {isResyncingStats ? (
+              <View style={styles.syncOverlay} pointerEvents="none">
+                <ActivityIndicator color={c.accentInk} size="small" />
+              </View>
+            ) : (
+              <View style={styles.syncHint} pointerEvents="none">
+                <RefreshCw color={c.textTertiary} size={11} strokeWidth={2} />
+              </View>
+            )}
+          </GlassSurface>
+        </PressableScale>
 
         {/* ── Shows Section ─────────────────────────────────────────────────── */}
         <Text style={[styles.sectionTitle, { color: c.textPrimary }]}>Shows</Text>
@@ -513,6 +554,14 @@ export default function ProfileScreen() {
         onSelect={handleSelectAvatar}
       />
 
+      <Snackbar
+        visible={syncSnackbarVisible}
+        message="Stats synced."
+        onDismiss={() => setSyncSnackbarVisible(false)}
+        bottomOffset={100}
+        durationMs={2000}
+      />
+
       {/* ── Custom Import Result Modal ────────────────────────────────────── */}
       <Modal visible={importModal.visible} transparent animationType="fade">
         <View style={styles.modalOverlay}>
@@ -702,6 +751,19 @@ const styles = StyleSheet.create({
   },
   statDivider: {
     width: StyleSheet.hairlineWidth,
+  },
+  syncingCard: {
+    opacity: 0.6,
+  },
+  syncOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  syncHint: {
+    position: 'absolute',
+    top: 8,
+    right: 10,
   },
 
   // Section headers & rows

@@ -11,6 +11,7 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
+import ErrorState from '../components/ErrorState';
 import MonthlySummaryCard from '../components/MonthlySummaryCard';
 import PressableScale from '../components/PressableScale';
 import { useAppTheme, type ThemeColors } from '../lib/theme';
@@ -92,6 +93,7 @@ export default function StatisticsScreen() {
   const statistics = useWatchStore((s) => s.statistics);
   const monthlyRecap = useWatchStore((s) => s.monthlyRecap);
   const isLoading = useWatchStore((s) => s.isLoadingAnalytics);
+  const analyticsError = useWatchStore((s) => s.analyticsError);
 
   const [activeTab, setActiveTab] = useState<TabType>('Monthly');
 
@@ -122,6 +124,21 @@ export default function StatisticsScreen() {
           {isLoading ? <ActivityIndicator color={c.accentInk} size="small" /> : <View style={{ width: 22 }} />}
         </View>
 
+        {/* A failed fetch left every section below silently gated on
+            `statistics`/`monthlyRecap` staying null/[] — visually identical
+            to "you have no watch history yet" rather than a real failure.
+            Same class of bug fixed on achievements.tsx; show a real retry
+            card instead when there's an error and nothing loaded. */}
+        {analyticsError && !statistics && !isLoading && (
+          <ErrorState
+            message={analyticsError}
+            onRetry={() => {
+              fetchStatistics();
+              fetchMonthlyRecap();
+            }}
+          />
+        )}
+
         {/* Watch time summary */}
         {statistics && (
           <View style={[styles.summaryCard, { backgroundColor: c.glassFill, borderColor: c.hairline }]}>
@@ -147,52 +164,56 @@ export default function StatisticsScreen() {
           </View>
         )}
 
-        {/* Chart period selector */}
-        <View style={[styles.tabRow, { backgroundColor: c.glassFill, borderColor: c.hairline }]}>
-          {TABS.map((tab) => (
-            <PressableScale
-              key={tab}
-              style={[styles.tab, activeTab === tab && { backgroundColor: c.accentFill }]}
-              onPress={() => setActiveTab(tab)}
-            >
-              <Text style={[styles.tabText, { color: activeTab === tab ? c.onAccent : c.textSecondary }, activeTab === tab && styles.tabTextActive]}>
-                {tab}
-              </Text>
-            </PressableScale>
-          ))}
-        </View>
-
-        {/* Bar chart */}
-        <View style={[styles.chartCard, { backgroundColor: c.glassFill, borderColor: c.hairline }]}>
-          <Text style={[styles.chartTitle, { color: c.textPrimary }]}>Episodes Watched</Text>
-          {chartData.length > 0 ? (
-            <BarChart data={chartData} labelKey="label" valueKey="episodes_watched" c={c} />
-          ) : (
-            <Text style={[styles.emptyChart, { color: c.textTertiary }]}>No data yet</Text>
-          )}
-        </View>
-
-        {/* Top shows */}
-        {statistics && statistics.top_shows.length > 0 && (
-          <View style={[styles.card, { backgroundColor: c.glassFill, borderColor: c.hairline }]}>
-            <Text style={[styles.sectionTitle, { color: c.textPrimary }]}>Top Shows</Text>
-            {statistics.top_shows.map((show, idx) => (
-              <View key={show.tmdb_id} style={styles.topShowRow}>
-                <Text style={[styles.rank, { color: c.accentInk }]}>{idx + 1}</Text>
-                <Text style={[styles.showTitle, { color: c.textPrimary }]} numberOfLines={1}>{show.title}</Text>
-                <Text style={[styles.showEps, { color: c.textTertiary }]}>{show.episodes_watched} eps</Text>
-              </View>
-            ))}
-          </View>
-        )}
-
-        {/* Monthly recap */}
-        {monthlyRecap.length > 0 && (
+        {!(analyticsError && !statistics) && (
           <>
-            <Text style={[styles.sectionTitle, { color: c.textPrimary }]}>Monthly Recap</Text>
-            {monthlyRecap.filter((m) => m.episodes_watched > 0).map((item) => (
-              <MonthlySummaryCard key={item.month} item={item} />
-            ))}
+            {/* Chart period selector */}
+            <View style={[styles.tabRow, { backgroundColor: c.glassFill, borderColor: c.hairline }]}>
+              {TABS.map((tab) => (
+                <PressableScale
+                  key={tab}
+                  style={[styles.tab, activeTab === tab && { backgroundColor: c.accentFill }]}
+                  onPress={() => setActiveTab(tab)}
+                >
+                  <Text style={[styles.tabText, { color: activeTab === tab ? c.onAccent : c.textSecondary }, activeTab === tab && styles.tabTextActive]}>
+                    {tab}
+                  </Text>
+                </PressableScale>
+              ))}
+            </View>
+
+            {/* Bar chart */}
+            <View style={[styles.chartCard, { backgroundColor: c.glassFill, borderColor: c.hairline }]}>
+              <Text style={[styles.chartTitle, { color: c.textPrimary }]}>Episodes Watched</Text>
+              {chartData.length > 0 ? (
+                <BarChart data={chartData} labelKey="label" valueKey="episodes_watched" c={c} />
+              ) : (
+                <Text style={[styles.emptyChart, { color: c.textTertiary }]}>No data yet</Text>
+              )}
+            </View>
+
+            {/* Top shows */}
+            {statistics && statistics.top_shows.length > 0 && (
+              <View style={[styles.card, { backgroundColor: c.glassFill, borderColor: c.hairline }]}>
+                <Text style={[styles.sectionTitle, { color: c.textPrimary }]}>Top Shows</Text>
+                {statistics.top_shows.map((show, idx) => (
+                  <View key={show.tmdb_id} style={styles.topShowRow}>
+                    <Text style={[styles.rank, { color: c.accentInk }]}>{idx + 1}</Text>
+                    <Text style={[styles.showTitle, { color: c.textPrimary }]} numberOfLines={1}>{show.title}</Text>
+                    <Text style={[styles.showEps, { color: c.textTertiary }]}>{show.episodes_watched} eps</Text>
+                  </View>
+                ))}
+              </View>
+            )}
+
+            {/* Monthly recap */}
+            {monthlyRecap.length > 0 && (
+              <>
+                <Text style={[styles.sectionTitle, { color: c.textPrimary }]}>Monthly Recap</Text>
+                {monthlyRecap.filter((m) => m.episodes_watched > 0).map((item) => (
+                  <MonthlySummaryCard key={item.month} item={item} />
+                ))}
+              </>
+            )}
           </>
         )}
       </ScrollView>

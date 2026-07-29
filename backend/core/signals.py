@@ -14,10 +14,14 @@ import logging
 from datetime import timedelta
 
 from django.conf import settings
+from django.core.cache import cache
+from django.db import transaction
 from django.db.models import Count
-from django.db.models.signals import post_save
+from django.db.models.signals import post_delete, post_save
 from django.dispatch import receiver
 from django.utils import timezone
+
+from core.cache_keys import movie_watchlist_cache_key, watchlist_cache_key
 
 from core.badge_constants import (
     ANIME_GENRES,
@@ -55,7 +59,7 @@ from core.badge_constants import (
     TIME_TITAN_MINUTES,
     THOUSAND_EPISODES_THRESHOLD,
 )
-from core.models import MovieWatchState, UserProfile, WatchState, WatchStreak
+from core.models import MovieWatchlist, MovieWatchState, UserProfile, Watchlist, WatchState, WatchStreak
 
 logger = logging.getLogger(__name__)
 
@@ -253,3 +257,48 @@ def evaluate_movie_badges(sender, instance, created, **kwargs):
         profile.earned_badges = [*profile.earned_badges, BADGE_MOVIE_LOVER]
         profile.save(update_fields=["earned_badges"])
         logger.info("User %s earned badges: ['%s']", instance.user.username, BADGE_MOVIE_LOVER)
+
+
+# ── Response cache invalidation ─────────────────────────────────────────
+# WatchlistView/MovieWatchlistView (core/views.py) cache their expensive
+# full-fetch response per user for a short TTL (core/cache_keys.py). These
+# receivers are the primary invalidation path — hooking the 4 models
+# directly covers every view-layer mutation site without threading a
+# manual cache.delete() through each one individually. on_commit (not a
+# plain delete here) matters: busting the key before the write actually
+# commits would let a concurrent GET land in that window and re-cache the
+# now-stale pre-write data. The one deliberate signal-bypass in this
+# codebase — tasks.py's run_tvtime_import, which uses bulk_create for
+# WatchState/MovieWatchState — busts both keys explicitly itself, right
+# after it calls recalculate_user_badges/recalculate_watch_streak.
+
+def _bust_watchlist_cache(user_id):
+    transaction.on_commit(lambda: cache.delete(watchlist_cache_key(user_id)))
+
+
+def _bust_movie_watchlist_cache(user_id):
+    transaction.on_commit(lambda: cache.delete(movie_watchlist_cache_key(user_id)))
+
+
+@receiver(post_save, sender=Watchlist)
+@receiver(post_delete, sender=Watchlist)
+def invalidate_watchlist_cache(sender, instance, **kwargs):
+    _bust_watchlist_cache(instance.user_id)
+
+
+@receiver(post_save, sender=WatchState)
+@receiver(post_delete, sender=WatchState)
+def invalidate_watchlist_cache_on_watchstate(sender, instance, **kwargs):
+    _bust_watchlist_cache(instance.user_id)
+
+
+@receiver(post_save, sender=MovieWatchlist)
+@receiver(post_delete, sender=MovieWatchlist)
+def invalidate_movie_watchlist_cache(sender, instance, **kwargs):
+    _bust_movie_watchlist_cache(instance.user_id)
+
+
+@receiver(post_save, sender=MovieWatchState)
+@receiver(post_delete, sender=MovieWatchState)
+def invalidate_movie_watchlist_cache_on_watchstate(sender, instance, **kwargs):
+    _bust_movie_watchlist_cache(instance.user_id)

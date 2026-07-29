@@ -716,6 +716,76 @@ class MovieWatchlist(models.Model):
         return f"{self.user.username} → {self.movie.title}"
 
 
+class CustomList(models.Model):
+    """
+    A user-created list (e.g. "Movies2026") for personal organization —
+    distinct from Watchlist/MovieWatchlist, the built-in "want to watch"
+    trackers every tracked show/movie already gets automatically. A show
+    or movie can belong to any number of these independently of its
+    Watchlist/MovieWatchlist state.
+    """
+
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="custom_lists",
+    )
+    name = models.CharField(max_length=100)
+    description = models.CharField(max_length=280, blank=True)
+    is_private = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "custom_list"
+        indexes = [
+            models.Index(fields=["user", "-updated_at"], name="idx_customlist_user_updated"),
+        ]
+        ordering = ["-updated_at"]
+
+    def __str__(self) -> str:
+        return f"{self.user.username}: {self.name}"
+
+
+class CustomListItem(models.Model):
+    """
+    One show/movie in a CustomList. Stores media_type + tmdb_id directly
+    rather than a Django FK to CachedShow/MovieCache: an item must
+    polymorphically reference either table, and this codebase has no
+    GenericForeignKey/contenttypes precedent to build on. Safe without a
+    DB-level FK because CachedShow/MovieCache rows are only ever
+    update_or_create'd, never deleted (see TMDBService), and the only way
+    to add an item is from a show/movie detail screen the user already has
+    open — which itself just forced that exact row to exist via
+    get_show_details()/get_movie_details().
+    """
+
+    class MediaType(models.TextChoices):
+        TV = "tv", "TV Show"
+        MOVIE = "movie", "Movie"
+
+    list = models.ForeignKey(CustomList, on_delete=models.CASCADE, related_name="items")
+    media_type = models.CharField(max_length=5, choices=MediaType.choices)
+    tmdb_id = models.PositiveIntegerField()
+    added_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "custom_list_item"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["list", "media_type", "tmdb_id"], name="unique_list_media_tmdb"
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["list"], name="idx_customlistitem_list"),
+            models.Index(fields=["media_type", "tmdb_id"], name="idx_customlistitem_media_tmdb"),
+        ]
+        ordering = ["-added_at"]
+
+    def __str__(self) -> str:
+        return f"{self.list.name}: {self.media_type}#{self.tmdb_id}"
+
+
 class ShowReview(models.Model):
     """
     A user's personal 1-5 star rating + optional note for a show

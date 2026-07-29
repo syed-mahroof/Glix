@@ -9,6 +9,7 @@ API key comfortably under rate limits regardless of user count.
 
 import logging
 import re
+import threading
 from datetime import timedelta
 from typing import Any, Optional
 
@@ -55,6 +56,7 @@ if not any(isinstance(f, _RedactApiKeyFilter) for f in _urllib3_pool_logger.filt
 
 
 _shared_tmdb_session: Optional[requests.Session] = None
+_shared_tmdb_session_lock = threading.Lock()
 
 
 def _get_shared_tmdb_session() -> requests.Session:
@@ -62,37 +64,48 @@ def _get_shared_tmdb_session() -> requests.Session:
     One `requests.Session` (with its connection pool + retry adapter) per
     process, lazily built on first use and reused by every `TMDBService()`
     instantiation after that — see the comment in `TMDBService.__init__`.
+
+    Lock-guarded: gunicorn now runs this process with multiple threads
+    (render-start.sh, --worker-class gthread), so the first few concurrent
+    requests after a cold start could otherwise race this check-then-set
+    and each build their own throwaway Session before the global settles.
+    Harmless on its own (each Session is independently valid), but the lock
+    makes it deterministic for the same cost a single dict lookup already has.
     """
     global _shared_tmdb_session
     if _shared_tmdb_session is not None:
         return _shared_tmdb_session
 
-    from requests.adapters import HTTPAdapter
-    from urllib3.util.retry import Retry
+    with _shared_tmdb_session_lock:
+        if _shared_tmdb_session is not None:
+            return _shared_tmdb_session
 
-    session = requests.Session()
-    # total=4/backoff_factor=1 previously had a worst case of 1+2+4+8=15s of
-    # pure backoff sleep alone (urllib3's exponential formula), on top of the
-    # actual request time per attempt — easily 15-20s+ for a single TMDB call
-    # that keeps hitting 429/5xx. Several views (DiscoverFeedView, movie/show
-    # detail's parallel credits/providers/recommendations fetches) make
-    # multiple TMDB calls per request, compounding the odds any one of them
-    # hits this. That could exceed the frontend's axios timeout (lib/api.ts)
-    # even though the backend was still working — surfacing as a raw
-    # "Network Error" to the user for what was actually a transient TMDB
-    # rate-limit. Tightened to keep worst-case backoff bounded
-    # (0.5+1+2=3.5s) while still absorbing a transient blip.
-    retry_strategy = Retry(
-        total=3,
-        status_forcelist=[429, 500, 502, 503, 504],
-        allowed_methods=["HEAD", "GET", "OPTIONS"],
-        backoff_factor=0.5,
-    )
-    adapter = HTTPAdapter(max_retries=retry_strategy, pool_maxsize=20)
-    session.mount("https://", adapter)
-    session.mount("http://", adapter)
-    _shared_tmdb_session = session
-    return session
+        from requests.adapters import HTTPAdapter
+        from urllib3.util.retry import Retry
+
+        session = requests.Session()
+        # total=4/backoff_factor=1 previously had a worst case of 1+2+4+8=15s of
+        # pure backoff sleep alone (urllib3's exponential formula), on top of the
+        # actual request time per attempt — easily 15-20s+ for a single TMDB call
+        # that keeps hitting 429/5xx. Several views (DiscoverFeedView, movie/show
+        # detail's parallel credits/providers/recommendations fetches) make
+        # multiple TMDB calls per request, compounding the odds any one of them
+        # hits this. That could exceed the frontend's axios timeout (lib/api.ts)
+        # even though the backend was still working — surfacing as a raw
+        # "Network Error" to the user for what was actually a transient TMDB
+        # rate-limit. Tightened to keep worst-case backoff bounded
+        # (0.5+1+2=3.5s) while still absorbing a transient blip.
+        retry_strategy = Retry(
+            total=3,
+            status_forcelist=[429, 500, 502, 503, 504],
+            allowed_methods=["HEAD", "GET", "OPTIONS"],
+            backoff_factor=0.5,
+        )
+        adapter = HTTPAdapter(max_retries=retry_strategy, pool_maxsize=20)
+        session.mount("https://", adapter)
+        session.mount("http://", adapter)
+        _shared_tmdb_session = session
+        return session
 
 
 class TMDBServiceError(Exception):
