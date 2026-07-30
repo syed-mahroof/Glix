@@ -13,17 +13,6 @@
 python manage.py migrate --noinput
 python manage.py collectstatic --noinput
 
-# TEMP: bootstraps an admin user from env vars since the free tier has no
-# Shell access to run createsuperuser interactively. --noinput exits non-zero
-# if the username already exists, so `|| true` keeps startup from dying on
-# every later boot once the account exists. Remove this block (and the three
-# DJANGO_SUPERUSER_* env vars in the Render dashboard) once logged in.
-if [ -n "$DJANGO_SUPERUSER_USERNAME" ]; then
-  python manage.py createsuperuser --noinput \
-    --username "$DJANGO_SUPERUSER_USERNAME" \
-    --email "$DJANGO_SUPERUSER_EMAIL" || true
-fi
-
 celery -A config beat -l INFO &
 celery -A config worker --concurrency=1 -l INFO &
 # --workers 1 (not more): a 2nd worker process would duplicate this whole
