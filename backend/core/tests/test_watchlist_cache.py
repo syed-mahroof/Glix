@@ -90,6 +90,46 @@ def test_watchlist_all_reflects_watch_state_toggle(api_client, create_user):
     assert response.data["up_to_date"]["count"] == 1
 
 
+# bulk-toggle (Cascade Catch-Up) uses WatchState.bulk_create, which Django
+# never fires post_save signals for — so signals.py's own cache-bust
+# receiver, wired to that signal, silently never runs for this endpoint.
+# Regression coverage for the fix (views.py's watched=True branch now busts
+# the cache itself after the batch, the same way run_tvtime_import works
+# around the identical gap for its own bulk_create).
+@pytest.mark.django_db(transaction=True)
+def test_watchlist_all_reflects_bulk_toggle_cascade_catch_up(api_client, create_user):
+    user = create_user()
+    api_client.force_authenticate(user=user)
+
+    show = CachedShow.objects.create(tmdb_id=5003, title="Cascade Show", status=CachedShow.Status.ENDED)
+    episodes = [
+        CachedEpisode.objects.create(
+            show=show, season_number=1, episode_number=n, tmdb_id=50030 + n,
+            air_date="2026-01-01", runtime_minutes=20,
+        )
+        for n in range(1, 4)
+    ]
+    Watchlist.objects.create(user=user, show=show)
+
+    url = reverse("watchlist") + "?page_size=all"
+    response = api_client.get(url)
+    assert response.data["to_watch"]["count"] == 1
+
+    bulk_response = api_client.post(
+        reverse("watch-state-bulk-toggle"),
+        {"episode_ids": [ep.tmdb_id for ep in episodes], "watched": True},
+        format="json",
+    )
+    assert bulk_response.status_code == 200
+
+    # Without the cache-bust fix this would still read count == 1 (stale) /
+    # up_to_date == 0, since bulk_create never triggered signals.py's
+    # invalidation receiver.
+    response = api_client.get(url)
+    assert response.data["to_watch"]["count"] == 0
+    assert response.data["up_to_date"]["count"] == 1
+
+
 # ── MovieWatchlistView response cache + watched_at annotation ──────────────
 
 @pytest.mark.django_db(transaction=True)

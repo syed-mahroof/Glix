@@ -72,6 +72,104 @@ export function formatDayBadge(airDate: string, now: Date): string {
   return `${diffDays}D`;
 }
 
+/**
+ * How many milliseconds `timeZone` is ahead of UTC at a given instant.
+ *
+ * JS can format an instant *into* an IANA zone but has no built-in way to
+ * go the other way (wall clock in a zone -> instant), which is exactly what
+ * an air time needs: TVmaze gives "21:30" plus "America/New_York", and the
+ * correct offset for that depends on the episode's own date because of DST.
+ * Formatting the instant in the target zone and re-reading the fields back
+ * as if they were UTC recovers the offset for that specific moment.
+ *
+ * `hour12: false` can legitimately yield hour "24" for midnight on some
+ * engines, hence the `% 24`.
+ */
+function zoneOffsetMs(instant: Date, timeZone: string): number {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone,
+    hour12: false,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+  }).formatToParts(instant);
+
+  const field: Record<string, number> = {};
+  for (const part of parts) {
+    if (part.type !== 'literal') field[part.type] = Number(part.value);
+  }
+  const asIfUtc = Date.UTC(
+    field.year,
+    field.month - 1,
+    field.day,
+    field.hour % 24,
+    field.minute,
+    field.second
+  );
+  return asIfUtc - instant.getTime();
+}
+
+/**
+ * The exact instant an episode airs, from its air date plus the show's
+ * network slot — `airsTime` ("21:30") interpreted in `airsTimezone`
+ * ("America/New_York"), both from TVmaze via the backend (CachedShow,
+ * core/airtime.py). Returns null whenever the show has no known slot,
+ * which is the common case for streaming originals; callers fall back to
+ * date-only behaviour rather than inventing a time.
+ *
+ * Two passes: the first offset lookup uses the wall clock read as UTC
+ * (off by up to a day's worth of offset), the second re-reads the offset
+ * at the corrected instant. That converges everywhere except inside a
+ * DST fold, where either answer is defensible for a broadcast slot.
+ */
+export function airDateTimeInstant(
+  airDate: string,
+  airsTime: string | null | undefined,
+  airsTimezone: string | null | undefined
+): Date | null {
+  if (!airsTime || !airsTimezone) return null;
+  const match = /^(\d{1,2}):(\d{2})/.exec(airsTime);
+  if (!match) return null;
+
+  const [year, month, day] = airDate.split('-').map(Number);
+  if (!year || !month || !day) return null;
+
+  try {
+    const wallClockAsUtc = Date.UTC(year, month - 1, day, Number(match[1]), Number(match[2]));
+    const firstPass = new Date(wallClockAsUtc - zoneOffsetMs(new Date(wallClockAsUtc), airsTimezone));
+    const instant = new Date(wallClockAsUtc - zoneOffsetMs(firstPass, airsTimezone));
+    return Number.isNaN(instant.getTime()) ? null : instant;
+  } catch {
+    // A zone name the engine's ICU data doesn't carry. Showing no time is
+    // strictly better than showing a time that's silently in the wrong zone.
+    return null;
+  }
+}
+
+/**
+ * The device-local clock time an episode airs — "9:30 PM" — or null when
+ * the show has no known broadcast slot. This is the piece TMDB simply
+ * cannot provide (its episode payload is a bare `air_date` with no time),
+ * which is why the countdown it fed always ran to local midnight and so
+ * always ended in "00m".
+ */
+export function formatLocalAirTime(
+  airDate: string,
+  airsTime: string | null | undefined,
+  airsTimezone: string | null | undefined
+): string | null {
+  const instant = airDateTimeInstant(airDate, airsTime, airsTimezone);
+  if (!instant) return null;
+  try {
+    return new Intl.DateTimeFormat('en-US', { hour: 'numeric', minute: '2-digit' }).format(instant);
+  } catch {
+    return null;
+  }
+}
+
 /** "3 DAYS AGO" / "YESTERDAY" for an already-aired, unmarked episode — more
  *  useful than a flat "OVERDUE" label now that these are bounded to recent
  *  releases and the user's question is "how far behind am I?". */

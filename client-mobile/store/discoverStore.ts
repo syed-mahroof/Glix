@@ -100,10 +100,14 @@ interface DiscoverState {
   genreCovers: Record<ActiveSegment, Record<number, GenreCover>>;
   isLoadingGenreCovers: boolean;
 
-  // "For You" cross-library recommendations — mixed tv/movie, independent
-  // of activeSegment, so it isn't keyed per-segment like feedData.
-  forYou: ForYouItem[];
-  hasFetchedForYou: boolean;
+  // "For You" cross-library recommendations. Keyed per-segment like
+  // feedData now (2026-07-31 fix) — the backend seeds/ranks shows and
+  // movies completely separately (recommendations_views.py), so the
+  // client must not collapse the two into one shared list either, or
+  // the Series and Movies tabs would keep showing whichever segment
+  // fetched first.
+  forYou: Record<ActiveSegment, ForYouItem[]>;
+  hasFetchedForYou: Record<ActiveSegment, boolean>;
   isLoadingForYou: boolean;
   forYouError: string | null;
 
@@ -125,7 +129,7 @@ interface DiscoverState {
   resetFilters: () => void;
   isFilterActive: () => boolean;
   fetchGenreCovers: (segment: ActiveSegment) => Promise<void>;
-  fetchForYou: () => Promise<void>;
+  fetchForYou: (segment: ActiveSegment) => Promise<void>;
 }
 
 export const useDiscoverStore = create<DiscoverState>((set, get) => ({
@@ -160,8 +164,8 @@ export const useDiscoverStore = create<DiscoverState>((set, get) => ({
   genreCovers: { tv: {}, movie: {} },
   isLoadingGenreCovers: false,
 
-  forYou: [],
-  hasFetchedForYou: false,
+  forYou: { tv: [], movie: [] },
+  hasFetchedForYou: { tv: false, movie: false },
   isLoadingForYou: false,
   forYouError: null,
 
@@ -179,6 +183,9 @@ export const useDiscoverStore = create<DiscoverState>((set, get) => ({
     } else if (!get().feedData[segment]) {
       get().fetchFeed(segment);
     }
+    // "For You" is per-segment now — switching to Movies must fetch the
+    // movie feed the first time, same cache-once guard fetchFeed uses.
+    get().fetchForYou(segment);
   },
 
   setSearchQuery: (query) => set({ searchQuery: query }),
@@ -250,15 +257,22 @@ export const useDiscoverStore = create<DiscoverState>((set, get) => ({
     }
   },
 
-  fetchForYou: async () => {
-    // Backend caches the computed feed per-user for 6h already (see
-    // RECOMMENDATIONS_CACHE_TTL_SECONDS); this guard just avoids a redundant
-    // request within the same app session, same idea as fetchFeed's cache.
-    if (get().hasFetchedForYou) return;
+  fetchForYou: async (segment) => {
+    // Backend caches the computed feed per-user *and per-segment* for 6h
+    // already (recommendations_cache_key now takes media_type); this guard
+    // just avoids a redundant request within the same app session, same
+    // idea as fetchFeed's per-segment cache.
+    if (get().hasFetchedForYou[segment]) return;
     set({ isLoadingForYou: true, forYouError: null });
     try {
-      const response = await api.get<ForYouItem[]>('/recommendations/for-you/');
-      set({ forYou: response.data, hasFetchedForYou: true, isLoadingForYou: false });
+      const response = await api.get<ForYouItem[]>('/recommendations/for-you/', {
+        params: { type: segment },
+      });
+      set((state) => ({
+        forYou: { ...state.forYou, [segment]: response.data },
+        hasFetchedForYou: { ...state.hasFetchedForYou, [segment]: true },
+        isLoadingForYou: false,
+      }));
     } catch (err) {
       set({ forYouError: extractErrorMessage(err), isLoadingForYou: false });
     }

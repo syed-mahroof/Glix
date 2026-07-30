@@ -1,6 +1,12 @@
 import React from 'react';
 import { FlexWidget, TextWidget, ImageWidget, ListWidget } from 'react-native-android-widget';
-import { formatDayBadge, formatUpcomingHeaderLabel } from '../../lib/dateFormat';
+import {
+  airDateTimeInstant,
+  formatCountdown,
+  formatDayBadge,
+  formatLocalAirTime,
+  formatUpcomingHeaderLabel,
+} from '../../lib/dateFormat';
 import type { WidgetPayload, WidgetUpcomingItem } from '../../lib/widgetPayload';
 
 const ACCENT = '#E4FA1A';
@@ -49,13 +55,38 @@ function DayHeader({ label, count }: { label: string; count: number }) {
   );
 }
 
+/**
+ * The countdown + clock time for one row, both computed against `now` at
+ * render rather than read from the snapshot — the widget redraws on
+ * Android's own updatePeriodMillis schedule, routinely while the app isn't
+ * running, so anything precomputed at sync time would be stale by exactly
+ * however long ago the last sync was.
+ *
+ * The countdown targets the real air instant when the show has a known
+ * broadcast slot, and local midnight otherwise (the old behaviour, and the
+ * reason every slot-less countdown still ends in "00m").
+ */
+function rowTiming(show: WidgetUpcomingItem, now: Date) {
+  const instant = airDateTimeInstant(show.air_date, show.airs_time, show.airs_timezone);
+  const { formatted, dayOfWeek } = formatCountdown(
+    instant ?? new Date(`${show.air_date}T00:00:00`),
+    now
+  );
+  return {
+    countdown: `${formatted} (${dayOfWeek})`,
+    airTime: formatLocalAirTime(show.air_date, show.airs_time, show.airs_timezone),
+  };
+}
+
 // Flat row on the widget's own black ground (no nested card fill/margins),
 // which is what removes the boxed-in look and the dead gap along the right
 // edge the per-row card treatment produced. The day count stays as the big
-// right-aligned number.
+// right-aligned number, with the air time stacked beneath it.
 function UpcomingRow({ show }: { show: WidgetUpcomingItem }) {
   const uri = widgetUri(show);
-  const dayBadge = formatDayBadge(show.air_date, new Date());
+  const now = new Date();
+  const dayBadge = formatDayBadge(show.air_date, now);
+  const { countdown, airTime } = rowTiming(show, now);
   return (
     <FlexWidget
       clickAction={uri ? 'OPEN_URI' : 'OPEN_APP'}
@@ -86,20 +117,29 @@ function UpcomingRow({ show }: { show: WidgetUpcomingItem }) {
           maxLines={1}
         />
         <TextWidget
-          text={show.countdown ? `${show.next_episode} • ${show.countdown}` : show.next_episode}
+          text={`${show.next_episode} • ${countdown}`}
           style={{ fontSize: 11, color: SUBTLE, marginTop: 2 }}
           maxLines={1}
         />
       </FlexWidget>
-      <TextWidget
-        text={dayBadge}
-        style={{
-          fontSize: dayBadge === 'TODAY' ? 13 : 19,
-          color: ACCENT,
-          fontWeight: 'bold',
-        }}
-        maxLines={1}
-      />
+      {/* Day badge over air time, right-aligned — the layout the reference
+          widget uses. The time row is dropped entirely (not blanked) for
+          shows with no known slot, so those rows keep the badge vertically
+          centred instead of sitting above an empty line. */}
+      <FlexWidget style={{ flexDirection: 'column', alignItems: 'flex-end' }}>
+        <TextWidget
+          text={dayBadge}
+          style={{
+            fontSize: dayBadge === 'TODAY' ? 13 : 19,
+            color: ACCENT,
+            fontWeight: 'bold',
+          }}
+          maxLines={1}
+        />
+        {airTime ? (
+          <TextWidget text={airTime} style={{ fontSize: 11, color: SUBTLE }} maxLines={1} />
+        ) : null}
+      </FlexWidget>
     </FlexWidget>
   );
 }

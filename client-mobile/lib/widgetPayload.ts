@@ -8,7 +8,7 @@
 // widget added before the app ever synced, or storage cleared underneath it.
 // Both must agree exactly, hence one builder rather than two.
 
-import { formatCountdown, todayLocalIso } from './dateFormat';
+import { todayLocalIso } from './dateFormat';
 import { buildUpcomingItems, pickNextEpisode } from './upcoming';
 import type { WatchlistEntry } from '../store/watchStore';
 
@@ -27,16 +27,32 @@ export interface WidgetUpcomingItem {
   poster_path: string | null;
   next_episode: string;
   air_date: string;
-  countdown: string;
+  /** The show's broadcast slot — wall clock ("21:30") plus its IANA zone
+   *  ("America/New_York"), from TVmaze via the backend. Deliberately raw
+   *  rather than a precomputed "9:30 PM" string: see the note on
+   *  `syncedAt` below for why the widget resolves these itself. Absent
+   *  for shows with no fixed slot, and on snapshots written by an app
+   *  build older than this field — both render as no time line. */
+  airs_time?: string | null;
+  airs_timezone?: string | null;
 }
 
 export interface WidgetPayload {
   watchlist: WidgetWatchlistItem[];
   upcoming: WidgetUpcomingItem[];
   loggedOut?: boolean;
-  /** When the snapshot was built — lets a widget rendering hours later from
-   *  a cached snapshot recompute its own day counts against the real today
-   *  instead of trusting numbers frozen at sync time. */
+  /** When the snapshot was built.
+   *
+   *  Nothing time-relative is ever precomputed into this payload — not the
+   *  day badge, not the countdown, not the air time. A home-screen widget
+   *  redraws on its own schedule (Android's updatePeriodMillis, iOS's
+   *  WidgetKit timeline) long after the app was last open, and frequently
+   *  while the app is not running at all, so any duration baked in at sync
+   *  time is wrong by however long ago that sync happened — a countdown
+   *  written on Monday still reading "2d" on Wednesday. The widgets
+   *  recompute from `air_date`/`airs_time` against the real clock at
+   *  render, which costs nothing and is correct from a snapshot of any
+   *  age. This field is kept for diagnostics and staleness checks only. */
   syncedAt: string;
 }
 
@@ -87,7 +103,6 @@ export function buildWidgetPayload(
     .filter((item) => item.airDate >= todayIso && item.airDate <= windowEndIso)
     .slice(0, UPCOMING_CAP)
     .map((item) => {
-      const { formatted, dayOfWeek } = formatCountdown(new Date(`${item.airDate}T00:00:00`), now);
       return {
         id: item.tmdbShowId,
         episode_id: item.episodeId,
@@ -95,7 +110,8 @@ export function buildWidgetPayload(
         poster_path: item.posterPath,
         next_episode: `S${item.seasonNumber} E${item.episodeNumber}`,
         air_date: item.airDate,
-        countdown: `${formatted} (${dayOfWeek})`,
+        airs_time: item.airsTime,
+        airs_timezone: item.airsTimezone,
       };
     });
 

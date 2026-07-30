@@ -17,8 +17,15 @@ def movie_watchlist_cache_key(user_id) -> str:
     return f"movie_watchlist:{user_id}"
 
 
-def recommendations_cache_key(user_id) -> str:
-    return f"recommendations_for_you:{user_id}"
+def recommendations_cache_key(user_id, media_type: str) -> str:
+    """`media_type` is "tv" or "movie" — the Discover Hub's segment.
+
+    It is part of the key, not an afterthought: the two segments now return
+    genuinely different feeds (different seeds, different candidates), so a
+    single shared key would serve whichever one happened to warm the cache
+    first to both tabs for the next six hours.
+    """
+    return f"recommendations_for_you:{media_type}:{user_id}"
 
 
 # Short on purpose: this is a defense-in-depth backstop, not the primary

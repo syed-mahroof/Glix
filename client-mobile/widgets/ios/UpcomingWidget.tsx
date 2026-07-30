@@ -4,18 +4,27 @@ import { createWidget } from 'expo-widgets';
 import type { WidgetEnvironment } from 'expo-widgets';
 import { VStack, HStack, Text, Image, Spacer } from '@expo/ui/swift-ui';
 import { background, font, foregroundColor, lineLimit, padding } from '@expo/ui/swift-ui/modifiers';
-import { formatDayBadge, formatUpcomingHeaderLabel } from '../../lib/dateFormat';
+import {
+  airDateTimeInstant,
+  formatCountdown,
+  formatDayBadge,
+  formatLocalAirTime,
+  formatUpcomingHeaderLabel,
+} from '../../lib/dateFormat';
 
 export interface UpcomingWidgetShow {
   title: string;
   next_episode: string;
   air_date: string;
   poster_path: string | null;
-  /** Precomputed via lib/dateFormat.ts's formatCountdown() at sync time —
-   *  "3d 05h 12m (Monday)", the exact format the in-app Upcoming tab uses.
-   *  Optional: absent on stale cached widget data written before this
-   *  field existed, falls back to a plain date. */
-  countdown?: string;
+  /** The show's broadcast slot — wall clock ("21:30") and its IANA zone,
+   *  from TVmaze via the backend. Raw rather than a formatted string on
+   *  purpose: the countdown and clock time are resolved at render against
+   *  the live clock (see rowTiming), so a WidgetKit timeline entry
+   *  generated long after the last app sync is still correct. Absent for
+   *  shows with no fixed slot and on pre-existing cached snapshots. */
+  airs_time?: string | null;
+  airs_timezone?: string | null;
 }
 
 export interface UpcomingWidgetProps {
@@ -43,8 +52,22 @@ const NullState = ({ upcoming, loggedOut }: UpcomingWidgetProps) => {
   );
 };
 
-function countdownText(show: UpcomingWidgetShow): string {
-  return show.countdown ?? new Date(show.air_date).toLocaleDateString();
+/** Countdown + clock time for one row, resolved against `now` at render
+ *  rather than at sync time — a WidgetKit timeline entry can be rendered
+ *  well after the app last ran, so a baked-in duration would be stale.
+ *  Mirrors the Android widget's rowTiming exactly. The countdown targets
+ *  the real air instant when the show has a known slot, local midnight
+ *  otherwise. */
+function rowTiming(show: UpcomingWidgetShow, now: Date) {
+  const instant = airDateTimeInstant(show.air_date, show.airs_time, show.airs_timezone);
+  const { formatted, dayOfWeek } = formatCountdown(
+    instant ?? new Date(`${show.air_date}T00:00:00`),
+    now
+  );
+  return {
+    countdown: `${formatted} (${dayOfWeek})`,
+    airTime: formatLocalAirTime(show.air_date, show.airs_time, show.airs_timezone),
+  };
 }
 
 // Flat rows on the widget's own black ground — no nested card fill, border
@@ -52,7 +75,9 @@ function countdownText(show: UpcomingWidgetShow): string {
 // gap along the right edge. The day count stays as the big right-aligned
 // number, matching the Android widget exactly.
 function UpcomingRowView({ show, compact }: { show: UpcomingWidgetShow; compact?: boolean }) {
-  const dayBadge = formatDayBadge(show.air_date, new Date());
+  const now = new Date();
+  const dayBadge = formatDayBadge(show.air_date, now);
+  const { countdown, airTime } = rowTiming(show, now);
   return (
     <HStack alignment="center" spacing={10} modifiers={[padding({ vertical: compact ? 4 : 6 })]}>
       {/* @expo/ui's SwiftUI `Image` bridge (installed ~0.2.0-beta.9) only
@@ -75,19 +100,35 @@ function UpcomingRowView({ show, compact }: { show: UpcomingWidgetShow; compact?
         <Text
           modifiers={[foregroundColor('rgba(255, 255, 255, 0.55)'), font({ size: compact ? 11 : 12 }), lineLimit(1)]}
         >
-          {compact ? show.next_episode : `${show.next_episode} • ${countdownText(show)}`}
+          {compact ? show.next_episode : `${show.next_episode} • ${countdown}`}
         </Text>
       </VStack>
       <Spacer />
-      <Text
-        modifiers={[
-          foregroundColor(ACCENT),
-          font({ size: dayBadge === 'TODAY' ? 13 : compact ? 15 : 20, weight: 'bold' }),
-          lineLimit(1),
-        ]}
-      >
-        {dayBadge}
-      </Text>
+      {/* Day badge over air time, matching the Android widget. The time is
+          omitted rather than blanked when the show has no known slot, so
+          those rows keep the badge vertically centred. */}
+      <VStack alignment="trailing" spacing={0}>
+        <Text
+          modifiers={[
+            foregroundColor(ACCENT),
+            font({ size: dayBadge === 'TODAY' ? 13 : compact ? 15 : 20, weight: 'bold' }),
+            lineLimit(1),
+          ]}
+        >
+          {dayBadge}
+        </Text>
+        {airTime ? (
+          <Text
+            modifiers={[
+              foregroundColor('rgba(255, 255, 255, 0.55)'),
+              font({ size: compact ? 10 : 11 }),
+              lineLimit(1),
+            ]}
+          >
+            {airTime}
+          </Text>
+        ) : null}
+      </VStack>
     </HStack>
   );
 }

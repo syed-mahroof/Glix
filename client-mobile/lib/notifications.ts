@@ -14,7 +14,16 @@ if (!isExpoGo && !isWeb) {
     Notifications = require('expo-notifications');
     Notifications.setNotificationHandler({
       handleNotification: async () => ({
+        // shouldShowAlert is deprecated (still harmless to set) — as of
+        // this expo-notifications version (~0.32) the fields the native
+        // module actually reads for foreground presentation are
+        // shouldShowBanner/shouldShowList; without them a notification
+        // that arrived while the app was open was silently swallowed
+        // instead of shown, which read exactly like "push notifications
+        // don't come" for anyone testing with the app in the foreground.
         shouldShowAlert: true,
+        shouldShowBanner: true,
+        shouldShowList: true,
         shouldPlaySound: true,
         shouldSetBadge: false,
       }),

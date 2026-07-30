@@ -38,6 +38,12 @@ export interface UpcomingItem {
    *  item below — TMDB's next-episode summary has no locally cached
    *  episode row yet, so there's nothing to deep-link to but the show. */
   episodeId: number | null;
+  /** The show's broadcast slot, carried through from Show.airs_time /
+   *  Show.airs_timezone so a consumer can render a real local air time
+   *  without needing the whole Show object. Wall clock + IANA zone, not a
+   *  device-local time — see formatLocalAirTime. */
+  airsTime: string | null;
+  airsTimezone: string | null;
 }
 
 const PAST_WINDOW_MS = PAST_WINDOW_DAYS * 24 * 60 * 60 * 1000;
@@ -86,6 +92,8 @@ export function buildUpcomingItems(entries: WatchlistEntry[]): UpcomingItem[] {
         airDate: missed.air_date!,
         tmdbShowId: show.tmdb_id,
         episodeId: missed.tmdb_id,
+        airsTime: show.airs_time ?? null,
+        airsTimezone: show.airs_timezone ?? null,
       });
     }
 
@@ -102,6 +110,8 @@ export function buildUpcomingItems(entries: WatchlistEntry[]): UpcomingItem[] {
         airDate: episode.air_date,
         tmdbShowId: show.tmdb_id,
         episodeId: episode.tmdb_id,
+        airsTime: show.airs_time ?? null,
+        airsTimezone: show.airs_timezone ?? null,
       });
     }
     // TMDB's next_episode_to_air (see Show.next_episode_*) surfaces a real
@@ -129,6 +139,8 @@ export function buildUpcomingItems(entries: WatchlistEntry[]): UpcomingItem[] {
         airDate: show.next_episode_air_date,
         tmdbShowId: show.tmdb_id,
         episodeId: null,
+        airsTime: show.airs_time ?? null,
+        airsTimezone: show.airs_timezone ?? null,
       });
     }
   }

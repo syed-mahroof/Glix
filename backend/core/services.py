@@ -788,23 +788,48 @@ class TMDBService:
                 f"Season {season_number} of show {tmdb_show_id} unavailable and not cached."
             )
 
-        episodes = []
-        for ep in payload.get("episodes", []):
-            episode, _ = CachedEpisode.objects.update_or_create(
+        # One INSERT ... ON CONFLICT DO UPDATE for the whole season instead
+        # of a SELECT + UPDATE/INSERT per episode (update_or_create). A
+        # season-heavy show (20+ episodes) previously cost 40+ queries here;
+        # a full TV Time import touches hundreds of seasons, so this was a
+        # real chunk of the wall-clock time run_tvtime_import spends inside
+        # its 5-minute-per-chunk budget on a free-tier single-worker DB
+        # connection. auto_now fields aren't populated by bulk_create, so
+        # last_synced_at is set explicitly here.
+        now = timezone.now()
+        rows = [
+            CachedEpisode(
                 tmdb_id=ep["id"],
-                defaults={
-                    "show": show,
-                    "season_number": ep.get("season_number", season_number),
-                    "episode_number": ep.get("episode_number", 0),
-                    "title": ep.get("name", ""),
-                    "overview": ep.get("overview", ""),
-                    "air_date": ep.get("air_date") or None,
-                    "runtime_minutes": ep.get("runtime") or 0,
-                    "still_path": ep.get("still_path"),
-                },
+                show=show,
+                season_number=ep.get("season_number", season_number),
+                episode_number=ep.get("episode_number", 0),
+                title=ep.get("name", ""),
+                overview=ep.get("overview", ""),
+                air_date=ep.get("air_date") or None,
+                runtime_minutes=ep.get("runtime") or 0,
+                still_path=ep.get("still_path"),
+                last_synced_at=now,
             )
-            episodes.append(episode)
-        return episodes
+            for ep in payload.get("episodes", [])
+        ]
+        if rows:
+            CachedEpisode.objects.bulk_create(
+                rows,
+                update_conflicts=True,
+                unique_fields=["tmdb_id"],
+                update_fields=[
+                    "show",
+                    "season_number",
+                    "episode_number",
+                    "title",
+                    "overview",
+                    "air_date",
+                    "runtime_minutes",
+                    "still_path",
+                    "last_synced_at",
+                ],
+            )
+        return list(CachedEpisode.objects.filter(show=show, season_number=season_number))
 
     # ------------------------------------------------------------------
     # Cast / MVP voting support (per-episode, flat list — MVPVotingSheet)
@@ -1005,12 +1030,49 @@ class TMDBService:
     # ------------------------------------------------------------------
     def find_by_external_id(self, external_id: str, external_source: str = "tvdb_id") -> dict[str, Any]:
         """
-        Lookup items via external IDs (IMDb, TVDB, etc.). Useful for data migration.
+        Lookup items via external IDs (IMDb, TVDB, etc.). This is the call
+        run_tvtime_import's _resolve_show_tmdb_id/_resolve_movie_tmdb_id
+        make for EVERY item in an export, on EVERY submission — including a
+        retried/resumed import of a library that already fully resolved
+        last time. A tvdb_id/imdb_id -> TMDB id mapping is essentially
+        permanent (a show doesn't change its external ids), so this was pure
+        waste: a 400+ show library re-hit TMDB's /find/ 400+ times on every
+        single retry before this task ever got to skip an already-imported
+        episode. 30-day cache turns a retried/resumed import's resolution
+        cost into ~zero once the library has been imported once, which is
+        most of what made re-imports slow and failure-prone on a free-tier
+        single-worker deployment.
         """
-        payload = self._request(f"/find/{external_id}", params={"external_source": external_source})
+        payload = self._request(
+            f"/find/{external_id}",
+            params={"external_source": external_source},
+            use_cache=True,
+            cache_ttl=30 * 24 * 3600,
+        )
         if payload is None:
             raise TMDBServiceError(f"Lookup for {external_source} {external_id} failed.")
         return payload
+
+    def get_external_ids(self, tmdb_id: int) -> dict[str, Any]:
+        """
+        TMDB's `/tv/{id}/external_ids` — the TVDB/IMDb ids for a show.
+
+        Only consumer is the TVmaze air-time lookup (core/airtime.py), which
+        needs a non-TMDB id to join on. A show's external ids never change
+        once assigned, so this is cached for 30 days like find_by_external_id
+        above; the pairing means a show costs at most one TMDB call and one
+        TVmaze call per month, not one per refresh sweep.
+
+        Returns {} rather than raising on failure: an unavailable id lookup
+        must degrade to "no air time shown", never fail the show refresh it
+        is a side-quest of.
+        """
+        payload = self._request(
+            f"/tv/{tmdb_id}/external_ids",
+            use_cache=True,
+            cache_ttl=30 * 24 * 3600,
+        )
+        return payload or {}
 
     # ------------------------------------------------------------------
     # Movie Credits & Providers (served from the cached credits block

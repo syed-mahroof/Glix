@@ -146,6 +146,22 @@ class CachedShow(models.Model):
     # a watchlisted show's next season/episode without waiting on
     # get_season_episodes() to have cached that season at all — see
     # lib/upcoming.ts's buildUpcomingItems().
+    # TMDB has no air-*time* data at all: every episode payload carries a
+    # bare `air_date` ("2026-08-03") and nothing else, which is why the
+    # widget's old countdown always counted down to local midnight and so
+    # always ended in "00m". The network's actual broadcast time comes from
+    # TVmaze instead (see core/airtime.py) — `airs_time` is the wall-clock
+    # time in `airs_timezone` (an IANA name like "America/New_York"), the
+    # pair the client needs to render a correct local "9:30 PM" for any
+    # given episode date, DST included. Both blank/null for shows TVmaze
+    # doesn't know, or that have no fixed slot (most streaming originals).
+    airs_time = models.TimeField(null=True, blank=True)
+    airs_timezone = models.CharField(max_length=64, blank=True)
+    # When TVmaze was last asked about this show — including when it
+    # answered "no schedule". Without it, every 6-hourly refresh_show_cache
+    # sweep would re-ask TVmaze about every show forever, and shows with no
+    # air time would be retried hardest. See AIRTIME_RECHECK_AFTER.
+    airtime_checked_at = models.DateTimeField(null=True, blank=True)
     next_episode_air_date = models.DateField(null=True, blank=True)
     next_episode_season_number = models.PositiveIntegerField(null=True, blank=True)
     next_episode_number = models.PositiveIntegerField(null=True, blank=True)
@@ -186,6 +202,14 @@ class CachedEpisode(models.Model):
         help_text="Used to increment/decrement UserProfile.total_time_watched on toggle.",
     )
     still_path = models.CharField(max_length=255, null=True, blank=True)
+    # Set the moment a "new episode" push actually goes out for this
+    # episode, so the periodic refresh sweep can notify on "aired today and
+    # not yet announced" instead of "aired today and was never cached
+    # before". The old condition could essentially never be true: TMDB
+    # publishes episode rows weeks ahead of air date and sync_active_shows
+    # caches them every 6 hours, so by the time air_date == today the
+    # episode was always already known and was excluded from the alert.
+    notified_at = models.DateTimeField(null=True, blank=True)
     last_synced_at = models.DateTimeField(auto_now=True)
 
     class Meta:
@@ -900,6 +924,20 @@ class ImportJob(models.Model):
             "wrong place to put it. Cleared once the run SUCCEEDS; kept on "
             "FAILED (alongside `processed`) so TVTimeImportView can resume "
             "a byte-identical resubmission instead of restarting from zero."
+        ),
+    )
+    payload_fingerprint = models.CharField(
+        max_length=64,
+        blank=True,
+        db_index=True,
+        help_text=(
+            "sha256 of the sorted payload, computed once at job creation. "
+            "TVTimeImportView compares a resubmission's fingerprint against "
+            "this instead of re-fetching and deep-comparing a multi-MB "
+            "`payload` JSONField on every retry — the same resume check for "
+            "a fraction of the CPU/DB cost, which matters on a free-tier "
+            "single-worker box under exactly the retry traffic (a user "
+            "hitting 'try again' after a failed import) this exists to help."
         ),
     )
 

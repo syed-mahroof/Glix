@@ -6,6 +6,8 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 
 import AnimatedSplash from '../components/AnimatedSplash';
 import PressableScale from '../components/PressableScale';
+import { api } from '../lib/api';
+import { registerForPushNotificationsAsync } from '../lib/notifications';
 import { waitForBackend } from '../lib/warmup';
 import { useWatchStore } from '../store/watchStore';
 
@@ -44,6 +46,26 @@ export default function LoadingScreen() {
     // movieWatchlist included so "My Movies" and the widget's movie data
     // are populated from boot, not left at the empty default until the
     // Movies tab happens to mount (see watchStore.ts's partialize comment).
+    //
+    // Push token registration also happens here, not just in _layout.tsx's
+    // cold-start check — this screen is *every* successful login/register/
+    // OAuth's boot path (login.tsx/register.tsx route here via
+    // router.replace('/loading')), while _layout.tsx's effect only fires
+    // when a token was already in SecureStore at process launch. Without
+    // this, a user's very first login on a fresh install never registered
+    // a push token at all until they happened to force-quit and relaunch
+    // the app once already signed in — a real, silent gap matching the
+    // "push notifications never arrive" report, not just a cosmetic one.
+    // Best-effort and fire-and-forget like _layout.tsx's copy: a denied
+    // permission or a dev-client/Expo-Go build (registerForPush... no-ops
+    // to null there) must never block getting into the app.
+    registerForPushNotificationsAsync()
+      .then((pushToken) => {
+        if (pushToken) {
+          api.patch('/notifications/preferences/', { push_token: pushToken }).catch(() => {});
+        }
+      })
+      .catch(() => {});
     await Promise.all([fetchProfile(), fetchWatchlist(), fetchMovieWatchlist()]);
 
     // fetchProfile/fetchWatchlist swallow their own request errors into

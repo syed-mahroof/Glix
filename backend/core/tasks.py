@@ -12,6 +12,9 @@ without blocking any request/response cycle:
 - run_tvtime_import: resolves a staged TV Time export against TMDB and
   writes watch state. Off-request because a full export is ~1,100
   sequential TMDB calls.
+- resume_stalled_imports: periodic safety net that re-enqueues an
+  ImportJob orphaned mid-run (see run_tvtime_import's self-chaining chunk
+  design) instead of leaving it stuck at RUNNING forever.
 """
 
 import logging
@@ -74,6 +77,7 @@ from core.models import (
     WatchState,
     WatchStreak,
 )
+from core.airtime import sync_show_air_time
 from core.push_notifications import notify_users
 from core.services import TMDBService, TMDBServiceError
 
@@ -85,10 +89,23 @@ def refresh_show_cache(self, tmdb_id: int):
     """
     Re-syncs a show's metadata and every season it currently has cached.
 
-    Also diffs episode rows before/after the refresh: any episode that
-    didn't exist before this call and airs today is a genuinely "new
-    episode" event, dispatched to notify_watchers_of_new_episodes() so
-    push alerts go out to users tracking the show.
+    Also announces episodes that aired today and haven't been announced
+    yet, dispatching them to notify_watchers_of_new_episodes() so push
+    alerts go out to users tracking the show.
+
+    That condition used to be "airs today AND was not cached before this
+    call", which in practice never fired: TMDB publishes episode rows weeks
+    ahead of their air date and sync_active_shows re-caches every RETURNING
+    show every 6 hours, so an episode was always already known by the time
+    its air date arrived and was excluded from its own alert. Gating on
+    CachedEpisode.notified_at instead makes the alert fire exactly once per
+    episode, on the first sweep at or after its air date, regardless of how
+    long the row had been cached.
+
+    Also refreshes the show's TVmaze air time (core/airtime.py), which is
+    self-throttled to roughly monthly per show — TMDB has no air-time data
+    of its own, and this background sweep is the only place that lookup
+    happens so no user request ever pays for it.
     """
     tmdb = TMDBService()
     try:
@@ -100,22 +117,46 @@ def refresh_show_cache(self, tmdb_id: int):
         for s in range(1, show.total_seasons + 1):
             cached_seasons.add(s)
 
-        existing_ids = set(show.episodes.values_list("tmdb_id", flat=True))
-
         for season_number in cached_seasons or {1}:
             tmdb.get_season_episodes(tmdb_id, season_number)
 
+        _sync_air_time(show, tmdb)
+
         today = timezone.now().date()
         newly_aired_ids = list(
-            CachedEpisode.objects.filter(show=show, air_date=today)
-            .exclude(tmdb_id__in=existing_ids)
-            .values_list("tmdb_id", flat=True)
+            CachedEpisode.objects.filter(
+                show=show, air_date=today, notified_at__isnull=True
+            ).values_list("tmdb_id", flat=True)
         )
         if newly_aired_ids:
+            # Stamped here, before dispatch, rather than inside the
+            # notification task: refresh_show_cache retries on TMDB errors
+            # and sync_active_shows re-queues every 6h, so claiming the
+            # episodes up front is what makes a duplicate alert impossible
+            # even if this task runs twice concurrently. Worst case on a
+            # failed send is a missed alert, which is the right way for
+            # this to fail.
+            CachedEpisode.objects.filter(tmdb_id__in=newly_aired_ids).update(
+                notified_at=timezone.now()
+            )
             notify_watchers_of_new_episodes.delay(tmdb_id, newly_aired_ids)
     except TMDBServiceError as exc:
         logger.warning("refresh_show_cache failed for %s: %s", tmdb_id, exc)
         raise self.retry(exc=exc)
+
+
+def _sync_air_time(show: CachedShow, tmdb: TMDBService) -> None:
+    """Best-effort TVmaze air-time refresh for one show.
+
+    Deliberately swallows everything: an air time is a cosmetic label on a
+    widget row, and nothing about it is worth failing (or retrying) a show
+    refresh that has already done its real work above.
+    """
+    try:
+        external = tmdb.get_external_ids(show.tmdb_id)
+        sync_show_air_time(show, external.get("tvdb_id"), external.get("imdb_id"))
+    except Exception:  # noqa: BLE001 — see docstring
+        logger.warning("air-time sync skipped for show %s", show.tmdb_id, exc_info=True)
 
 
 @shared_task
@@ -811,16 +852,75 @@ def run_tvtime_import(self, job_id: str):
 
         job.status = ImportJob.Status.SUCCESS
         job.payload = {}  # staged input is dead weight once the run is truly over
+        payload_changed = True
     except Exception as exc:
         logger.exception("run_tvtime_import: job %s failed", job_id)
         job.status = ImportJob.Status.FAILED
         job.detail = str(exc)
         # payload and processed are deliberately left intact — see docstring.
+        payload_changed = False
 
     job.finished_at = timezone.now()
-    job.save()
+    # Explicit update_fields, not a bare save(): on the FAILED path the
+    # multi-MB `payload` field is deliberately untouched above, and a bare
+    # save() would still re-serialize and rewrite that same multi-MB value
+    # back to Postgres on every failure — exactly the path already under
+    # stress (worker/DB contention) that caused the failure in the first
+    # place. Only include "payload" when this run actually changed it
+    # (the SUCCESS path, clearing it to {}).
+    update_fields = ["status", "detail", "finished_at", "updated_at"]
+    if payload_changed:
+        update_fields.append("payload")
+    job.save(update_fields=update_fields)
     logger.info(
         "run_tvtime_import: job %s %s - %d/%d processed, %d shows, %d movies, %d episodes marked",
         job_id, job.status, job.processed, total_items,
         job.shows_imported, job.movies_imported, episodes_marked,
     )
+
+
+# A stalled RUNNING/PENDING job has gone quiet for at least this long.
+# job.processed is saved after every single show/movie (not just once per
+# chunk), so `updated_at` only goes stale on a job that's genuinely stuck —
+# a chunk actually working updates it well inside this window. Comfortably
+# longer than run_tvtime_import's own hard time_limit (330s) so a chunk
+# that is legitimately still mid-flight is never mistaken for stalled.
+STALLED_IMPORT_AFTER = timedelta(minutes=6)
+
+
+@shared_task
+def resume_stalled_imports():
+    """
+    Self-heals an import job that got orphaned mid-run.
+
+    run_tvtime_import chains itself: each chunk that finishes with work
+    remaining calls `run_tvtime_import.apply_async(args=[job_id], countdown=1)`
+    to schedule the next one. That chain has a single point of failure — if
+    the container is killed at just the wrong instant (Render "Instance
+    failed", or render-start.sh's `wait -n` reacting to any of gunicorn/
+    worker/beat dying), or the broker message from that apply_async is
+    simply lost, nothing is left to continue the job. It then sits at
+    RUNNING with whatever `processed` it last reached, forever — exactly
+    the reported symptom (a 466-item import stuck at 69/466 for a day).
+
+    Wired to Celery beat (CELERY_BEAT_SCHEDULE) so this runs every 5
+    minutes without any user action. Re-enqueuing a chunk that turns out
+    to still genuinely be in flight (possible with CELERY_TASK_ACKS_LATE's
+    redelivery) is safe, not just harmless: run_tvtime_import's own
+    `processed` cursor plus _import_one_show/_import_one_movie's dedup
+    against already-written WatchState/MovieWatchState rows makes a
+    duplicate invocation redundant work at worst, never a double-count or
+    corrupted result.
+    """
+    cutoff = timezone.now() - STALLED_IMPORT_AFTER
+    stalled_ids = list(
+        ImportJob.objects.filter(
+            status__in=[ImportJob.Status.PENDING, ImportJob.Status.RUNNING],
+            updated_at__lt=cutoff,
+        ).values_list("id", flat=True)
+    )
+    for job_id in stalled_ids:
+        logger.warning("resume_stalled_imports: re-enqueueing stalled job %s", job_id)
+        run_tvtime_import.delay(str(job_id))
+    if stalled_ids:
+        logger.info("resume_stalled_imports: resumed %d stalled job(s)", len(stalled_ids))

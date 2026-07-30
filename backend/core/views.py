@@ -36,6 +36,7 @@ from core.models import (
 from core.cache_keys import CACHE_TTL_SECONDS, movie_watchlist_cache_key, watchlist_cache_key
 from core.pagination import StandardResultsPagination
 from core.serializers import (
+    LEAN_EPISODE_FIELDS,
     ContinueWatchingSerializer,
     EpisodeInteractionSerializer,
     ImportJobSerializer,
@@ -46,7 +47,7 @@ from core.serializers import (
     WatchHistorySerializer,
 )
 from core.services import ANIME_GENRE_ID, ANIME_ORIGINAL_LANGUAGE, TMDBService, TMDBServiceError
-from core.tasks import run_tvtime_import
+from core.tasks import recalculate_user_badges, recalculate_watch_streak, run_tvtime_import
 
 class HealthCheckView(APIView):
     """
@@ -393,20 +394,9 @@ class WatchlistView(APIView):
 
         today = timezone.now().date()
 
-        watch_state_prefetch = Prefetch(
-            "watch_states",
-            queryset=WatchState.objects.filter(user=request.user),
-            to_attr="prefetched_watch_states",
-        )
-        episode_prefetch = Prefetch(
-            "show__episodes",
-            queryset=CachedEpisode.objects.prefetch_related(watch_state_prefetch),
-        )
-
         entries = (
             Watchlist.objects.filter(user=request.user)
             .select_related("show")
-            .prefetch_related(episode_prefetch)
             .annotate(
                 aired_count=Count(
                     "show__episodes",
@@ -430,6 +420,61 @@ class WatchlistView(APIView):
             .order_by("-updated_at")
         )
 
+        entries = list(entries)
+
+        # Episodes for the whole response in two flat queries, as plain
+        # dicts — never as model instances.
+        #
+        # This replaced a Prefetch("show__episodes") that additionally
+        # nested a per-episode Prefetch of that user's WatchState rows. For
+        # a 400+ show / 12,000+ episode library that materialised ~25,000
+        # Django model objects, then handed each one to a nested DRF
+        # serializer, to produce a body whose episode entries the client
+        # only ever reads seven fields from (LEAN_EPISODE_FIELDS). It was
+        # the single heaviest endpoint in the app by a wide margin: minutes
+        # of CPU and hundreds of MB of RSS on a free-tier container that
+        # shares its 512MB with the celery worker, which is what surfaced
+        # as gunicorn --timeout 60 kills (502 / "Can't reach Glix right
+        # now") and Render "Instance failed" events. Two `values_list`
+        # queries and a dict-building loop are O(episodes) with a tiny
+        # constant instead.
+        show_ids = [entry.show_id for entry in entries]
+        episodes_by_show: dict[int, list] = {show_id: [] for show_id in show_ids}
+        if show_ids:
+            watched_episode_ids = set(
+                WatchState.objects.filter(
+                    user=request.user, episode__show_id__in=show_ids
+                ).values_list("episode_id", flat=True)
+            )
+            episode_rows = (
+                CachedEpisode.objects.filter(show_id__in=show_ids)
+                .order_by("show_id", "season_number", "episode_number")
+                .values_list(*LEAN_EPISODE_FIELDS)
+            )
+            for (
+                tmdb_id,
+                show_id,
+                season_number,
+                episode_number,
+                title,
+                air_date,
+                runtime_minutes,
+            ) in episode_rows.iterator(chunk_size=2000):
+                episodes_by_show[show_id].append(
+                    {
+                        "tmdb_id": tmdb_id,
+                        "show": show_id,
+                        "season_number": season_number,
+                        "episode_number": episode_number,
+                        "title": title,
+                        "air_date": air_date.isoformat() if air_date else None,
+                        "runtime_minutes": runtime_minutes,
+                        "is_watched": tmdb_id in watched_episode_ids,
+                    }
+                )
+
+        serializer_context = {"request": request, "episodes_by_show": episodes_by_show}
+
         buckets = {"to_watch": [], "up_to_date": [], "archived": []}
 
         for entry in entries:
@@ -450,9 +495,9 @@ class WatchlistView(APIView):
         # import showed "My Shows: 40" and upcoming/widget under-reported.
         # The shared page param across all three buckets also made page 2
         # 404 whenever any bucket had <2 pages, so the client could never
-        # walk past page 1 anyway. Full DB work (prefetch of every entry's
-        # episodes) already happens above regardless of pagination, so this
-        # mode only adds serialization + payload — no extra queries.
+        # walk past page 1 anyway. Full DB work (the flat episode fetch
+        # above) already happens regardless of pagination, so this mode
+        # only adds serialization + payload — no extra queries.
         # (fetch_all itself is computed at the top of get(), alongside the
         # cache-hit check, so it's available before the expensive query runs.)
 
@@ -466,7 +511,7 @@ class WatchlistView(APIView):
                     "next": None,
                     "previous": None,
                     "results": WatchlistSerializer(
-                        items, many=True, context={"request": request}
+                        items, many=True, context=serializer_context
                     ).data,
                 }
                 continue
@@ -476,7 +521,7 @@ class WatchlistView(APIView):
             serialized_results = WatchlistSerializer(
                 page if page is not None else items,
                 many=True,
-                context={"request": request},
+                context=serializer_context,
             ).data
 
             if page is not None:
@@ -592,6 +637,14 @@ class BulkWatchStateToggleView(APIView):
     bulk_create/bulk_delete for WatchState rows so the write count
     stays O(1) in DB round trips regardless of how many episodes are
     in the batch.
+
+    bulk_create is signal-silent (Django never fires post_save for it),
+    so the watched=True branch explicitly calls recalculate_user_badges/
+    recalculate_watch_streak and busts the watchlist cache itself after
+    the batch — mirroring how tasks.py's run_tvtime_import works around
+    the exact same gap for its own bulk_create. Without this, a Cascade
+    Catch-Up batch would earn no badges, not count toward the day's watch
+    streak, and keep serving a stale cached watchlist.
     """
 
     permission_classes = [IsAuthenticated]
@@ -657,6 +710,24 @@ class BulkWatchStateToggleView(APIView):
                             show=show,
                             defaults={"status": Watchlist.Status.TO_WATCH},
                         )
+
+                    # bulk_create deliberately does not fire WatchState's
+                    # post_save signal (Django never sends signals for
+                    # bulk_create — same reason run_tvtime_import documents
+                    # in tasks.py), which means signals.py's evaluate_badges
+                    # (badges + the day's watch-streak update) and its
+                    # watchlist-cache-bust receiver both silently never run
+                    # for a Cascade Catch-Up batch. Without this, marking a
+                    # whole season watched at once earned no badges, never
+                    # counted toward the streak for that day, and kept
+                    # serving a stale `watchlist_all` cache for up to
+                    # CACHE_TTL_SECONDS. Run the same two idempotent
+                    # recalculation tasks run_tvtime_import calls after its
+                    # own bulk_create, and bust the cache the same on_commit
+                    # way signals.py's own receivers do.
+                    recalculate_user_badges(request.user.id)
+                    recalculate_watch_streak(request.user.id)
+                    transaction.on_commit(lambda: cache.delete(watchlist_cache_key(request.user.id)))
             else:
                 # Only delete states that currently exist
                 to_delete = [ep for ep in episodes if ep.pk in existing_states]
@@ -1466,6 +1537,22 @@ def _sorted_import_payload(payload: dict) -> dict:
     }
 
 
+def _payload_fingerprint(payload: dict) -> str:
+    """
+    sha256 of the order-normalised payload — computed once per submission
+    and stored on ImportJob.payload_fingerprint, so a later resubmission
+    is checked with a cheap string comparison instead of pulling the
+    stored job's full multi-MB `payload` JSONField out of Postgres and
+    deep-comparing it again (what _sorted_import_payload's equality check
+    used to cost on every single retry attempt).
+    """
+    import hashlib
+    import json
+
+    canonical = json.dumps(_sorted_import_payload(payload), sort_keys=True, default=str)
+    return hashlib.sha256(canonical.encode()).hexdigest()
+
+
 class TVTimeImportView(APIView):
     """
     POST /api/import/tvtime/
@@ -1577,6 +1664,7 @@ class TVTimeImportView(APIView):
             in_flight.save(update_fields=["status", "detail", "finished_at", "updated_at"])
 
         submitted_payload = {"shows": shows_data, "movies": movies_data}
+        submitted_fingerprint = _payload_fingerprint(submitted_payload)
 
         # Resume rather than restart: a FAILED job (a chunk's soft time
         # limit hit — see run_tvtime_import's chunking docstring — or the
@@ -1586,17 +1674,24 @@ class TVTimeImportView(APIView):
         # outright. Only resume when the resubmitted export is provably
         # the same one though — resuming a different payload under the
         # old cursor would silently skip real, unprocessed items.
+        #
+        # Matched by fingerprint (a stored sha256), not by re-fetching and
+        # deep-comparing the old job's full payload — see
+        # _payload_fingerprint's docstring. A FAILED job from before this
+        # field existed has an empty fingerprint and simply won't match,
+        # falling through to a fresh job below — correct, if not optimally
+        # resumed, and self-healing after one such job ages out.
         resumable = (
-            ImportJob.objects.filter(user=request.user, status=ImportJob.Status.FAILED)
+            ImportJob.objects.filter(
+                user=request.user,
+                status=ImportJob.Status.FAILED,
+                payload_fingerprint=submitted_fingerprint,
+            )
             .exclude(payload={})
             .order_by("-created_at")
             .first()
         )
-        if (
-            resumable is not None
-            and resumable.processed > 0
-            and _sorted_import_payload(resumable.payload) == _sorted_import_payload(submitted_payload)
-        ):
+        if resumable is not None and resumable.processed > 0:
             resumable.status = ImportJob.Status.RUNNING
             resumable.detail = ""
             resumable.finished_at = None
@@ -1610,6 +1705,7 @@ class TVTimeImportView(APIView):
         job = ImportJob.objects.create(
             user=request.user,
             payload=submitted_payload,
+            payload_fingerprint=submitted_fingerprint,
             total=len(shows_data) + len(movies_data),
         )
         run_tvtime_import.delay(str(job.id))

@@ -45,10 +45,19 @@ export interface Episode {
   season_number: number;
   episode_number: number;
   title: string;
-  overview: string;
+  /** Absent on episodes embedded in a WatchlistEntry (GET /watchlist/) —
+   *  the backend serves a lean episode shape there (see LEAN_EPISODE_FIELDS
+   *  in serializers.py) since nothing reading `entry.show.episodes` needs a
+   *  full paragraph of prose per episode, and a 400+ show library made that
+   *  the single biggest contributor to the Shows Hub's response size.
+   *  Always present on episodes from the dedicated season/episode
+   *  endpoints (SeasonEpisodesView, EpisodeDetailView) that
+   *  EpisodeRow.tsx / app/episode/[id].tsx actually render it from. */
+  overview?: string;
   air_date: string | null;
   runtime_minutes: number;
-  still_path: string | null;
+  /** Same lean-shape caveat as `overview` above. */
+  still_path?: string | null;
   is_watched: boolean;
 }
 
@@ -74,6 +83,17 @@ export interface Show {
   next_episode_season_number: number | null;
   next_episode_number: number | null;
   next_episode_name: string | null;
+  /** The network's broadcast slot from TVmaze (backend: CachedShow /
+   *  core/airtime.py) — `airs_time` is a wall clock ("21:30") that only
+   *  means anything paired with `airs_timezone` (an IANA name). TMDB has
+   *  no air-time data at all, which is why this comes from a second
+   *  source. Both null/blank for shows with no fixed slot (most streaming
+   *  originals) and for shows cached before this field existed, until
+   *  their next background refresh. Resolve with lib/dateFormat.ts's
+   *  formatLocalAirTime rather than reading `airs_time` directly — it is
+   *  NOT in the device's timezone. */
+  airs_time?: string | null;
+  airs_timezone?: string | null;
   episodes: Episode[];
   /** YouTube video id for the best available trailer/teaser, only present
    *  on the full ShowDetailView response (`GET /shows/{id}/`) — absent
@@ -1307,10 +1327,13 @@ export const useWatchStore = create<WatchStoreState>()(
       // widget could look empty for an otherwise-current watchlist.
       const entries = [...to_watch.results, ...up_to_date.results];
 
-      // Payload shape and every rule behind it (next-episode pick, 14-day
-      // window, caps, precomputed countdown) live in lib/widgetPayload.ts,
-      // shared with the Android headless task handler so a widget redraw
-      // with the app closed builds exactly the same thing.
+      // Payload shape and every rule behind it (next-episode pick, 45-day
+      // window, caps) live in lib/widgetPayload.ts, shared with the
+      // Android headless task handler so a widget redraw with the app
+      // closed builds exactly the same thing. Note the payload carries no
+      // precomputed durations — countdowns and air times are resolved by
+      // the widgets themselves at render, so they stay correct however
+      // long ago this sync ran.
       const widgetData = buildWidgetPayload(to_watch.results, entries);
 
       if (Platform.OS === 'android') {

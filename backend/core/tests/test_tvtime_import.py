@@ -24,7 +24,7 @@ from rest_framework.test import APIClient
 
 from core.models import ImportJob, Watchlist, WatchState
 from core.tasks import IMPORT_CHUNK_SIZE, run_tvtime_import
-from core.views import _sorted_import_payload
+from core.views import _payload_fingerprint, _sorted_import_payload
 
 User = get_user_model()
 
@@ -246,6 +246,11 @@ def test_view_resumes_matching_failed_job_instead_of_restarting(user):
     failed_job = ImportJob.objects.create(
         user=user,
         payload=payload,
+        # A real FAILED job always carries the fingerprint TVTimeImportView
+        # computed when it was first created (see _payload_fingerprint) —
+        # the resume match below is keyed on that, not a live re-comparison
+        # of the stored `payload` blob, so the fixture must set it too.
+        payload_fingerprint=_payload_fingerprint(payload),
         total=3,
         status=ImportJob.Status.FAILED,
         processed=2,

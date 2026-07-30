@@ -35,6 +35,17 @@ INSTALLED_APPS = [
 
 MIDDLEWARE = [
     "django.middleware.security.SecurityMiddleware",
+    # Every response this API returns is JSON, which compresses ~8-15x.
+    # The Shows Hub's `GET /watchlist/?page_size=all` is the extreme case:
+    # a 400+ show library serialises multiple megabytes of episode rows,
+    # which on Render's free tier meant gunicorn's --timeout 60 fired
+    # before the body finished writing (the user-visible "Can't reach
+    # Glix right now" / 502) and burned outbound bandwidth on every
+    # single app open. BREACH is not a concern here: auth is a JWT in the
+    # Authorization header, not a cookie, and no CSRF token or other
+    # secret is ever reflected into a response body next to attacker-
+    # controlled input.
+    "django.middleware.gzip.GZipMiddleware",
     "whitenoise.middleware.WhiteNoiseMiddleware",
     "corsheaders.middleware.CorsMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
@@ -201,6 +212,15 @@ CACHES = {
     }
 }
 
+# Django's default (2.5MB) is well under what a real TV Time export's JSON
+# body can be — a few hundred shows with full season/episode watch history
+# routinely runs several MB. Over the default, DRF's parser raises
+# RequestDataTooBig before TVTimeImportView.post() ever runs, which the
+# client's axios layer can present indistinguishably from any other
+# request failure. 25MB comfortably covers even a very large multi-
+# thousand-episode library (payload is plain JSON, no embedded media).
+DATA_UPLOAD_MAX_MEMORY_SIZE = 25 * 1024 * 1024
+
 # django-unfold admin theme. PRIMARY ramp is generated from the app's own
 # accent (#E4FA1A, see client-mobile/lib/theme.ts) converted to OKLCH and
 # expanded across an in-gamut lightness ramp at the same hue (116.11deg) —
@@ -345,6 +365,35 @@ CELERY_TASK_SERIALIZER = "json"
 CELERY_RESULT_SERIALIZER = "json"
 CELERY_TIMEZONE = TIME_ZONE
 
+# Free-tier survival settings. render-start.sh runs gunicorn + this worker
+# + beat inside ONE container, so the worker's memory is the web server's
+# memory. Defaults are tuned for a dedicated worker box and were actively
+# hostile here:
+#  - prefetch_multiplier defaults to 4: the worker reserves up to 4 queued
+#    tasks it isn't running yet. With --concurrency=1 that just delays
+#    every other user's badge/streak/push task behind one long import
+#    chain, and pins their payloads in RAM for no reason.
+#  - acks_late=False (the default) acknowledges a task the moment it's
+#    handed to the worker. When the container is restarted mid-import
+#    (Render "Instance failed", or render-start.sh's `wait -n` reacting to
+#    any of the three processes dying), the in-flight chunk was already
+#    acked and simply vanished — which is exactly how an import job ends
+#    up stuck at RUNNING 69/466 forever with nothing left to resume it.
+#    With acks_late the broker redelivers it. Our tasks are idempotent by
+#    construction (see run_tvtime_import's cursor + diff), so redelivery
+#    is safe.
+#  - max_tasks_per_child recycles the worker process periodically, which
+#    is the cheap fix for the slow RSS creep a few thousand TMDB responses
+#    and multi-megabyte import payloads leave behind.
+CELERY_WORKER_PREFETCH_MULTIPLIER = 1
+CELERY_TASK_ACKS_LATE = True
+CELERY_WORKER_MAX_TASKS_PER_CHILD = 40
+CELERY_BROKER_CONNECTION_RETRY_ON_STARTUP = True
+# Redelivery window for an acks_late task whose worker died. Must exceed
+# run_tvtime_import's hard time_limit so a chunk that is genuinely still
+# running is never handed to a second worker in parallel.
+CELERY_BROKER_TRANSPORT_OPTIONS = {"visibility_timeout": 900}
+
 # Periodic tasks (requires the celery-beat service in docker-compose.yml
 # to actually be running — a worker alone never fires these on its own).
 # sync_active_shows re-syncs RETURNING shows so refresh_show_cache can
@@ -359,6 +408,16 @@ CELERY_BEAT_SCHEDULE = {
     "send-weekly-digest-monday-9am": {
         "task": "core.tasks.send_weekly_digest",
         "schedule": crontab(minute=0, hour=9, day_of_week=1),
+    },
+    # An import is a self-re-enqueueing chain of short chunks; if the
+    # container dies between two links the chain is gone and the job sits
+    # at RUNNING forever (observed: a real job stuck at 69/466 for a day).
+    # acks_late above covers a chunk that was mid-flight; this covers the
+    # gap where nothing was in flight at all. Every 5 minutes so a stalled
+    # import self-heals rather than needing the user to resubmit.
+    "resume-stalled-imports-every-5-minutes": {
+        "task": "core.tasks.resume_stalled_imports",
+        "schedule": crontab(minute="*/5"),
     },
 }
 

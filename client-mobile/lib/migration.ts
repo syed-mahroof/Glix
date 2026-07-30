@@ -244,15 +244,31 @@ export async function fetchImportJob(jobId: string): Promise<ImportResult> {
  * failed GET reject the whole poll loop. Consecutive failures (not total
  * failures) are what should end it — one blip retries, a genuinely dead
  * connection still gives up in reasonable time.
+ *
+ * Progress-based, not wall-clock-based: a large library (400+ shows) is
+ * genuinely ~1,100 sequential TMDB round-trips server-side, chunked into
+ * many short Celery invocations (see run_tvtime_import). A fixed ~20min
+ * ceiling gave up on real, still-succeeding imports for exactly the users
+ * with the biggest libraries — user-reported: "in some number it will
+ * wait for long time then fails" — right as processed kept climbing.
+ * This only gives up when `processed` stops advancing for a long stretch
+ * (STALL_TIMEOUT_MS), which is what actually distinguishes "still working"
+ * from "wedged" — plus one generous absolute ceiling as a last-resort
+ * backstop against a truly runaway poll.
  */
 export async function pollImportJob(
   jobId: string,
   onProgress?: (job: ImportResult) => void,
   intervalMs = 1500
 ): Promise<ImportResult> {
-  // A 200-series export is minutes of TMDB round-trips; this ceiling
-  // (~20 min) exists only so a wedged worker can't poll forever.
-  const maxAttempts = Math.ceil((20 * 60 * 1000) / intervalMs);
+  // No progress for this long genuinely means stuck, not just a big
+  // library — resume_stalled_imports (backend, every 5 min) self-heals a
+  // truly orphaned job well inside this window, so a job that's actually
+  // alive always shows `processed` moving again before this fires.
+  const STALL_TIMEOUT_MS = 10 * 60 * 1000;
+  // Last-resort backstop so a pathological case (server stuck re-queuing
+  // an empty chunk forever, say) can't poll literally forever.
+  const ABSOLUTE_CEILING_MS = 2 * 60 * 60 * 1000;
   // ~8 consecutive misses at 1.5s apart (plus each fetch's own up-to-15s
   // axios timeout) comfortably absorbs a transient network blip or a
   // Render free-tier cold start without giving up on a healthy import.
@@ -260,19 +276,39 @@ export async function pollImportJob(
   let consecutiveFailures = 0;
   let lastError: unknown = null;
 
-  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+  const startedAt = Date.now();
+  let lastProcessed = -1;
+  let lastProgressAt = Date.now();
+
+  while (Date.now() - startedAt < ABSOLUTE_CEILING_MS) {
+    let job: ImportResult | null = null;
     try {
-      const job = await fetchImportJob(jobId);
+      job = await fetchImportJob(jobId);
       consecutiveFailures = 0;
-      onProgress?.(job);
-      if (job.status === 'SUCCESS' || job.status === 'FAILED') {
-        return job;
-      }
     } catch (err) {
       consecutiveFailures += 1;
       lastError = err;
       if (consecutiveFailures >= maxConsecutiveFailures) {
         throw err;
+      }
+    }
+
+    // Stall check lives outside the try/catch above: it must throw
+    // straight out of the loop, never get folded into the network-failure
+    // retry counter (a stuck-but-reachable job would otherwise reset
+    // consecutiveFailures to 0 on every successful poll and never trip it).
+    if (job) {
+      onProgress?.(job);
+      if (job.status === 'SUCCESS' || job.status === 'FAILED') {
+        return job;
+      }
+      if (job.processed !== lastProcessed) {
+        lastProcessed = job.processed;
+        lastProgressAt = Date.now();
+      } else if (Date.now() - lastProgressAt >= STALL_TIMEOUT_MS) {
+        throw new Error(
+          'Import seems stuck — no progress for a while. It may still finish in the background; check back shortly.'
+        );
       }
     }
     await new Promise((resolve) => setTimeout(resolve, intervalMs));

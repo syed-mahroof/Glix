@@ -91,8 +91,26 @@ class CachedEpisodeSerializer(serializers.ModelSerializer):
         return WatchState.objects.filter(user=request.user, episode=obj).exists()
 
 
+# The subset of CachedEpisodeSerializer's fields that any *list* consumer
+# of an embedded show actually reads. `overview` (a full paragraph per
+# episode) and `still_path` are only ever rendered by EpisodeRow.tsx and
+# app/episode/[id].tsx, both of which load their episodes from the
+# dedicated season/episode endpoints — never from a watchlist entry. On a
+# 400+ show library that dead weight was the single largest contributor to
+# a multi-megabyte `GET /watchlist/` body. See CachedShowSerializer.
+LEAN_EPISODE_FIELDS = (
+    "tmdb_id",
+    "show_id",
+    "season_number",
+    "episode_number",
+    "title",
+    "air_date",
+    "runtime_minutes",
+)
+
+
 class CachedShowSerializer(serializers.ModelSerializer):
-    episodes = CachedEpisodeSerializer(many=True, read_only=True)
+    episodes = serializers.SerializerMethodField()
 
     class Meta:
         model = CachedShow
@@ -113,8 +131,39 @@ class CachedShowSerializer(serializers.ModelSerializer):
             "next_episode_season_number",
             "next_episode_number",
             "next_episode_name",
+            # The network's broadcast slot, from TVmaze (see core/airtime.py)
+            # — TMDB has no air-time data. Sent as the wall-clock time plus
+            # its IANA zone rather than a resolved instant, because the
+            # correct local time differs per episode date across a DST
+            # boundary; the client resolves it per row (lib/dateFormat.ts's
+            # formatLocalAirTime). Null/blank whenever TVmaze has no fixed
+            # slot for the show, which the client renders as no time line.
+            "airs_time",
+            "airs_timezone",
             "episodes",
         ]
+
+    def get_episodes(self, obj: CachedShow) -> list:
+        """
+        Full nested episode objects by default (show detail, search), but a
+        pre-built lean list when the caller supplies `episodes_by_show` in
+        context.
+
+        WatchlistView builds that map with two flat `.values_list()` queries
+        for the *whole* response instead of instantiating ~12,000
+        CachedEpisode model objects plus a WatchState prefetch per episode.
+        The old path allocated roughly 25,000 Django model instances and
+        25,000 DRF serializer instances to render one Shows Hub fetch for a
+        large library — the dominant cost of the request, and the reason a
+        free-tier container with gunicorn + celery sharing its RAM was being
+        OOM-killed ("Instance failed") under it.
+        """
+        episodes_by_show = self.context.get("episodes_by_show")
+        if episodes_by_show is not None:
+            return episodes_by_show.get(obj.tmdb_id, [])
+        return CachedEpisodeSerializer(
+            obj.episodes.all(), many=True, read_only=True, context=self.context
+        ).data
 
 
 class WatchlistSerializer(serializers.ModelSerializer):

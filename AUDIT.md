@@ -1,3 +1,79 @@
+## 🔴 REAL BUGS FOUND & FIXED — Widget countdown+real air-time restore, "For You" recommendations mixing tv/movie, 3 push-notification bugs, Cascade Catch-Up badge/streak/cache gap (2026-07-31, Phase 73)
+
+Full narrative in `PROJECT_STATUS.md`'s Phase 73 section and `context.md`'s Phase 73 entry. This entry is the resolution table + verification log.
+
+Trigger: follow-up to Phase 72's widget change — user wanted the countdown back plus a genuine release *time* (TV Time widget screenshot reference showing "6:30 AM"). Also reported: Discover Hub's "For You" row identical on Series and Movies tabs; push notifications not arriving; general "find and fix any more bugs" request.
+
+### Resolved this phase
+
+| # | Reported/found issue | Root cause | Fix | Files |
+|---|---|---|---|---|
+| 1 | No real widget release *time* was ever possible, only a date | TMDB's episode payload (`air_date`) carries no time-of-day at all — the ceiling behind every prior countdown always ending in "00m" | New TVmaze-sourced `CachedShow.airs_time`/`airs_timezone` (migration `0014`), refreshed from the existing 6-hourly `refresh_show_cache` sweep, self-throttled to ~monthly per show | `backend/core/airtime.py` (new), `backend/core/models.py`, `backend/core/migrations/0014_...` (new), `backend/core/services.py` (`get_external_ids`), `backend/core/tasks.py` |
+| 2 | Phase 72's date-only label wasn't what the user wanted after seeing it — countdown needed to come back too | User feedback after Phase 72 shipped | Restored `formatCountdown` unchanged as the primary subtitle; added the new real air time as a second line, present only when the show has a known TVmaze slot | `client-mobile/lib/dateFormat.ts`, `client-mobile/widgets/android/UpcomingWidget.tsx`, `client-mobile/widgets/ios/UpcomingWidget.tsx` |
+| 3 | Widget data needs to "sync correctly even off the app" | Nothing to fix directly, but the fix above created a real risk of it: a precomputed countdown/time baked in at sync time would go stale by however long the widget's next OS-driven redraw is delayed, especially with the app closed | Payload now carries only raw `air_date`/`airs_time`/`airs_timezone` — both widget files resolve countdown and local air time fresh at every render, never at sync time | `client-mobile/lib/widgetPayload.ts`, `client-mobile/store/watchStore.ts` |
+| 4 | "For You" row identical on Series and Movies tabs | `ForYouRecommendationsView` computed tv/movie seeds separately but merged both media types' candidates into one ranked, capped, single-cache-key response | Split into `?type=tv\|movie`-scoped independent seeds/candidates/limit/cache key, mirroring `DiscoverFeedView`'s existing `type` param | `backend/core/recommendations_views.py`, `backend/core/cache_keys.py`, `client-mobile/store/discoverStore.ts`, `client-mobile/app/(tabs)/discover.tsx` |
+| 5 | "New episode" push alert could essentially never fire | Condition compared against episode ids cached *before* that day's re-fetch, but TMDB publishes episodes weeks ahead and the show refresh sweep runs every 6h — so an episode was always already cached by the time its air date arrived | New `CachedEpisode.notified_at` gate (same migration as #1), stamped before dispatch so a concurrent run can't double-fire | `backend/core/tasks.py`, `backend/core/models.py` |
+| 6 | A fresh login/register never registered a push token | Registration only ran from `_layout.tsx`'s cold-start-already-authenticated effect; `login.tsx`/`register.tsx`/`forgot-password.tsx` all route through `loading.tsx`, which never called it | Added the same best-effort registration call to `loading.tsx`'s boot sequence | `client-mobile/app/loading.tsx` |
+| 7 | Foreground notifications silently never displayed | `setNotificationHandler` only set the now-deprecated `shouldShowAlert`; the installed `expo-notifications` version's actual foreground-display contract needs `shouldShowBanner`/`shouldShowList` | Added both fields alongside the deprecated one | `client-mobile/lib/notifications.ts` |
+| 8 | Cascade Catch-Up ("Mark Season Watched") earned no badges, didn't count toward the watch streak, and served a stale watchlist cache | `BulkWatchStateToggleView`'s `watched=True` branch uses `WatchState.bulk_create()`, which Django never fires `post_save` for — `run_tvtime_import` already explicitly works around this exact gap for its own `bulk_create`, this endpoint did not | Added the same `recalculate_user_badges`/`recalculate_watch_streak` calls + `on_commit` cache bust, inside the existing transaction so the response's badge list reflects it immediately | `backend/core/views.py` |
+
+### Investigated, not changed (correctly working / not the actual cause)
+
+- Whether Android's `react-native-android-widget` headless task can pick up an OTA-only JS update — not touched this phase (no app.json/native config change was needed for any of the above).
+- `NotificationPreferenceSerializer`/`NotificationPreferenceView` — re-read, both correct (`get_or_create` + partial update).
+- Expo push service's "Enhanced Security" access-token requirement — an opt-in dashboard setting outside what a code review can confirm either way; not assumed to be the cause given the three concrete bugs found instead.
+
+### Verification log
+
+- `tsc --noEmit` (`node --stack-size=8000 ./node_modules/typescript/lib/tsc.js --noEmit`): zero errors.
+- `pytest` inside `watchtracker_backend`: 118/118 passing (was 93; +25 new — `test_airtime.py` new file, 14 tests; `test_tasks.py` +4; `test_recommendations_views.py` +4; `test_bulk_watch_state_toggle.py` new file, +2; `test_watchlist_cache.py` +1).
+- `manage.py check`: clean. New migration `0014_cachedepisode_notified_at_cachedshow_airs_time_and_more` generated and applied inside the container.
+- `jest`: both suites passing, 7/7 (was 3; +4 new DST-crossing/null-slot tests in `dateFormat.test.ts`).
+- Tooling note (repeat of Phase 72's finding, hit again on this phase's own new migration): `pytest.ini`'s `--nomigrations --reuse-db` means the cached test DB schema predates a new migration until rebuilt once with `--create-db` — resolved the same way.
+- Environment note (unchanged since Phase 69): all backend commands run via `docker exec watchtracker_backend ...`, host venv's Postgres still lands on a stray native Windows service on port 5432.
+- **Not verifiable this session:** no physical device — the widget's on-screen countdown+air-time layout and a real push notification actually landing both need a real EAS/dev-client build. Verified instead via live Postgres/Redis (Docker containers) and direct DST-crossing instant-resolution math (two dates 6 months apart, asserting different UTC offsets for the identical local wall-clock time).
+
+---
+
+## 🔴 REAL BUGS FOUND & FIXED — TV Time import stalling/failing/slow (466-show library), free-tier "Instance failed"/502s during a big import, widget countdown → release-date label (2026-07-31, Phase 72)
+
+Full narrative in `PROJECT_STATUS.md`'s Phase 72 section and `context.md`'s Phase 72 entry. This entry is the resolution table + verification log.
+
+Trigger: user reported a friend's 466-show TV Time import stuck `RUNNING 69/466` for a day (Render admin screenshot), `Import Failed — Request failed with status code 502`, a plain "network error" on retry, and — on a job the admin panel showed `SUCCESS` — the imported shows never appearing in Profile's "My Shows" count. Also reported other users' requests failing (`Instance failed` events, attached Render log) specifically while a big import was running, and asked for the Upcoming widgets to show an absolute release date instead of a countdown, per a reference screenshot.
+
+### Resolved this phase
+
+| # | Reported/found issue | Root cause | Fix | Files |
+|---|---|---|---|---|
+| 1 | Every import attempt — including a retry of an already-imported library — re-hit TMDB hundreds of times before any dedup logic applied | `TMDBService.find_by_external_id()` (the tvdb_id/imdb_id → TMDB id lookup, called once per show/movie) was never passed `use_cache=True` | 30-day Redis cache via the existing `_request(use_cache=True)` path every other TMDB lookup already uses — an external-id mapping is permanent | `backend/core/services.py` |
+| 2 | Writing one season's episodes cost 40+ queries (2 per episode) | `get_season_episodes()` used `update_or_create()` per episode | One `bulk_create(update_conflicts=True, unique_fields=["tmdb_id"])` per season | `backend/core/services.py` |
+| 3 | Every retry deep-compared the entire multi-MB `payload` (incoming + DB-fetched old job) synchronously inside the request | No cheap way to check "is this the same export as a stored FAILED job" | New `ImportJob.payload_fingerprint` (sha256 of the sorted payload, computed once at creation) — resume check is now an indexed string-equality filter | `backend/core/models.py`, `backend/core/views.py`, `backend/core/migrations/0013_importjob_payload_fingerprint.py` (new) |
+| 4 | Every job completion/failure rewrote the same untouched multi-MB `payload` back to Postgres | `run_tvtime_import`'s terminal `job.save()` had no `update_fields` | Explicit `update_fields`, only including `payload` when a run actually cleared it (SUCCESS) | `backend/core/tasks.py` |
+| 5 | **Root cause of "stuck at 69/466 forever"**: an import that dies mid-chunk (container restart, lost broker message) has nothing left to continue it | `run_tvtime_import` re-enqueues itself per chunk (`apply_async`) — single point of failure, no watchdog | New `core.tasks.resume_stalled_imports`, Celery beat every 5 min: re-enqueues any `PENDING`/`RUNNING` job whose `updated_at` has been silent 6+ minutes. Safe on a false positive — every write in the import path is idempotent | `backend/core/tasks.py`, `backend/config/settings/base.py` (`CELERY_BEAT_SCHEDULE`) |
+| 6 | Other users' requests failing / `Instance failed` while an import ran | `render-start.sh` runs gunicorn + celery worker + beat sharing one free-tier container's RAM; default `CELERY_WORKER_PREFETCH_MULTIPLIER=4` let one big import chain reserve queued tasks (including other users' badge/streak/push jobs) for no reason; an unacked task lost to a mid-import restart just vanished | `CELERY_TASK_ACKS_LATE=True`, `CELERY_WORKER_PREFETCH_MULTIPLIER=1`, `CELERY_WORKER_MAX_TASKS_PER_CHILD=40` | `backend/config/settings/base.py` |
+| 7 | A large TV Time export's JSON body could exceed Django's request-size limit outright | `DATA_UPLOAD_MAX_MEMORY_SIZE` was Django's 2.5MB default, never overridden | Raised to 25MB | `backend/config/settings/base.py` |
+| 8 | `GET /watchlist/?page_size=all` — the Shows Hub / widget-sync / Profile-counts endpoint — was the single heaviest request in the app, plausible direct contributor to the reported `Instance failed` events during a big import | For a 400+ show library: ~25,000 Django `CachedEpisode` model instances (nested `Prefetch`) + ~25,000 DRF serializer instances built per request, to return `overview`/`still_path` fields nothing on this response path reads (confirmed via grep — `EpisodeRow.tsx`/`app/episode/[id].tsx` only ever get those from the dedicated season/episode endpoints) | Two flat `.values_list()` queries + a lean dict shape (new `LEAN_EPISODE_FIELDS`, `CachedShowSerializer.get_episodes()` context override, opt-in so other views serving the full shape are untouched) + `GZipMiddleware` (every response here is JSON; no BREACH-relevant pattern in this API) | `backend/core/serializers.py`, `backend/core/views.py`, `backend/config/settings/base.py`, `client-mobile/store/watchStore.ts` (`Episode.overview`/`still_path` now optional — type-only change, both real consumers already used falsy fallbacks) |
+| 9 | Client gave up on a healthy, still-succeeding large import after a fixed ~20 minutes — exactly wrong for the biggest libraries, which take longest and were hurt most by issues 1–2 above | `pollImportJob()`'s ceiling was wall-clock time, not progress | Rewritten around progress: only gives up after `processed` stops advancing for 10 straight minutes (past `resume_stalled_imports`' 6-min self-heal window), 2-hour absolute backstop | `client-mobile/lib/migration.ts` |
+| 10 | (user-requested change, not a bug) Upcoming widgets' subtitle showed a relative countdown, redundant with the day-count badge already on the row | — | New `formatReleaseLabel()` (`TODAY`/`TOMORROW`/`"MON, AUG 3"`, date-only — TMDB's `air_date` has no time-of-day). `WidgetUpcomingItem.countdown`/`UpcomingWidgetShow.countdown` renamed `releaseLabel` (optional, stale-snapshot-safe) | `client-mobile/lib/dateFormat.ts`, `client-mobile/lib/widgetPayload.ts`, `client-mobile/widgets/android/UpcomingWidget.tsx`, `client-mobile/widgets/ios/UpcomingWidget.tsx` |
+
+### Investigated, not changed (correctly working / not the actual cause)
+
+- The "imported shows don't show up in My Shows" symptom's other plausible cause — a stale server-side response cache never busted after import. Re-read `signals.py`'s `Watchlist` post_save→cache-bust receiver (fires via `transaction.on_commit` on every `get_or_create()` inside `_import_one_show`) and the 25s `CACHE_TTL_SECONDS` backstop — both already correct. The reported "1 Shows" snapshot is far better explained by issues 1/2/5 above (that account's own admin-panel row showed `RUNNING 69/466` at the exact time) than a separate caching bug.
+- `IMPORT_CHUNK_SIZE` (10) — already reasonably sized per its own docstring's math; the per-item cost dropped substantially from issues 1–2, no reason to retune without new evidence.
+- No new "smarter partial re-import" logic beyond what already existed — `_import_one_show`'s diff against already-cached episodes/`WatchState` already skips already-done work on a resubmission; the real gap was retries paying full TMDB-resolution cost for items that would be skipped moments later (issues 1 and 9 fix this directly).
+
+### Verification log
+
+- `tsc --noEmit` (`node --stack-size=8000 ./node_modules/typescript/lib/tsc.js --noEmit`): zero errors.
+- `pytest` inside `watchtracker_backend`: 93/93 passing, unchanged count (one existing test updated: `test_view_resumes_matching_failed_job_instead_of_restarting` now sets `payload_fingerprint` on its fixture job).
+- `manage.py check`: clean. New migration `0013_importjob_payload_fingerprint` generated and applied inside the container.
+- `jest`: both suites passing (`dateFormat.test.ts`, `watchStore.test.ts`), 3/3.
+- Tooling note (new this phase): `pytest.ini`'s `--nomigrations --reuse-db` means the cached test DB's schema silently predates a new migration until rebuilt once with `--create-db` — hit directly by `0013`'s new column (`ProgrammingError: column "payload_fingerprint" of relation "import_job" does not exist`); resolved with one `pytest --create-db` run, worth remembering for the next migration too.
+- Environment note (unchanged from Phase 69/70/71): host venv's Postgres connection lands on a stray native Windows `postgres.exe` on port 5432 rather than Docker's own mapping; all backend commands run via `docker exec watchtracker_backend ...` this phase too.
+- **Not verifiable this session:** no physical device, and no access to the actual reported account's real 466-show export — the felt speed/reliability of a real large-library import end-to-end, and the widget subtitle's on-device appearance, both need a real build + a real large TV Time export. The backend-side fixes (query counts, cache/signal behavior, migration) were verified directly against a live Postgres/Redis via the Docker containers instead.
+
+---
+
 ## 🔴 REAL BUG FOUND & FIXED — Achievements screen showed "0 / 0, No badges" for a user who had genuinely earned badges, plus 3 new features (Year in Review share export, smarter push digest, real cross-library recommendations) (2026-07-29, Phase 71)
 
 Full narrative in `PROJECT_STATUS.md`'s Phase 71 section. This entry is the resolution table + verification log.
