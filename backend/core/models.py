@@ -7,6 +7,7 @@ ArrayField usage for lightweight tag/badge storage without extra join tables.
 """
 
 import uuid
+from decimal import Decimal
 
 from django.conf import settings
 from django.contrib.postgres.fields import ArrayField
@@ -43,6 +44,17 @@ class UserProfile(models.Model):
         default=list,
         blank=True,
         help_text="Slugs of unlocked milestone badges, e.g. 'binge_master', 'anime_fan'.",
+    )
+    # Phase 74 — "ghost mode" for the social layer (core/social_views.py).
+    # When True: excluded from user search, UserProfileDetailView returns a
+    # stub, and the user's activity never appears in anyone's friends feed.
+    # Deliberately all-or-nothing — a per-field visibility matrix or a
+    # follow-request/approve flow is the over-engineered version of this
+    # and is not built (see Follow model's own docstring for why a request
+    # flow would also break its presence-based convention).
+    is_private = models.BooleanField(
+        default=False,
+        help_text="Ghost mode: excluded from user search, activity feed, and public profile.",
     )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -557,6 +569,51 @@ class CommentReport(models.Model):
         return f"Report<{self.comment_id}, {self.reason}, {self.status}>"
 
 
+class Follow(models.Model):
+    """
+    Presence-based follow edge (Phase 74) — mirrors CommentLike/WatchState:
+    the row's existence IS the relationship, not a boolean field. No
+    `status` field on purpose: a follow-request/approve flow would turn
+    this into a state machine and break that presence-based convention.
+    UserProfile.is_private ("ghost mode") covers the real privacy need at
+    a fraction of the complexity — see its own help_text.
+
+    Not to be confused with SocialAccount (Google/Apple OAuth identity
+    linking, core/social_auth.py) — this is the follow graph, a
+    completely different concept that happens to share the word "social".
+    """
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    follower = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="outgoing_follows",
+    )
+    following = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="incoming_follows",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "follow"
+        constraints = [
+            models.UniqueConstraint(fields=["follower", "following"], name="unique_follower_following"),
+            models.CheckConstraint(
+                condition=~models.Q(follower=models.F("following")),
+                name="follow_not_self",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["follower", "-created_at"], name="idx_follow_follower_created"),
+            models.Index(fields=["following", "-created_at"], name="idx_follow_following_created"),
+        ]
+
+    def __str__(self) -> str:
+        return f"Follow<{self.follower_id} -> {self.following_id}>"
+
+
 class WatchStreak(models.Model):
     """
     Tracks the user's consecutive-day watch streak. A row's existence
@@ -834,7 +891,19 @@ class ShowReview(models.Model):
         on_delete=models.CASCADE,
         related_name="reviews",
     )
-    rating = models.PositiveSmallIntegerField(validators=[MinValueValidator(1), MaxValueValidator(5)])
+    # Half-star (Letterboxd-style), Phase 74 — was PositiveSmallIntegerField
+    # 1-5. Decimal, not a half-unit integer (1-10): Decimal says what it
+    # means and Avg() aggregates cleanly if a public/average rating is ever
+    # added; a half-unit int column is a landmine (every future reader has
+    # to remember to /2). Migration is a pure ALTER — Postgres casts
+    # smallint->numeric implicitly, no data migration needed. The check
+    # constraint below is the real half-step gate; the validators are a
+    # cheap first line of defense at the model/admin-form layer.
+    rating = models.DecimalField(
+        max_digits=2,
+        decimal_places=1,
+        validators=[MinValueValidator(Decimal("0.5")), MaxValueValidator(Decimal("5.0"))],
+    )
     note = models.TextField(blank=True, max_length=2000)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -843,6 +912,10 @@ class ShowReview(models.Model):
         db_table = "show_review"
         constraints = [
             models.UniqueConstraint(fields=["user", "show"], name="unique_user_show_review"),
+            models.CheckConstraint(
+                condition=models.Q(rating__in=[Decimal(str(n / 2)) for n in range(1, 11)]),
+                name="show_review_rating_half_steps",
+            ),
         ]
         indexes = [
             models.Index(fields=["show"], name="idx_show_review_show"),
@@ -867,7 +940,12 @@ class MovieReview(models.Model):
         on_delete=models.CASCADE,
         related_name="reviews",
     )
-    rating = models.PositiveSmallIntegerField(validators=[MinValueValidator(1), MaxValueValidator(5)])
+    # Half-star — see ShowReview.rating's comment for the full reasoning.
+    rating = models.DecimalField(
+        max_digits=2,
+        decimal_places=1,
+        validators=[MinValueValidator(Decimal("0.5")), MaxValueValidator(Decimal("5.0"))],
+    )
     note = models.TextField(blank=True, max_length=2000)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -876,6 +954,10 @@ class MovieReview(models.Model):
         db_table = "movie_review"
         constraints = [
             models.UniqueConstraint(fields=["user", "movie"], name="unique_user_movie_review"),
+            models.CheckConstraint(
+                condition=models.Q(rating__in=[Decimal(str(n / 2)) for n in range(1, 11)]),
+                name="movie_review_rating_half_steps",
+            ),
         ]
         indexes = [
             models.Index(fields=["movie"], name="idx_movie_review_movie"),

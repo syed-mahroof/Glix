@@ -23,6 +23,17 @@ export function todayLocalIso(now: Date = new Date()): string {
 }
 
 /**
+ * Whether a TMDB air_date/release_date (YYYY-MM-DD, or null/undefined for
+ * a not-yet-dated episode/movie) is on or before today, local time. Shared
+ * home for the `x.air_date && x.air_date <= todayLocalIso()` comparison
+ * that used to be hand-inlined at 9+ call sites — a null/undefined date
+ * counts as "not aired yet" (TMDB hasn't dated it), never as "aired".
+ */
+export function hasAired(dateIso: string | null | undefined, now: Date = new Date()): boolean {
+  return !!dateIso && dateIso <= todayLocalIso(now);
+}
+
+/**
  * Formats the time remaining until a target date.
  * Returns the formatted string (e.g., "3d 05h 12m" or "05:12:30")
  * and a boolean indicating if it's imminent (within 24 hours).

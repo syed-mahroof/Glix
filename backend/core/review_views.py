@@ -1,11 +1,11 @@
 """
 backend/core/review_views.py
 
-Show/movie review system (Phase L) — a private-by-default personal 1-5
-star rating + optional note, one per (user, show)/(user, movie). See
-core.models.ShowReview's docstring for why this is kept deliberately
-separate from the public Comment/CommentLike/CommentReport system rather
-than a written note also becoming a Comment.
+Show/movie review system (Phase L) — a private-by-default personal
+half-star (0.5-5.0) rating + optional note, one per (user, show)/(user,
+movie). See core.models.ShowReview's docstring for why this is kept
+deliberately separate from the public Comment/CommentLike/CommentReport
+system rather than a written note also becoming a Comment.
 
 ShowReviewView/MovieReviewView are per-title CRUD (get my review for
 this title / create-or-update it / delete it) — mirrors the
@@ -13,8 +13,10 @@ get_or_create-then-update-in-place convention FavoriteToggleView/
 ArchiveToggleView already use elsewhere in this codebase, not a second
 pattern. ShowReviewListView/MovieReviewListView are the "list" side —
 every review the requesting user has ever left, most recently updated
-first, for a future "My Reviews" screen.
+first, consumed by app/profile/reviews.tsx ("My Reviews", Phase 74).
 """
+
+from decimal import Decimal, InvalidOperation
 
 from django.shortcuts import get_object_or_404
 from rest_framework import generics, status
@@ -25,11 +27,38 @@ from rest_framework.views import APIView
 from core.models import CachedShow, MovieCache, MovieReview, ShowReview
 from core.review_serializers import MovieReviewSerializer, ShowReviewSerializer
 
+# Half-star steps: 0.5, 1.0, 1.5, ... 5.0.
+ALLOWED_RATINGS = {Decimal(str(n / 2)) for n in range(1, 11)}
+RATING_ERROR = "rating must be a number between 0.5 and 5 in half-star steps."
+
+
+def _parse_rating(raw):
+    """Returns (Decimal, None) on success, or (None, error_message).
+
+    Phase 74 note on the bug this replaces: the old `int(rating)` here
+    did NOT raise on a JSON float like 3.5 — `int(3.5)` returns `3`
+    silently. A half-star POST was accepted with 200 OK and quietly
+    stored as a whole star, worse than an outright rejection. Only a
+    string like "3.5" used to raise. str(raw) before Decimal() matters:
+    DRF's JSONParser hands us a Python float for 3.5, and Decimal(3.5)
+    (skipping the str()) is Decimal('3.5000000000000000444089209850062616169452667236328125'),
+    which fails the ALLOWED_RATINGS membership check.
+    """
+    if raw is None:
+        return None, "rating is required."
+    try:
+        value = Decimal(str(raw))
+    except (InvalidOperation, TypeError, ValueError):
+        return None, RATING_ERROR
+    if value not in ALLOWED_RATINGS:
+        return None, RATING_ERROR
+    return value, None
+
 
 class ShowReviewView(APIView):
     """
     GET    /api/reviews/shows/<tmdb_id>/  — the requesting user's review for this show, or 404.
-    POST   /api/reviews/shows/<tmdb_id>/  — create or update it. Body: {"rating": 1-5, "note": str (optional)}
+    POST   /api/reviews/shows/<tmdb_id>/  — create or update it. Body: {"rating": 0.5-5 in half-star steps, "note": str (optional)}
     DELETE /api/reviews/shows/<tmdb_id>/  — remove it.
     """
 
@@ -40,15 +69,9 @@ class ShowReviewView(APIView):
         return Response(ShowReviewSerializer(review).data, status=status.HTTP_200_OK)
 
     def post(self, request, tmdb_id):
-        rating = request.data.get("rating")
-        if rating is None:
-            return Response({"detail": "rating is required."}, status=status.HTTP_400_BAD_REQUEST)
-        try:
-            rating = int(rating)
-        except (TypeError, ValueError):
-            return Response({"detail": "rating must be an integer 1-5."}, status=status.HTTP_400_BAD_REQUEST)
-        if not 1 <= rating <= 5:
-            return Response({"detail": "rating must be between 1 and 5."}, status=status.HTTP_400_BAD_REQUEST)
+        rating, error = _parse_rating(request.data.get("rating"))
+        if error:
+            return Response({"detail": error}, status=status.HTTP_400_BAD_REQUEST)
 
         note = request.data.get("note", "")
         if not isinstance(note, str):
@@ -80,15 +103,9 @@ class MovieReviewView(APIView):
         return Response(MovieReviewSerializer(review).data, status=status.HTTP_200_OK)
 
     def post(self, request, tmdb_id):
-        rating = request.data.get("rating")
-        if rating is None:
-            return Response({"detail": "rating is required."}, status=status.HTTP_400_BAD_REQUEST)
-        try:
-            rating = int(rating)
-        except (TypeError, ValueError):
-            return Response({"detail": "rating must be an integer 1-5."}, status=status.HTTP_400_BAD_REQUEST)
-        if not 1 <= rating <= 5:
-            return Response({"detail": "rating must be between 1 and 5."}, status=status.HTTP_400_BAD_REQUEST)
+        rating, error = _parse_rating(request.data.get("rating"))
+        if error:
+            return Response({"detail": error}, status=status.HTTP_400_BAD_REQUEST)
 
         note = request.data.get("note", "")
         if not isinstance(note, str):

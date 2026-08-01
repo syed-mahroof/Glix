@@ -91,6 +91,14 @@ DATABASES = {
         # doesn't (local Docker Postgres) — same setting works unchanged
         # in both places, no per-environment override needed.
         "OPTIONS": {"sslmode": os.environ.get("POSTGRES_SSLMODE", "prefer")},
+        # Phase 74/Group J: was unset anywhere in the project, which
+        # defaults to 0 — a fresh TCP+TLS handshake to the managed Postgres
+        # host on every single request, real latency on a host with no
+        # local connection pooler in front of it. 60s keeps a connection
+        # alive across a burst of requests from the same worker thread
+        # without holding it open indefinitely against a host that may
+        # itself close idle connections.
+        "CONN_MAX_AGE": int(os.environ.get("DB_CONN_MAX_AGE", "60")),
     }
 }
 
@@ -209,6 +217,24 @@ CACHES = {
     "default": {
         "BACKEND": "django.core.cache.backends.redis.RedisCache",
         "LOCATION": os.environ.get("REDIS_CACHE_URL", "redis://localhost:6379/2"),
+        # Phase 74/Group J: OPTIONS was empty, so a slow/unreachable Redis
+        # (Upstash on the free tier, e.g.) had no socket-level timeout at
+        # all and could hang a request indefinitely instead of failing
+        # fast. Django's *native* RedisCache (this file — not the
+        # third-party django-redis package) passes OPTIONS straight
+        # through to redis-py's ConnectionPool.from_url(), so only real
+        # redis-py connection kwargs belong here. There is deliberately no
+        # IGNORE_EXCEPTIONS: that's a django-redis-only feature this
+        # backend doesn't implement — setting it would raise a TypeError
+        # from redis-py's own Connection.__init__ rather than silently
+        # degrading. Graceful degrade-on-cache-failure would need either
+        # switching backends or wrapping every cache.get/set call site;
+        # out of scope for this pass. Failing fast (a few seconds, not a
+        # request-killing hang) is still strictly better than unbounded.
+        "OPTIONS": {
+            "socket_connect_timeout": 3,
+            "socket_timeout": 3,
+        },
     }
 }
 

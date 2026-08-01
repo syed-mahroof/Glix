@@ -19,7 +19,8 @@ import calendar
 from collections import Counter, defaultdict
 from datetime import date, timedelta
 
-from django.db.models import Count, Q, Sum
+from django.core.cache import cache
+from django.db.models import Avg, Count, Min, Q, Sum
 from django.utils import timezone
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
@@ -28,14 +29,22 @@ from rest_framework.views import APIView
 from core.analytics_serializers import (
     AchievementItemSerializer,
     ActorStatSerializer,
+    AnalyticsMoviesSerializer,
     CompletionSerializer,
     DashboardSerializer,
     GenreStatSerializer,
+    HeatmapAllTimeSerializer,
     HeatmapDaySerializer,
     MonthlySummaryItemSerializer,
     StatisticsSerializer,
     StreakSerializer,
     YearReviewSerializer,
+)
+from core.cache_keys import (
+    ANALYTICS_HEATMAP_ALL_CACHE_TTL_SECONDS,
+    ANALYTICS_MOVIES_CACHE_TTL_SECONDS,
+    analytics_heatmap_all_cache_key,
+    analytics_movies_cache_key,
 )
 from core.badge_constants import (
     BADGE_DISPLAY,
@@ -61,6 +70,8 @@ from core.badge_constants import (
 from core.models import (
     CachedEpisode,
     EpisodeInteraction,
+    MovieCache,
+    MovieWatchlist,
     MovieWatchState,
     UserProfile,
     Watchlist,
@@ -81,19 +92,36 @@ def _get_streak(user) -> WatchStreak:
     return streak
 
 
-def _watch_time_summary(total_minutes: int) -> dict:
-    """Convert raw minutes into a WatchTimeSummary dict."""
-    total_hours = round(total_minutes / 60, 1)
-    total_days = round(total_minutes / 1440, 2)
-    # Use 90 days of data to compute daily average
-    return {
-        "total_minutes": total_minutes,
-        "total_hours": total_hours,
-        "total_days": total_days,
-        "avg_minutes_per_day": round(total_minutes / 90, 1),
-        "avg_minutes_per_week": round(total_minutes / (90 / 7), 1),
-        "avg_minutes_per_month": round(total_minutes / 3, 1),
-    }
+def _intensity_for_count(eps: int, scale_max: int) -> int:
+    """
+    Maps a day's episode count to a 0-4 heat level for the cell colour.
+
+    Fixed thresholds (7+/4+/2+/1), not "quartile of the window's max" —
+    over a multi-year window a single 17-episode binge used to flatten
+    every ordinary 1-4 episode day down to intensity 1, which made the
+    heatmap useless at that scale. For a light watcher whose own max in
+    the window never reaches 4, fixed thresholds would flatten
+    everything to intensity 1 for the opposite reason, so scale_max<4
+    falls back to a direct 1:1 mapping instead (their few episodes still
+    span the color range).
+
+    Shared by every caller of _heatmap_for_user/_heatmap_all_time_for_user
+    — the 365-day heatmap, the sparse ?range=all payload, and
+    AnalyticsStreakView's 30-day mini-strip all change together.
+    Deliberate: the old scheme was wrong on all three for the same
+    reason, not just for whichever one this was written for.
+    """
+    if eps <= 0:
+        return 0
+    if scale_max < 4:
+        return min(eps, 4)
+    if eps >= 7:
+        return 4
+    if eps >= 4:
+        return 3
+    if eps >= 2:
+        return 2
+    return 1
 
 
 def _heatmap_for_user(user, days: int = 365) -> list[dict]:
@@ -123,38 +151,103 @@ def _heatmap_for_user(user, days: int = 365) -> list[dict]:
         for row in qs
     }
 
-    # Determine max for normalising intensity (1–4 scale, 0 = no activity)
-    max_eps = max((v["episodes_watched"] for v in activity_by_date.values()), default=1)
+    scale_max = max((v["episodes_watched"] for v in activity_by_date.values()), default=0)
 
     result = []
     current = start_date
     while current <= end_date:
         data = activity_by_date.get(current)
-        if data:
-            eps = data["episodes_watched"]
-            # Map to 1–4 based on quartile of max
-            if eps >= max_eps * 0.75:
-                intensity = 4
-            elif eps >= max_eps * 0.5:
-                intensity = 3
-            elif eps >= max_eps * 0.25:
-                intensity = 2
-            else:
-                intensity = 1
-        else:
-            eps = 0
-            intensity = 0
+        eps = data["episodes_watched"] if data else 0
         result.append(
             {
                 "date": current,
                 "episodes_watched": eps,
-                "minutes_watched": activity_by_date.get(current, {}).get("minutes_watched", 0),
-                "intensity": intensity,
+                "minutes_watched": data["minutes_watched"] if data else 0,
+                "intensity": _intensity_for_count(eps, scale_max),
             }
         )
         current += timedelta(days=1)
 
     return result
+
+
+# Defensive cap on how far back ?range=all will look — not an expected
+# case (no user has 15 years of history yet), just a bound on worst-case
+# query/response size if watched_at were ever corrupted with a bogus date.
+HEATMAP_ALL_TIME_MAX_YEARS_BACK = 15
+
+
+def _heatmap_all_time_for_user(user) -> dict:
+    """
+    Sparse, year-grouped watch-activity payload for the full-history view
+    (?range=all on AnalyticsHeatmapView). Unlike _heatmap_for_user's dense
+    day-by-day fill, only days with actual activity are included, plus a
+    per-year rollup — a 10-year dense fill would be ~3,650 objects; sparse
+    is the user's real count of active days.
+
+    Intensity is normalized across the *entire* window, not per-year:
+    per-year normalization is the intuitive fix but is wrong — it would
+    destroy the year-to-year comparability that is the whole point of a
+    multi-year view (a light year and a heavy year would both render as
+    "fully lit up").
+    """
+    earliest = WatchState.objects.filter(user=user).aggregate(Min("watched_at"))["watched_at__min"]
+    if earliest is None:
+        return {"years": []}
+
+    end_date = timezone.now().date()
+    start_date = earliest.date()
+    earliest_allowed = end_date.replace(year=end_date.year - HEATMAP_ALL_TIME_MAX_YEARS_BACK)
+    if start_date < earliest_allowed:
+        start_date = earliest_allowed
+
+    qs = (
+        WatchState.objects.filter(user=user, watched_at__date__gte=start_date)
+        .values("watched_at__date")
+        .annotate(
+            episodes_watched=Count("id"),
+            minutes_watched=Sum("episode__runtime_minutes"),
+        )
+    )
+
+    activity_by_date: dict[date, dict] = {
+        row["watched_at__date"]: {
+            "episodes_watched": row["episodes_watched"],
+            "minutes_watched": row["minutes_watched"] or 0,
+        }
+        for row in qs
+    }
+
+    scale_max = max((v["episodes_watched"] for v in activity_by_date.values()), default=0)
+
+    years: dict[int, dict] = {}
+    for day, data in sorted(activity_by_date.items()):
+        eps = data["episodes_watched"]
+        bucket = years.setdefault(
+            day.year,
+            {
+                "year": day.year,
+                "episodes_watched": 0,
+                "minutes_watched": 0,
+                "days_active": 0,
+                "max_episodes_in_a_day": 0,
+                "days": [],
+            },
+        )
+        bucket["episodes_watched"] += eps
+        bucket["minutes_watched"] += data["minutes_watched"]
+        bucket["days_active"] += 1
+        bucket["max_episodes_in_a_day"] = max(bucket["max_episodes_in_a_day"], eps)
+        bucket["days"].append(
+            {
+                "date": day,
+                "episodes_watched": eps,
+                "minutes_watched": data["minutes_watched"],
+                "intensity": _intensity_for_count(eps, scale_max),
+            }
+        )
+
+    return {"years": [years[y] for y in sorted(years.keys(), reverse=True)]}
 
 
 def _genre_stats(user) -> list[dict]:
@@ -570,13 +663,22 @@ class AnalyticsGenresView(APIView):
         return Response(serializer.data)
 
 
-class AnalyticsActorsView(APIView):
-    """GET /api/analytics/actors/"""
+class AnalyticsMVPCharactersView(APIView):
+    """
+    GET /api/analytics/mvp-characters/
+
+    Was named AnalyticsActorsView / "actors" — misleading, since no
+    real-world cast/crew data is stored per-user anywhere in this schema.
+    This is the user's own MVP-character votes (EpisodeInteraction.
+    mvp_character_name, cast via MVPVotingSheet.tsx after an episode),
+    tallied by vote count. Renamed for honesty; zero consumers referenced
+    the old name (grepped clean — client never fetched this endpoint).
+    """
 
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        actor_qs = (
+        character_qs = (
             EpisodeInteraction.objects.filter(
                 user=request.user,
             )
@@ -587,7 +689,7 @@ class AnalyticsActorsView(APIView):
         )
         data = [
             {"actor_name": row["mvp_character_name"], "vote_count": row["vote_count"]}
-            for row in actor_qs
+            for row in character_qs
         ]
         serializer = ActorStatSerializer(data, many=True)
         return Response(serializer.data)
@@ -652,11 +754,23 @@ class AnalyticsCompletionView(APIView):
         ep_pct = round((total_watched / total_aired) * 100, 1) if total_aired else 0.0
         show_pct = round((completed_shows / total_shows) * 100, 1) if total_shows else 0.0
 
+        # Movies ARE tracked separately in this schema (MovieWatchlist/
+        # MovieWatchState) — the "not tracked" comment this replaced was
+        # simply wrong (see AnalyticsMoviesView, which reads the same two
+        # tables). A movie has no partial-progress state, so "completion"
+        # here just means watched-or-not, mirroring shows_completed's
+        # watched-or-not semantics at the show level (not episode level).
+        movies_tracked = MovieWatchlist.objects.filter(user=request.user).count()
+        movies_watched = MovieWatchState.objects.filter(user=request.user).count()
+        movie_pct = round((movies_watched / movies_tracked) * 100, 1) if movies_tracked else 0.0
+
         data = {
             "episode_completion_pct": ep_pct,
             "season_completion_pct": ep_pct,   # season-level tracking not stored; proxy with ep%
             "show_completion_pct": show_pct,
-            "movie_completion_pct": 0.0,       # movies not tracked separately in this schema
+            "movie_completion_pct": movie_pct,
+            "movies_watched": movies_watched,
+            "movies_tracked": movies_tracked,
             "episodes_watched": total_watched,
             "episodes_aired": total_aired,
             "shows_completed": completed_shows,
@@ -666,12 +780,150 @@ class AnalyticsCompletionView(APIView):
         return Response(serializer.data)
 
 
-class AnalyticsHeatmapView(APIView):
-    """GET /api/analytics/heatmap/?days=365"""
+class AnalyticsMoviesView(APIView):
+    """
+    GET /api/analytics/movies/
+
+    The Movies-segment counterpart to the TV-only analytics screen
+    (Phase 74/Group H) — mounted as a separate SegmentedControl tab on
+    the client, not merged into the existing TV numbers (which must not
+    change). ~7 queries, cached 300s and busted by the same
+    MovieWatchlist/MovieWatchState signal receivers movie_watchlist_cache_key
+    already uses (signals.py) — analytics_movies_cache_key was added to
+    that same pair rather than inventing a new invalidation path.
+
+    Deliberately NOT building a top-actor/top-director section: no
+    per-user movie credits data is persisted anywhere (MovieCache has no
+    cast/crew fields), and faking it would be a third dishonest-data
+    surface next to AnalyticsProvidersView's already-honest empty stub.
+    """
 
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
+        user = request.user
+        cache_key = analytics_movies_cache_key(user.id)
+        cached = cache.get(cache_key)
+        if cached is not None:
+            return Response(cached)
+
+        movies_tracked = MovieWatchlist.objects.filter(user=user).count()
+
+        runtime_agg = MovieWatchState.objects.filter(user=user).aggregate(
+            total=Sum("movie__runtime_minutes"),
+            avg=Avg("movie__runtime_minutes"),
+            count=Count("id"),
+        )
+        movies_watched = runtime_agg["count"] or 0
+        total_runtime = runtime_agg["total"] or 0
+        avg_runtime = round(runtime_agg["avg"], 1) if runtime_agg["avg"] else 0.0
+
+        watched_this_year = MovieWatchState.objects.filter(
+            user=user, watched_at__year=timezone.now().year
+        ).count()
+
+        longest_ws = (
+            MovieWatchState.objects.filter(user=user)
+            .select_related("movie")
+            .order_by("-movie__runtime_minutes")
+            .first()
+        )
+        longest_movie = None
+        if longest_ws:
+            longest_movie = {
+                "tmdb_id": longest_ws.movie_id,
+                "title": longest_ws.movie.title,
+                "poster_path": longest_ws.movie.poster_path,
+                "runtime_minutes": longest_ws.movie.runtime_minutes,
+            }
+
+        # Genre trick: MovieCache.genres_string is a comma-separated combo
+        # ("Drama, Comedy, Thriller"), not an ArrayField, and there are
+        # only a few dozen distinct combos across any real library — group
+        # by the raw combo string in the DB, then split+tally in Python
+        # over those few dozen rows. Iterating every watched-movie row
+        # individually (the _genre_stats anti-pattern used for shows,
+        # which needs it because CachedShow.genres IS an ArrayField with
+        # no combo to group by) would be the wrong shape here.
+        genre_counter: Counter = Counter()
+        for row in (
+            MovieWatchState.objects.filter(user=user)
+            .values("movie__genres_string")
+            .annotate(count=Count("id"))
+        ):
+            for genre in (row["movie__genres_string"] or "").split(","):
+                genre = genre.strip()
+                if genre:
+                    genre_counter[genre] += row["count"]
+
+        top_genres = [
+            {
+                "genre": genre,
+                "count": count,
+                "percentage": round((count / movies_watched) * 100, 1) if movies_watched else 0.0,
+            }
+            for genre, count in genre_counter.most_common(10)
+        ]
+
+        decade_counter: Counter = Counter()
+        for release_date in MovieWatchState.objects.filter(user=user).values_list(
+            "movie__release_date", flat=True
+        ):
+            if release_date:
+                decade_counter[f"{(release_date.year // 10) * 10}s"] += 1
+        by_decade = [
+            {"decade": decade, "count": count} for decade, count in sorted(decade_counter.items())
+        ]
+
+        recent_movies = [
+            {
+                "tmdb_id": ws.movie_id,
+                "title": ws.movie.title,
+                "poster_path": ws.movie.poster_path,
+                "watched_at": ws.watched_at,
+            }
+            for ws in (
+                MovieWatchState.objects.filter(user=user)
+                .select_related("movie")
+                .order_by("-watched_at")[:5]
+            )
+        ]
+
+        data = {
+            "movies_watched": movies_watched,
+            "movies_tracked": movies_tracked,
+            "completion_pct": round((movies_watched / movies_tracked) * 100, 1) if movies_tracked else 0.0,
+            "total_runtime_minutes": total_runtime,
+            "average_runtime_minutes": avg_runtime,
+            "watched_this_year": watched_this_year,
+            "longest_movie": longest_movie,
+            "top_genres": top_genres,
+            "by_decade": by_decade,
+            "recent_movies": recent_movies,
+        }
+        serialized = AnalyticsMoviesSerializer(data).data
+        cache.set(cache_key, serialized, ANALYTICS_MOVIES_CACHE_TTL_SECONDS)
+        return Response(serialized)
+
+
+class AnalyticsHeatmapView(APIView):
+    """
+    GET /api/analytics/heatmap/?days=365 — dense day-by-day window,
+    uncached (staleness here is noticeable: mark an episode, tab back,
+    today's cell should light up immediately).
+
+    GET /api/analytics/heatmap/?range=all — sparse, year-grouped full
+    history (Phase 74/Group G), cached 900s under a separate key. Two
+    genuinely different response shapes on one endpoint rather than a
+    second URL, since both are "the heatmap, at different zoom levels."
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        if request.query_params.get("range") == "all":
+            return self._all_time(request.user)
+
         try:
             days = int(request.query_params.get("days", 365))
             days = max(7, min(days, 730))
@@ -681,6 +933,17 @@ class AnalyticsHeatmapView(APIView):
         heatmap_data = _heatmap_for_user(request.user, days=days)
         serializer = HeatmapDaySerializer(heatmap_data, many=True)
         return Response(serializer.data)
+
+    def _all_time(self, user) -> Response:
+        cache_key = analytics_heatmap_all_cache_key(user.id)
+        cached = cache.get(cache_key)
+        if cached is not None:
+            return Response(cached)
+
+        payload = _heatmap_all_time_for_user(user)
+        data = HeatmapAllTimeSerializer(payload).data
+        cache.set(cache_key, data, ANALYTICS_HEATMAP_ALL_CACHE_TTL_SECONDS)
+        return Response(data)
 
 
 class AnalyticsStreakView(APIView):
@@ -775,7 +1038,14 @@ class AnalyticsYearReviewView(APIView):
         )
         favorite_actor = actor_qs[0]["mvp_character_name"] if actor_qs else None
 
-        # Shows finished in the year (completed ≥ 1 show during this year)
+        # Shows *currently* finished (all-time, not year-scoped) — no
+        # per-show "completed on" date is stored anywhere in this schema,
+        # only the live watched/aired counts, so this can only answer "is
+        # this show fully caught up as of today", not "did the user finish
+        # it specifically during `year`". Same honest limitation as
+        # longest_streak below. Scoping it correctly would need a new
+        # completed_at column written the moment a show's last episode is
+        # marked watched — out of scope here.
         today = timezone.now().date()
         shows_finished = 0
         for entry in Watchlist.objects.filter(user=request.user).annotate(
@@ -848,56 +1118,57 @@ class AnalyticsMonthlySummaryView(APIView):
         except (ValueError, TypeError):
             year = current_year
 
-        today = timezone.now().date()
+        # Was 12 months × ~4 queries each (count/sum/genre-loop/top-show) —
+        # one query for the whole year plus a single Python pass instead,
+        # same "select_related + Counter" pattern _genre_stats/
+        # _compute_badge_progress already use for ArrayField genre tallying.
+        year_qs = (
+            WatchState.objects.filter(user=request.user, watched_at__year=year)
+            .select_related("episode__show")
+            .order_by()
+        )
+
+        months: dict[int, dict] = {
+            m: {"eps": 0, "mins": 0, "genres": Counter(), "shows": Counter(), "show_meta": {}}
+            for m in range(1, 13)
+        }
+        for ws in year_qs:
+            bucket = months[ws.watched_at.month]
+            bucket["eps"] += 1
+            bucket["mins"] += ws.episode.runtime_minutes or 0
+            show = ws.episode.show
+            for g in (show.genres or []):
+                bucket["genres"][g] += 1
+            bucket["shows"][show.tmdb_id] += 1
+            bucket["show_meta"][show.tmdb_id] = {"title": show.title, "poster_path": show.poster_path}
+
         results = []
-
         for month_num in range(1, 13):
-            month_qs = WatchState.objects.filter(
-                user=request.user,
-                watched_at__year=year,
-                watched_at__month=month_num,
-            )
-            eps = month_qs.count()
-            mins = month_qs.aggregate(m=Sum("episode__runtime_minutes"))["m"] or 0
+            bucket = months[month_num]
+            top_genre = bucket["genres"].most_common(1)[0][0] if bucket["genres"] else None
 
-            # Top genre this month
-            genre_counter: Counter = Counter()
-            for ws in month_qs.select_related("episode__show").order_by():
-                for g in (ws.episode.show.genres or []):
-                    genre_counter[g] += 1
-            top_genre = genre_counter.most_common(1)[0][0] if genre_counter else None
-
-            # Top show this month
-            top_show_qs = (
-                month_qs.values(
-                    "episode__show__tmdb_id",
-                    "episode__show__title",
-                    "episode__show__poster_path",
-                )
-                .annotate(c=Count("id"))
-                .order_by("-c")
-            )
             top_show = None
-            if top_show_qs:
-                ts = top_show_qs[0]
+            if bucket["shows"]:
+                top_show_id, top_count = bucket["shows"].most_common(1)[0]
+                meta = bucket["show_meta"][top_show_id]
                 top_show = {
-                    "tmdb_id": ts["episode__show__tmdb_id"],
-                    "title": ts["episode__show__title"],
-                    "poster_path": ts["episode__show__poster_path"],
-                    "episodes_watched": ts["c"],
+                    "tmdb_id": top_show_id,
+                    "title": meta["title"],
+                    "poster_path": meta["poster_path"],
+                    "episodes_watched": top_count,
                 }
-
-            # Shows finished this month (rough: completed shows with last watch in this month)
-            # Simpler: completed shows count (all-time) — we don't track per-month completion
-            shows_finished = 0
 
             results.append(
                 {
                     "month": f"{year}-{month_num:02d}",
                     "label": f"{calendar.month_name[month_num]} {year}",
-                    "hours_watched": round(mins / 60, 1),
-                    "episodes_watched": eps,
-                    "shows_finished": shows_finished,
+                    "hours_watched": round(bucket["mins"] / 60, 1),
+                    "episodes_watched": bucket["eps"],
+                    # No per-show "completed on" date is stored anywhere in
+                    # this schema (same limitation as
+                    # AnalyticsYearReviewView's shows_finished above) — 0
+                    # rather than a guess, not "completed shows all-time".
+                    "shows_finished": 0,
                     "top_genre": top_genre,
                     "top_show": top_show,
                 }

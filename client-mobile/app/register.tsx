@@ -19,26 +19,9 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { ACCESS_TOKEN_KEY, API_BASE_URL, REFRESH_TOKEN_KEY } from '../lib/api';
 import PressableScale from '../components/PressableScale';
 import SocialSignInButtons from '../components/SocialSignInButtons';
+import { extractErrorMessage } from '../lib/errors';
 import type { SocialAuthResponse } from '../lib/socialAuth';
 import { useAppTheme } from '../lib/theme';
-
-function extractErrorMessage(error: unknown): string {
-  if (axios.isAxiosError(error)) {
-    const data = error.response?.data;
-    if (data && typeof data === 'object') {
-      if (typeof data.detail === 'string') return data.detail;
-      
-      // Handle Django DRF field errors e.g. {"username": ["This field..."]}
-      const firstKey = Object.keys(data)[0];
-      if (firstKey && Array.isArray(data[firstKey])) {
-        return `${firstKey}: ${data[firstKey][0]}`;
-      }
-    }
-    const url = error.config?.url ? ` (${error.config.url})` : '';
-    return (error.message ?? 'Network request failed.') + url;
-  }
-  return 'An unexpected error occurred.';
-}
 
 export default function RegisterScreen() {
   const router = useRouter();

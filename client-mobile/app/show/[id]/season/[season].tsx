@@ -22,7 +22,7 @@ import PressableScale from '../../../../components/PressableScale';
 import { ProgressRing } from '../../../../components/ProgressRing';
 import Snackbar from '../../../../components/Snackbar';
 import { api } from '../../../../lib/api';
-import { pad, todayLocalIso } from '../../../../lib/dateFormat';
+import { hasAired, pad } from '../../../../lib/dateFormat';
 import { extractErrorMessage } from '../../../../lib/errors';
 import { useAppTheme } from '../../../../lib/theme';
 import { useCatchupCascade } from '../../../../lib/useCatchupCascade';
@@ -108,10 +108,9 @@ export default function SeasonScreen() {
     refreshContinueWatching();
   }, [loadSeason, refreshContinueWatching]);
 
-  const today = useMemo(() => todayLocalIso(), []);
   const airedEpisodes = useMemo(
-    () => episodes.filter((ep) => ep.air_date && ep.air_date <= today),
-    [episodes, today]
+    () => episodes.filter((ep) => hasAired(ep.air_date)),
+    [episodes]
   );
   const watchedCount = useMemo(
     () => airedEpisodes.filter((ep) => ep.is_watched).length,

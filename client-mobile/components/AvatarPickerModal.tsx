@@ -1,17 +1,20 @@
 // client-mobile/components/AvatarPickerModal.tsx
-// Profile > EDIT avatar picker. Two pools:
-//   - "Cast": real TMDB character headshots via GET /profile/avatar-options/
-//     (AvatarOptionsView, backend/core/profile_views.py) — top-billed cast
-//     from currently trending shows/movies, labeled by in-show `character`
-//     name rather than the actor's real name. TMDB has no dedicated
-//     character-portrait asset (the photo is unavoidably the credited
-//     actor's headshot), so this is the closest TMDB-backed approximation
-//     of "pick a character," per AI_RULES.md's "TMDB only via TMDBService"
-//     rule.
-//   - "Cartoon": illustrated/anime-leaning avatars generated client-side from
-//     a fixed seed list against DiceBear's public HTTP avatar API (no API
-//     key, no new npm dependency — just image URLs expo-image renders like
-//     any other remote photo).
+// Profile > EDIT avatar picker. Three pools (Phase 74: was two, "Cast"
+// renamed "Characters" to match what it actually returns):
+//   - "Characters": real TMDB character headshots via
+//     GET /profile/avatar-options/ (AvatarOptionsView,
+//     backend/core/profile_views.py) — top-billed cast from currently
+//     trending shows/movies, labeled by in-show `character` name rather
+//     than the actor's real name. TMDB has no dedicated character-portrait
+//     asset (the photo is unavoidably the credited actor's headshot), so
+//     this is the closest TMDB-backed approximation of "pick a character,"
+//     per AI_RULES.md's "TMDB only via TMDBService" rule.
+//   - "Cartoon": illustrated/animated-style avatars generated client-side
+//     from a fixed seed list against DiceBear's public HTTP avatar API (no
+//     API key, no new npm dependency — just image URLs expo-image renders
+//     like any other remote photo).
+//   - "Icons": abstract/geometric DiceBear styles (identicon, rings,
+//     shapes, initials) for users who want something non-figurative.
 import { Image } from 'expo-image';
 import { X } from 'lucide-react-native';
 import React, { useEffect, useMemo, useState } from 'react';
@@ -33,14 +36,33 @@ import { SegmentedControl } from './SegmentedControl';
 
 const TMDB_PROFILE_BASE = 'https://image.tmdb.org/t/p/w185';
 
-const CARTOON_STYLES = ['adventurer', 'micah', 'notionists', 'bottts', 'thumbs', 'big-smile'] as const;
-const CARTOON_SEEDS = ['Nova', 'Pixel', 'Comet', 'Juniper', 'Orion', 'Sable', 'Quill', 'Ember'];
+const DICEBEAR_SEEDS = ['Nova', 'Pixel', 'Comet', 'Juniper', 'Orion', 'Sable', 'Quill', 'Ember'];
 
-const CARTOON_AVATARS: string[] = CARTOON_STYLES.flatMap((style) =>
-  CARTOON_SEEDS.map(
-    (seed) => `https://api.dicebear.com/9.x/${style}/png?seed=${style}-${seed}&size=128`
-  )
-);
+// Phase 74: expanded from 6 styles to a broader illustrated/animated set —
+// none of these overlap with ICON_STYLES below, which is the abstract/
+// geometric counterpart, not "more of the same."
+const CARTOON_STYLES = [
+  'avataaars',
+  'croodles',
+  'fun-emoji',
+  'lorelei',
+  'open-peeps',
+  'personas',
+  'pixel-art',
+  'shapes',
+  'bottts-neutral',
+] as const;
+
+const ICON_STYLES = ['identicon', 'rings', 'shapes', 'initials'] as const;
+
+function buildDicebearAvatars(styles: readonly string[]): string[] {
+  return styles.flatMap((style) =>
+    DICEBEAR_SEEDS.map((seed) => `https://api.dicebear.com/9.x/${style}/png?seed=${style}-${seed}&size=128`)
+  );
+}
+
+const CARTOON_AVATARS: string[] = buildDicebearAvatars(CARTOON_STYLES);
+const ICON_AVATARS: string[] = buildDicebearAvatars(ICON_STYLES);
 
 interface CastCharacter {
   character: string;
@@ -48,7 +70,7 @@ interface CastCharacter {
   profile_path: string;
 }
 
-type Tab = 'cast' | 'cartoon';
+type Tab = 'characters' | 'cartoon' | 'icons';
 
 interface AvatarPickerModalProps {
   visible: boolean;
@@ -65,7 +87,7 @@ export default function AvatarPickerModal({
 }: AvatarPickerModalProps) {
   const { theme } = useAppTheme();
   const c = theme.colors;
-  const [tab, setTab] = useState<Tab>('cast');
+  const [tab, setTab] = useState<Tab>('characters');
   const [cast, setCast] = useState<CastCharacter[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -81,13 +103,21 @@ export default function AvatarPickerModal({
       .finally(() => setIsLoading(false));
   }, [visible, cast.length]);
 
-  const data = useMemo<string[]>(
-    () =>
-      tab === 'cast'
-        ? cast.map((p) => `${TMDB_PROFILE_BASE}${p.profile_path}`)
-        : CARTOON_AVATARS,
-    [tab, cast]
-  );
+  // Was a binary ternary (cast vs. one fixed cartoon list) — now a proper
+  // map over 3 tabs so adding a 4th pool later is a one-line addition,
+  // not another ternary branch.
+  const data = useMemo<string[]>(() => {
+    switch (tab) {
+      case 'characters':
+        return cast.map((p) => `${TMDB_PROFILE_BASE}${p.profile_path}`);
+      case 'cartoon':
+        return CARTOON_AVATARS;
+      case 'icons':
+        return ICON_AVATARS;
+      default:
+        return [];
+    }
+  }, [tab, cast]);
 
   return (
     <Modal visible={visible} animationType="slide" transparent onRequestClose={onClose}>
@@ -103,21 +133,22 @@ export default function AvatarPickerModal({
           <View style={styles.tabsRow}>
             <SegmentedControl<Tab>
               segments={[
-                { value: 'cast', label: 'Cast' },
+                { value: 'characters', label: 'Characters' },
                 { value: 'cartoon', label: 'Cartoon' },
+                { value: 'icons', label: 'Icons' },
               ]}
               selectedValue={tab}
               onValueChange={setTab}
             />
           </View>
 
-          {tab === 'cast' && error ? (
+          {tab === 'characters' && error ? (
             <View style={[styles.errorBanner, { backgroundColor: c.negativeDim, borderColor: 'rgba(255, 69, 58, 0.3)' }]}>
               <Text style={[styles.errorText, { color: c.negative }]}>{error}</Text>
             </View>
           ) : null}
 
-          {tab === 'cast' && isLoading ? (
+          {tab === 'characters' && isLoading ? (
             <View style={styles.centered}>
               <ActivityIndicator color={c.accentInk} size="large" />
             </View>

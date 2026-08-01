@@ -1,5 +1,6 @@
 // client-mobile/components/CommentCard.tsx
 import { Image } from 'expo-image';
+import { useRouter } from 'expo-router';
 import { ChevronDown, ChevronUp, X } from 'lucide-react-native';
 import React, { memo, useCallback, useState } from 'react';
 import {
@@ -56,6 +57,7 @@ export interface CommentCardProps {
 }
 
 function CommentCardComponent({ comment: initialComment, onPress }: CommentCardProps) {
+  const router = useRouter();
   const { theme } = useAppTheme();
   const c = theme.colors;
   const [comment, setComment] = useState(initialComment);
@@ -158,7 +160,11 @@ function CommentCardComponent({ comment: initialComment, onPress }: CommentCardP
 
   return (
     <PressableScale onPress={onPress} disabled={!onPress} style={[styles.card, { backgroundColor: c.glassFill, borderColor: c.hairline }]}>
-      <View style={styles.headerRow}>
+      <PressableScale
+        style={styles.headerRow}
+        onPress={() => router.push(`/user/${comment.user.username}` as any)}
+        hitSlop={4}
+      >
         {comment.user.profile_picture ? (
           <Image source={{ uri: comment.user.profile_picture }} style={[styles.avatar, { backgroundColor: c.bgElevated }]} />
         ) : (
@@ -175,7 +181,7 @@ function CommentCardComponent({ comment: initialComment, onPress }: CommentCardP
             {comment.is_edited ? ' · edited' : ''}
           </Text>
         </View>
-      </View>
+      </PressableScale>
 
       {isEditing ? (
         <CommentComposer

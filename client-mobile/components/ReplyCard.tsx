@@ -1,5 +1,6 @@
 // client-mobile/components/ReplyCard.tsx
 import { Image } from 'expo-image';
+import { useRouter } from 'expo-router';
 import { ChevronDown, ChevronUp, X } from 'lucide-react-native';
 import React, { memo, useCallback, useState } from 'react';
 import {
@@ -80,6 +81,7 @@ export interface ReplyCardProps {
 }
 
 function ReplyCardComponent({ reply, depth = 0, onDeleted }: ReplyCardProps) {
+  const router = useRouter();
   const { theme } = useAppTheme();
   const c = theme.colors;
   const [comment, setComment] = useState(reply);
@@ -183,7 +185,11 @@ function ReplyCardComponent({ reply, depth = 0, onDeleted }: ReplyCardProps) {
 
   return (
     <View style={[styles.wrap, { backgroundColor: c.glassFill, borderColor: c.hairline }, { marginLeft: Math.min(depth, 4) * 16 }]}>
-      <View style={styles.headerRow}>
+      <PressableScale
+        style={styles.headerRow}
+        onPress={() => router.push(`/user/${comment.user.username}` as any)}
+        hitSlop={4}
+      >
         {comment.user.profile_picture ? (
           <Image source={{ uri: comment.user.profile_picture }} style={[styles.avatar, { backgroundColor: c.bgElevated }]} />
         ) : (
@@ -200,7 +206,7 @@ function ReplyCardComponent({ reply, depth = 0, onDeleted }: ReplyCardProps) {
             {comment.is_edited ? ' · edited' : ''}
           </Text>
         </View>
-      </View>
+      </PressableScale>
 
       {isEditing ? (
         <CommentComposer

@@ -115,19 +115,22 @@ interface Props {
 }
 
 export default function DiscoverFilterSheet({ activeSegment }: Props) {
-  const {
-    filterSheetVisible,
-    selectedGenreId,
-    sortOrder,
-    selectedLanguage,
-    animeOnly,
-    closeFilterSheet,
-    setSelectedGenreId,
-    setSortOrder,
-    setSelectedLanguage,
-    setAnimeOnly,
-    resetFilters,
-  } = useDiscoverStore();
+  // Scoped selectors, not a bare useDiscoverStore() — this sheet is
+  // mounted alongside the main Discover screen at all times (including
+  // while closed), so a bare destructure re-rendered it on every
+  // discoverStore mutation anywhere — every search keystroke, every feed
+  // fetch — not just its own filter fields. Same fix as discover.tsx.
+  const filterSheetVisible = useDiscoverStore((s) => s.filterSheetVisible);
+  const selectedGenreId = useDiscoverStore((s) => s.selectedGenreId);
+  const sortOrder = useDiscoverStore((s) => s.sortOrder);
+  const selectedLanguage = useDiscoverStore((s) => s.selectedLanguage);
+  const animeOnly = useDiscoverStore((s) => s.animeOnly);
+  const closeFilterSheet = useDiscoverStore((s) => s.closeFilterSheet);
+  const setSelectedGenreId = useDiscoverStore((s) => s.setSelectedGenreId);
+  const setSortOrder = useDiscoverStore((s) => s.setSortOrder);
+  const setSelectedLanguage = useDiscoverStore((s) => s.setSelectedLanguage);
+  const setAnimeOnly = useDiscoverStore((s) => s.setAnimeOnly);
+  const resetFilters = useDiscoverStore((s) => s.resetFilters);
   const { theme } = useAppTheme();
   const c = theme.colors;
   const insets = useSafeAreaInsets();

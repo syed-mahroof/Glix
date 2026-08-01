@@ -66,6 +66,15 @@ class CustomListsView(APIView):
             .values("list")
             .annotate(c=Count("id"))
         }
+        # Per-media-type breakdown (tv vs movie) for the Shows/Movies filter
+        # on the "My Lists" hub — one extra grouped query, additive to
+        # item_counts above rather than replacing it.
+        media_counts = {
+            (row["list"], row["media_type"]): row["c"]
+            for row in CustomListItem.objects.filter(list_id__in=list_ids)
+            .values("list", "media_type")
+            .annotate(c=Count("id"))
+        }
         # Only need a few items per list for the cover collage, not all of
         # them — capped client-side of the DB (per-list slice) since a
         # single query can't LIMIT per group without a window function.
@@ -82,6 +91,7 @@ class CustomListsView(APIView):
             many=True,
             context={
                 "item_counts": item_counts,
+                "media_counts": media_counts,
                 "items_by_list": items_by_list,
                 "cover_map": cover_map,
             },

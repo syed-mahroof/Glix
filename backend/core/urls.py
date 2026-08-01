@@ -142,6 +142,8 @@ urlpatterns = [
     path("", include("core.lists_urls")),
     # Personalized cross-library recommendations
     path("", include("core.recommendations_urls")),
+    # Follow graph, user search, public profiles, friends activity feed
+    path("", include("core.social_urls")),
     # Movie Detail Suite (TMDB proxy)
     path("movies/<int:tmdb_id>/detail/", MovieDetailView.as_view(), name="movie-detail"),
     path("movies/<int:tmdb_id>/credits/", MovieCreditsView.as_view(), name="movie-credits"),

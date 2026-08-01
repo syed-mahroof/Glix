@@ -21,7 +21,7 @@ import PressableScale from '../../components/PressableScale';
 import { ProviderBadge } from '../../components/ProviderBadge';
 import Snackbar from '../../components/Snackbar';
 import { api } from '../../lib/api';
-import { pad, todayLocalIso } from '../../lib/dateFormat';
+import { hasAired, pad } from '../../lib/dateFormat';
 import { extractErrorMessage } from '../../lib/errors';
 import { goBack } from '../../lib/navigation';
 import { useAppTheme } from '../../lib/theme';
@@ -193,8 +193,7 @@ export default function EpisodeDetailScreen() {
     }
 
     // Can't mark a future episode watched.
-    const todayIso = todayLocalIso();
-    if (!episode.air_date || episode.air_date > todayIso) return;
+    if (!hasAired(episode.air_date)) return;
 
     // Watching: check for chronologically-prior unwatched episodes first.
     // isTogglingWatched covers both this async check and the eventual
@@ -321,8 +320,7 @@ export default function EpisodeDetailScreen() {
           </View>
 
           {(() => {
-            const todayIso = todayLocalIso();
-            const isAired = !!episode.air_date && episode.air_date <= todayIso;
+            const isAired = hasAired(episode.air_date);
             const lockedUnaired = !isAired && !episode.is_watched;
             return (
               <PressableScale

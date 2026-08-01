@@ -6,7 +6,12 @@
 // and the dead "Create a New List" row (onPress={() => {}}, no backing
 // feature); collapsed the social bar from 4 cells to the 2 that are real
 // (Shows/Movies) — Following/Followers were hard-coded 0s with a TODO,
-// no social graph exists yet. They return the day one ships, not before.
+// no social graph exists yet.
+// Phase 74: the social graph shipped (core/social_views.py) — the bar is
+// back to 4 cells (Shows/Movies/Followers/Following). Resync moved off the
+// bar's own press (a tap on "Followers" resyncing watch-time stats was a
+// surprising side effect) onto the watch-time card below, which already had
+// the RefreshCw hint and is the card whose numbers actually drift.
 
 import { useFocusEffect } from '@react-navigation/native';
 import { useRouter } from 'expo-router';
@@ -16,6 +21,8 @@ import {
   ChevronRight,
   Download,
   Film,
+  ListChecks,
+  NotebookPen,
   Settings,
   Star,
   Trophy,
@@ -40,6 +47,7 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 import AvatarPickerModal from '../../components/AvatarPickerModal';
+import EditProfileSheet from '../../components/EditProfileSheet';
 import GlassSurface from '../../components/GlassSurface';
 import PressableScale from '../../components/PressableScale';
 import { ProgressRing } from '../../components/ProgressRing';
@@ -65,6 +73,7 @@ export default function ProfileScreen() {
   const fetchWatchlist = useWatchStore((state) => state.fetchWatchlist);
   const fetchMovieWatchlist = useWatchStore((state) => state.fetchMovieWatchlist);
   const updateProfilePicture = useWatchStore((state) => state.updateProfilePicture);
+  const updateUsername = useWatchStore((state) => state.updateUsername);
   const resyncStats = useWatchStore((state) => state.resyncStats);
   const isResyncingStats = useWatchStore((state) => state.isResyncingStats);
   const watchlist = useWatchStore((state) => state.watchlist);
@@ -73,6 +82,7 @@ export default function ProfileScreen() {
   const [isImporting, setIsImporting] = useState(false);
   const [isExporting, setIsExporting] = useState(false);
   const [avatarPickerVisible, setAvatarPickerVisible] = useState(false);
+  const [editProfileVisible, setEditProfileVisible] = useState(false);
   const [syncSnackbarVisible, setSyncSnackbarVisible] = useState(false);
   // Live job state while an import runs, driving the ProgressRing.
   // Null whenever no import is in flight.
@@ -304,30 +314,39 @@ export default function ProfileScreen() {
             {profile?.username ?? (isLoadingProfile ? 'Loading…' : 'Guest')}
           </Text>
           {profile?.email ? <Text style={[styles.email, { color: c.textSecondary }]}>{profile.email}</Text> : null}
-          <PressableScale style={[styles.editBtn, { borderColor: c.hairline }]} onPress={() => setAvatarPickerVisible(true)}>
+          <PressableScale style={[styles.editBtn, { borderColor: c.hairline }]} onPress={() => setEditProfileVisible(true)}>
             <Text style={[styles.editBtnText, { color: c.textSecondary }]}>EDIT</Text>
           </PressableScale>
         </View>
 
-        {/* ── Social Stats Bar — Shows/Movies only (real data) ──────────────── */}
-        <PressableScale onPress={handleResyncStats} disabled={isResyncingStats}>
-          <GlassSurface radius={16} style={[styles.socialBar, isResyncingStats && styles.syncingCard]}>
-            <View style={styles.socialItem}>
-              <Text style={[styles.socialCount, monoValueStyle, { color: c.textPrimary }]}>{totalShows}</Text>
-              <Text style={[styles.socialLabel, monoLabelStyle, { color: c.textSecondary }]}>Shows</Text>
-            </View>
-            <View style={[styles.socialDivider, { backgroundColor: c.hairline }]} />
-            <View style={styles.socialItem}>
-              <Text style={[styles.socialCount, monoValueStyle, { color: c.textPrimary }]}>{totalMovies}</Text>
-              <Text style={[styles.socialLabel, monoLabelStyle, { color: c.textSecondary }]}>Movies</Text>
-            </View>
-            {isResyncingStats && (
-              <View style={styles.syncOverlay} pointerEvents="none">
-                <ActivityIndicator color={c.accentInk} size="small" />
-              </View>
-            )}
-          </GlassSurface>
-        </PressableScale>
+        {/* ── Social Stats Bar — Shows | Movies | Followers | Following ─────── */}
+        <GlassSurface radius={16} style={styles.socialBar}>
+          <PressableScale style={styles.socialItem} onPress={() => router.push('/profile/shows' as any)}>
+            <Text style={[styles.socialCount, monoValueStyle, { color: c.textPrimary }]}>{totalShows}</Text>
+            <Text style={[styles.socialLabel, monoLabelStyle, { color: c.textSecondary }]}>Shows</Text>
+          </PressableScale>
+          <View style={[styles.socialDivider, { backgroundColor: c.hairline }]} />
+          <PressableScale style={styles.socialItem} onPress={() => router.push('/profile/movies' as any)}>
+            <Text style={[styles.socialCount, monoValueStyle, { color: c.textPrimary }]}>{totalMovies}</Text>
+            <Text style={[styles.socialLabel, monoLabelStyle, { color: c.textSecondary }]}>Movies</Text>
+          </PressableScale>
+          <View style={[styles.socialDivider, { backgroundColor: c.hairline }]} />
+          <PressableScale
+            style={styles.socialItem}
+            onPress={() => profile?.username && router.push(`/user/${profile.username}/connections?tab=followers` as any)}
+          >
+            <Text style={[styles.socialCount, monoValueStyle, { color: c.textPrimary }]}>{profile?.follower_count ?? 0}</Text>
+            <Text style={[styles.socialLabel, monoLabelStyle, { color: c.textSecondary }]}>Followers</Text>
+          </PressableScale>
+          <View style={[styles.socialDivider, { backgroundColor: c.hairline }]} />
+          <PressableScale
+            style={styles.socialItem}
+            onPress={() => profile?.username && router.push(`/user/${profile.username}/connections?tab=following` as any)}
+          >
+            <Text style={[styles.socialCount, monoValueStyle, { color: c.textPrimary }]}>{profile?.following_count ?? 0}</Text>
+            <Text style={[styles.socialLabel, monoLabelStyle, { color: c.textSecondary }]}>Following</Text>
+          </PressableScale>
+        </GlassSurface>
 
         {/* ── Watch Time Stats Card — tap to resync from source data ────────── */}
         <PressableScale onPress={handleResyncStats} disabled={isResyncingStats}>
@@ -393,6 +412,17 @@ export default function ProfileScreen() {
           </GlassSurface>
         </PressableScale>
 
+        {/* ── Lists ─────────────────────────────────────────────────────────── */}
+        <PressableScale onPress={() => router.push('/lists' as any)}>
+          <GlassSurface radius={14} style={styles.settingsRow}>
+            <View style={styles.rowLeft}>
+              <ListChecks color={c.accentInk} size={18} strokeWidth={1.75} />
+              <Text style={[styles.settingsRowText, { color: c.textPrimary }]}>My Lists</Text>
+            </View>
+            <ChevronRight color={c.textTertiary} size={18} />
+          </GlassSurface>
+        </PressableScale>
+
         {/* ── Badges ────────────────────────────────────────────────────────── */}
         <View style={styles.sectionHeader}>
           <Text style={[styles.sectionTitle, { color: c.textPrimary }]}>Badges</Text>
@@ -450,6 +480,15 @@ export default function ProfileScreen() {
             <View style={styles.rowLeft}>
               <Star color={c.accentInk} size={18} strokeWidth={1.75} />
               <Text style={[styles.settingsRowText, { color: c.textPrimary }]}>Year in Review</Text>
+            </View>
+            <ChevronRight color={c.textTertiary} size={18} />
+          </GlassSurface>
+        </PressableScale>
+        <PressableScale onPress={() => router.push('/profile/reviews' as any)}>
+          <GlassSurface radius={14} style={styles.settingsRow}>
+            <View style={styles.rowLeft}>
+              <NotebookPen color={c.accentInk} size={18} strokeWidth={1.75} />
+              <Text style={[styles.settingsRowText, { color: c.textPrimary }]}>My Reviews</Text>
             </View>
             <ChevronRight color={c.textTertiary} size={18} />
           </GlassSurface>
@@ -525,21 +564,14 @@ export default function ProfileScreen() {
         </GlassSurface>
 
         {/* ── More ──────────────────────────────────────────────────────────── */}
+        {/* Only Community lives here — App Settings was removed (Phase 74),
+            it duplicated the header gear (see headerActions above). */}
         <Text style={[styles.sectionTitle, { color: c.textPrimary }]}>More</Text>
         <PressableScale onPress={() => router.push('/community')}>
           <GlassSurface radius={14} style={styles.settingsRow}>
             <View style={styles.rowLeft}>
               <Users color={c.accentInk} size={18} strokeWidth={1.75} />
               <Text style={[styles.settingsRowText, { color: c.textPrimary }]}>Community</Text>
-            </View>
-            <ChevronRight color={c.textTertiary} size={18} />
-          </GlassSurface>
-        </PressableScale>
-        <PressableScale onPress={() => router.push('/settings')}>
-          <GlassSurface radius={14} style={styles.settingsRow}>
-            <View style={styles.rowLeft}>
-              <Settings color={c.accentInk} size={18} strokeWidth={1.75} />
-              <Text style={[styles.settingsRowText, { color: c.textPrimary }]}>App Settings</Text>
             </View>
             <ChevronRight color={c.textTertiary} size={18} />
           </GlassSurface>
@@ -552,6 +584,19 @@ export default function ProfileScreen() {
         currentAvatar={profile?.profile_picture ?? null}
         onClose={() => setAvatarPickerVisible(false)}
         onSelect={handleSelectAvatar}
+      />
+
+      <EditProfileSheet
+        visible={editProfileVisible}
+        username={profile?.username ?? ''}
+        avatarUrl={profile?.profile_picture ?? null}
+        avatarInitials={initials}
+        onClose={() => setEditProfileVisible(false)}
+        onChangePhoto={() => {
+          setEditProfileVisible(false);
+          setAvatarPickerVisible(true);
+        }}
+        onSaveUsername={updateUsername}
       />
 
       <Snackbar

@@ -10,7 +10,8 @@ API key comfortably under rate limits regardless of user count.
 import logging
 import re
 import threading
-from datetime import timedelta
+from concurrent.futures import ThreadPoolExecutor
+from datetime import date, datetime, timedelta
 from typing import Any, Optional
 
 import requests
@@ -24,6 +25,29 @@ logger = logging.getLogger(__name__)
 
 TMDB_BASE_URL = "https://api.themoviedb.org/3"
 CACHE_TTL = timedelta(hours=12)
+
+
+def _parse_tmdb_date(raw: Optional[str]) -> Optional[date]:
+    """TMDB dates are "YYYY-MM-DD" strings or absent. Parsed to a real
+    `date` here rather than passed straight into a DateField's
+    `defaults=` dict: `update_or_create`'s returned instance carries
+    whatever was in `defaults` via plain attribute assignment, which
+    Django does NOT type-coerce (only a DB round-trip does, via the
+    driver's date adapter) — a caller comparing e.g. `movie.release_date
+    > some_date` on the fresh, not-yet-reloaded instance from a cold
+    cache miss would TypeError on str vs. date. Bit Phase 74's movie
+    release-date gate in `_import_one_movie` (`tasks.py`) via
+    `get_movie_details()`; fixed at the source here so every current and
+    future caller of get_show_details/get_movie_details gets a real
+    `date` regardless of whether the instance came from a fresh fetch or
+    an existing DB row.
+    """
+    if not raw:
+        return None
+    try:
+        return datetime.strptime(raw, "%Y-%m-%d").date()
+    except (ValueError, TypeError):
+        return None
 
 WRITER_JOBS = {"Writer", "Story", "Teleplay", "Screenplay"}
 
@@ -93,10 +117,21 @@ def _get_shared_tmdb_session() -> requests.Session:
         # hits this. That could exceed the frontend's axios timeout (lib/api.ts)
         # even though the backend was still working — surfacing as a raw
         # "Network Error" to the user for what was actually a transient TMDB
-        # rate-limit. Tightened to keep worst-case backoff bounded
-        # (0.5+1+2=3.5s) while still absorbing a transient blip.
+        # rate-limit.
+        #
+        # Phase 74/Group J: the total=3/backoff_factor=0.5 tightened here
+        # previously still had a real worst case of ~43.5s — total=3 means
+        # 4 attempts, and this comment counted only the 3.5s of backoff
+        # *sleep* between them, ignoring that each attempt also carries its
+        # own `timeout` (10s at the time) as connect+read budget: 4×10s +
+        # 3.5s ≈ 43.5s, comfortably past axios's 15s client-side timeout
+        # (api.ts) even though the backend was still legitimately working.
+        # total=2 (3 attempts) × TMDBService's now-4s default timeout +
+        # backoff (0.5+1=1.5s) ≈ 13.5s worst case, inside the client's
+        # budget with margin for TLS/serialization overhead — see
+        # TMDBService.__init__'s `timeout` default below.
         retry_strategy = Retry(
-            total=3,
+            total=2,
             status_forcelist=[429, 500, 502, 503, 504],
             allowed_methods=["HEAD", "GET", "OPTIONS"],
             backoff_factor=0.5,
@@ -133,7 +168,7 @@ class TMDBService:
         show = tmdb.get_show_details(1396)
     """
 
-    def __init__(self, api_key: Optional[str] = None, timeout: int = 10):
+    def __init__(self, api_key: Optional[str] = None, timeout: int = 4):
         self.api_key = api_key or getattr(settings, "TMDB_API_KEY", None)
         if not self.api_key:
             logger.warning(
@@ -240,14 +275,14 @@ class TMDBService:
                 "overview": payload.get("overview", ""),
                 "poster_path": payload.get("poster_path"),
                 "backdrop_path": payload.get("backdrop_path"),
-                "first_air_date": payload.get("first_air_date") or None,
+                "first_air_date": _parse_tmdb_date(payload.get("first_air_date")),
                 "status": status_map.get(payload.get("status"), CachedShow.Status.RETURNING),
                 "vote_average": payload.get("vote_average", 0.0),
                 "total_seasons": payload.get("number_of_seasons", 0),
                 "total_episodes": payload.get("number_of_episodes", 0),
                 "original_language": payload.get("original_language", ""),
                 "genres": [g["name"] for g in payload.get("genres", [])],
-                "next_episode_air_date": next_ep.get("air_date") or None,
+                "next_episode_air_date": _parse_tmdb_date(next_ep.get("air_date")),
                 "next_episode_season_number": next_ep.get("season_number"),
                 "next_episode_number": next_ep.get("episode_number"),
                 "next_episode_name": next_ep.get("name") or None,
@@ -296,7 +331,7 @@ class TMDBService:
                 "overview": payload.get("overview", ""),
                 "poster_path": payload.get("poster_path"),
                 "backdrop_path": payload.get("backdrop_path"),
-                "release_date": payload.get("release_date") or None,
+                "release_date": _parse_tmdb_date(payload.get("release_date")),
                 "runtime_minutes": payload.get("runtime") or 0,
                 "genres_string": genres,
                 "vote_average": payload.get("vote_average", 0.0),
@@ -562,14 +597,29 @@ class TMDBService:
             {**m, "media_type": "movie"} for m in movies.get("results", [])[:8]
         ]
 
-        for title in titles:
+        # Each title's credits call is independent of every other, but this
+        # used to run up to 16 of them sequentially — a cold cache could
+        # block one of the app's 4 gunicorn threads for the entire chain
+        # (this view's own cache is 24h, so a cold miss is rare but not
+        # free when it happens). Same ThreadPoolExecutor pattern
+        # DiscoverFeedView uses (views.py). pool.map preserves input order
+        # in its results regardless of which call actually finished first,
+        # so the picker's output stays deterministic.
+        def _fetch_credits(title: dict) -> Optional[dict]:
             try:
-                credits = (
+                return (
                     self.get_show_credits(title["tmdb_id"])
                     if title["media_type"] == "tv"
                     else self.get_movie_credits(title["tmdb_id"])
                 )
             except TMDBServiceError:
+                return None
+
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            credits_by_title = list(pool.map(_fetch_credits, titles))
+
+        for title, credits in zip(titles, credits_by_title):
+            if credits is None:
                 continue
 
             for member in credits.get("cast", [])[:4]:

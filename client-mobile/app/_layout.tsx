@@ -269,6 +269,10 @@ function RootLayoutInner() {
                 options={{ headerShown: false, animation: 'slide_from_right' }}
               />
               <Stack.Screen
+                name="profile/reviews"
+                options={{ headerShown: false, animation: 'slide_from_right' }}
+              />
+              <Stack.Screen
                 name="movie/[id]"
                 options={{ headerShown: false, animation: 'slide_from_right' }}
               />
@@ -278,6 +282,14 @@ function RootLayoutInner() {
               />
               <Stack.Screen
                 name="lists/[id]"
+                options={{ headerShown: false, animation: 'slide_from_right' }}
+              />
+              <Stack.Screen
+                name="user/[username]"
+                options={{ headerShown: false, animation: 'slide_from_right' }}
+              />
+              <Stack.Screen
+                name="user/[username]/connections"
                 options={{ headerShown: false, animation: 'slide_from_right' }}
               />
             </Stack>

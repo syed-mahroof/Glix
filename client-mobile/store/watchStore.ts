@@ -155,11 +155,14 @@ export interface UserProfile {
   username: string;
   email: string;
   profile_picture: string | null;
+  is_private: boolean;
   total_time_watched: number;
   watched_days: number;
   watched_hours: number;
   watched_minutes: number;
   earned_badges: string[];
+  follower_count: number;
+  following_count: number;
   created_at: string;
 }
 
@@ -174,6 +177,14 @@ interface ToggleResponse {
 
 interface BulkToggleResponse {
   episode_ids: number[];
+  /** Ids the server actually created/deleted a WatchState row for — a
+   *  subset of episode_ids when some requested ids were unaired (see
+   *  skipped_unaired_ids). */
+  applied_episode_ids?: number[];
+  /** Requested ids the server refused because the episode hasn't aired
+   *  yet — the client's optimistic update marks all requested ids
+   *  watched before this response arrives, so these need reconciling. */
+  skipped_unaired_ids?: number[];
   watched: boolean;
   total_time_watched: number;
   newly_earned_badges?: string[];
@@ -340,6 +351,18 @@ export interface HeatmapDay {
   intensity: number;
 }
 
+/** One year's rollup from GET /analytics/heatmap/?range=all — `days` is
+ *  sparse (only days with activity), not a dense 365-entry fill like
+ *  `heatmap` above. See core/analytics_views.py::_heatmap_all_time_for_user. */
+export interface HeatmapYear {
+  year: number;
+  episodes_watched: number;
+  minutes_watched: number;
+  days_active: number;
+  max_episodes_in_a_day: number;
+  days: HeatmapDay[];
+}
+
 export interface StreakData {
   current_streak: number;
   longest_streak: number;
@@ -389,10 +412,49 @@ export interface CompletionData {
   season_completion_pct: number;
   show_completion_pct: number;
   movie_completion_pct: number;
+  movies_watched: number;
+  movies_tracked: number;
   episodes_watched: number;
   episodes_aired: number;
   shows_completed: number;
   shows_total: number;
+}
+
+export interface LongestMovie {
+  tmdb_id: number;
+  title: string;
+  poster_path: string | null;
+  runtime_minutes: number;
+}
+
+export interface DecadeStat {
+  decade: string;
+  count: number;
+}
+
+export interface RecentMovie {
+  tmdb_id: number;
+  title: string;
+  poster_path: string | null;
+  watched_at: string;
+}
+
+/** GET /analytics/movies/ — the Movies-segment counterpart to the
+ *  TV-only `dashboard`/`genres`/`completion` above (Phase 74/Group H).
+ *  Kept as its own slice, not merged into the existing fields, since the
+ *  whole point of this addition was "existing TV numbers must not
+ *  change." */
+export interface MovieAnalytics {
+  movies_watched: number;
+  movies_tracked: number;
+  completion_pct: number;
+  total_runtime_minutes: number;
+  average_runtime_minutes: number;
+  watched_this_year: number;
+  longest_movie: LongestMovie | null;
+  top_genres: { genre: string; count: number; percentage: number }[];
+  by_decade: DecadeStat[];
+  recent_movies: RecentMovie[];
 }
 
 interface AnalyticsSlice {
@@ -400,6 +462,10 @@ interface AnalyticsSlice {
   statistics: AnalyticsStatistics | null;
   genres: GenreStat[];
   heatmap: HeatmapDay[];
+  heatmapAll: HeatmapYear[];
+  isLoadingHeatmapAll: boolean;
+  movieAnalytics: MovieAnalytics | null;
+  isLoadingMovieAnalytics: boolean;
   streak: StreakData | null;
   yearReview: YearReview | null;
   monthlyRecap: MonthlySummaryItem[];
@@ -441,6 +507,14 @@ interface WatchStoreState extends AnalyticsSlice {
   fetchHistory: (page?: number) => Promise<void>;
   fetchProfile: () => Promise<void>;
   updateProfilePicture: (url: string) => Promise<boolean>;
+  /** Returns null on success, or a human-readable error (already-taken,
+   *  invalid characters, etc.) — the edit sheet shows this inline rather
+   *  than a generic Snackbar, so the caller needs the specific message,
+   *  not just a boolean. */
+  updateUsername: (next: string) => Promise<string | null>;
+  /** "Ghost mode" — excludes this user from search, activity feeds, and
+   *  everyone else's view of their profile (core/social_views.py). */
+  updateIsPrivate: (isPrivate: boolean) => Promise<boolean>;
   /** Recomputes total_time_watched (+ returns verified shows/movies counts)
    *  from source-of-truth rows on the backend, replacing whatever drift the
    *  incremental F()-expression counter accumulated. See Profile Hub's
@@ -478,6 +552,15 @@ interface WatchStoreState extends AnalyticsSlice {
   fetchYearReview: (year?: number) => Promise<void>;
   fetchMonthlyRecap: (year?: number) => Promise<void>;
   fetchHeatmap: () => Promise<void>;
+  /** Full watch history, sparse + year-grouped (?range=all) — deliberately
+   *  NOT part of the useFocusEffect batch every other analytics fetch
+   *  lives in; lazily fetched only when the user taps "Full history" on
+   *  the Watch Activity card (Phase 74/Group G). */
+  fetchHeatmapAll: () => Promise<void>;
+  /** Lazy, like fetchHeatmapAll — NOT part of the useFocusEffect batch in
+   *  analytics.tsx (already 6 unconditional fetches on a 4-thread Render
+   *  box); fires only when the user switches to the Movies segment. */
+  fetchMovieAnalytics: () => Promise<void>;
   fetchStreak: () => Promise<void>;
   fetchGenres: () => Promise<void>;
   fetchCompletion: () => Promise<void>;
@@ -543,6 +626,10 @@ export const useWatchStore = create<WatchStoreState>()(
   statistics: null,
   genres: [],
   heatmap: [],
+  heatmapAll: [],
+  isLoadingHeatmapAll: false,
+  movieAnalytics: null,
+  isLoadingMovieAnalytics: false,
   streak: null,
   yearReview: null,
   monthlyRecap: [],
@@ -616,6 +703,42 @@ export const useWatchStore = create<WatchStoreState>()(
     }
   },
 
+  updateUsername: async (next: string) => {
+    const previousProfile = get().profile;
+    const trimmed = next.trim();
+    if (!trimmed) return 'Username cannot be blank.';
+    if (trimmed === previousProfile?.username) return null;
+    // Optimistic — same pattern as updateProfilePicture. Not swallowed into
+    // state.error on failure (unlike most other actions here) because the
+    // edit sheet needs the exact validation message inline, not a Snackbar.
+    set((state) => ({
+      profile: state.profile ? { ...state.profile, username: trimmed } : state.profile,
+    }));
+    try {
+      const response = await api.patch<UserProfile>('/profile/', { username: trimmed });
+      set({ profile: response.data });
+      return null;
+    } catch (error) {
+      set({ profile: previousProfile });
+      return extractErrorMessage(error);
+    }
+  },
+
+  updateIsPrivate: async (isPrivate: boolean) => {
+    const previousProfile = get().profile;
+    set((state) => ({
+      profile: state.profile ? { ...state.profile, is_private: isPrivate } : state.profile,
+    }));
+    try {
+      const response = await api.patch<UserProfile>('/profile/', { is_private: isPrivate });
+      set({ profile: response.data });
+      return true;
+    } catch (error) {
+      set({ profile: previousProfile, error: extractErrorMessage(error) });
+      return false;
+    }
+  },
+
   resyncStats: async () => {
     set({ isResyncingStats: true, error: null });
     try {
@@ -655,13 +778,20 @@ export const useWatchStore = create<WatchStoreState>()(
     const watchedAtIso = new Date().toISOString();
 
     set((state) => {
+      // Only the touched bucket gets a new array/object reference — the
+      // other two used to be shallow-copied unconditionally on every
+      // single toggle even though nothing in them changed. That gave
+      // every component subscribing to `watchlist` (and, without
+      // ShowRow/ShowPosterCard's own memo — see those files — every row
+      // in every bucket) a reason to re-render on a toggle that had
+      // nothing to do with them, which is exactly what a checkmark tap
+      // "dragging" the rest of the list along with it looks like.
       const nextWatchlist: WatchlistBuckets = {
-        to_watch: { ...state.watchlist.to_watch, results: [...state.watchlist.to_watch.results] },
-        up_to_date: {
-          ...state.watchlist.up_to_date,
-          results: [...state.watchlist.up_to_date.results],
+        ...state.watchlist,
+        [bucketKey]: {
+          ...state.watchlist[bucketKey],
+          results: [...state.watchlist[bucketKey].results],
         },
-        archived: { ...state.watchlist.archived, results: [...state.watchlist.archived.results] },
       };
       const results = nextWatchlist[bucketKey].results;
       const entry = { ...results[entryIndex] };
@@ -1107,6 +1237,18 @@ export const useWatchStore = create<WatchStoreState>()(
 
       for (const bucketKey of Object.keys(nextWatchlist) as (keyof WatchlistBuckets)[]) {
         nextWatchlist[bucketKey].results = nextWatchlist[bucketKey].results.map((entry) => {
+          // Skip entries with none of the toggled episodes, returning the
+          // exact same reference rather than rebuilding it — this used to
+          // rebuild every entry in every bucket unconditionally (new
+          // episodes array, new show object, new entry object) even when
+          // none of its episodes were in idSet, so a single-show "Mark
+          // Season Watched" (10ish episode ids) was allocating fresh
+          // objects for the user's *entire* library on every call. With
+          // ShowRow/ShowPosterCard now memoized, returning the same
+          // reference here is what actually lets them skip re-rendering
+          // every other show in the list.
+          if (!entry.show.episodes.some((ep) => idSet.has(ep.tmdb_id))) return entry;
+
           const beforeWatchedCount = entry.watched_episode_count;
           let affected = false;
           const episodes = entry.show.episodes.map((ep) => {
@@ -1213,6 +1355,19 @@ export const useWatchStore = create<WatchStoreState>()(
             : state.unlockedBadges,
         };
       });
+      // The optimistic update above marked every requested id watched —
+      // if the server actually skipped some (unaired), that's now wrong in
+      // the in-memory watchlist/history (episode is_watched, watched_episode_
+      // count, progress_percentage, last_watched_at all diverge). Rather
+      // than hand-reversing that per-episode transform, resync from the
+      // server, which is already authoritative for total_time_watched above.
+      if (response.data.skipped_unaired_ids?.length) {
+        set({
+          error: `${response.data.skipped_unaired_ids.length} episode(s) haven't aired yet and were not marked watched.`,
+        });
+        get().fetchWatchlist();
+        if (watched) get().fetchHistory();
+      }
       get().syncWidgetData();
     } catch (error) {
       set({
@@ -1285,6 +1440,28 @@ export const useWatchStore = create<WatchStoreState>()(
       set({ heatmap: res.data, isLoadingAnalytics: false });
     } catch (error) {
       set({ analyticsError: extractErrorMessage(error), isLoadingAnalytics: false });
+    }
+  },
+
+  fetchHeatmapAll: async () => {
+    set({ isLoadingHeatmapAll: true, analyticsError: null });
+    try {
+      const res = await api.get<{ years: HeatmapYear[] }>('/analytics/heatmap/', {
+        params: { range: 'all' },
+      });
+      set({ heatmapAll: res.data.years, isLoadingHeatmapAll: false });
+    } catch (error) {
+      set({ analyticsError: extractErrorMessage(error), isLoadingHeatmapAll: false });
+    }
+  },
+
+  fetchMovieAnalytics: async () => {
+    set({ isLoadingMovieAnalytics: true, analyticsError: null });
+    try {
+      const res = await api.get<MovieAnalytics>('/analytics/movies/');
+      set({ movieAnalytics: res.data, isLoadingMovieAnalytics: false });
+    } catch (error) {
+      set({ analyticsError: extractErrorMessage(error), isLoadingMovieAnalytics: false });
     }
   },
 

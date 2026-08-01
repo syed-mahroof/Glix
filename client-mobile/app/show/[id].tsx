@@ -3,10 +3,9 @@ import { useLocalSearchParams, useRouter } from 'expo-router';
 import { Image } from 'expo-image';
 import {
   ArrowLeft,
-  Archive,
-  ArchiveRestore,
   CheckCircle,
   Heart,
+  ListPlus,
   MessageCircle,
   Plus,
   Share2,
@@ -25,6 +24,7 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
+import AddToListSheet from '../../components/AddToListSheet';
 import CascadeModal from '../../components/CascadeModal';
 import { CastCard } from '../../components/CastCard';
 import GlassSurface from '../../components/GlassSurface';
@@ -36,7 +36,7 @@ import RatingReviewCard from '../../components/RatingReviewCard';
 import { SeasonCard } from '../../components/SeasonCard';
 import Snackbar from '../../components/Snackbar';
 import { api } from '../../lib/api';
-import { todayLocalIso } from '../../lib/dateFormat';
+import { hasAired } from '../../lib/dateFormat';
 import { extractErrorMessage } from '../../lib/errors';
 import { goBack } from '../../lib/navigation';
 import { useAppTheme } from '../../lib/theme';
@@ -113,9 +113,8 @@ export default function ShowDetailScreen() {
   const [sectionError, setSectionError] = useState<string | null>(null);
 
   const [isFavorite, setIsFavorite] = useState(false);
-  const [isArchived, setIsArchived] = useState(false);
   const [isTogglingFavorite, setIsTogglingFavorite] = useState(false);
-  const [isTogglingArchive, setIsTogglingArchive] = useState(false);
+  const [isAddToListVisible, setIsAddToListVisible] = useState(false);
   const [isAddingToWatchlist, setIsAddingToWatchlist] = useState(false);
   const [isRemoving, setIsRemoving] = useState(false);
   const [removeSnapshot, setRemoveSnapshot] = useState<RemovedShowSnapshot | null>(null);
@@ -143,13 +142,11 @@ export default function ShowDetailScreen() {
   useEffect(() => {
     if (watchlistEntry) {
       setIsFavorite(watchlistEntry.is_favorite);
-      setIsArchived(watchlistEntry.status === 'ARCHIVED');
     } else {
       // Entry can now disappear without leaving this screen (Phase F's
       // Remove action) — previously the only way watchlistEntry went from
       // set to null was navigating away, so these never went stale in place.
       setIsFavorite(false);
-      setIsArchived(false);
     }
   }, [watchlistEntry]);
 
@@ -206,7 +203,22 @@ export default function ShowDetailScreen() {
   useEffect(() => {
     loadShow();
     loadSecondaryData();
-    fetchWatchlist();
+    // Skip when the store already has watchlist data loaded — this screen
+    // only needs it to look up this show's own entry (favorite/catchup
+    // status via watchlistEntry below), and the Shows Hub tab already
+    // keeps it fresh on its own focus effect. A blind refetch here hit
+    // /watchlist/?page_size=all — the heaviest endpoint in the app — on
+    // every single show-detail open, not just the first one this session.
+    // getState() (not the reactive `watchlist` above) so this only runs
+    // once on mount, not every time watchlist itself changes.
+    const current = useWatchStore.getState().watchlist;
+    const hasWatchlistData =
+      current.to_watch.results.length > 0 ||
+      current.up_to_date.results.length > 0 ||
+      current.archived.results.length > 0;
+    if (!hasWatchlistData) {
+      fetchWatchlist();
+    }
   }, [loadShow, loadSecondaryData, fetchWatchlist]);
 
   const handleToggleFavorite = async () => {
@@ -240,22 +252,6 @@ export default function ShowDetailScreen() {
     setIsAddingToWatchlist(false);
     if (success) {
       setAddedSnackbarVisible(true);
-    }
-  };
-
-  const handleToggleArchive = async () => {
-    if (Number.isNaN(tmdbId) || isTogglingArchive) return;
-    setIsTogglingArchive(true);
-    const previous = isArchived;
-    setIsArchived(!previous);
-    try {
-      await api.post('/watchlist/archive/', { show_id: tmdbId, archived: !previous });
-      await fetchWatchlist();
-    } catch (error) {
-      setIsArchived(previous);
-      setSectionError(extractErrorMessage(error));
-    } finally {
-      setIsTogglingArchive(false);
     }
   };
 
@@ -310,19 +306,18 @@ export default function ShowDetailScreen() {
   // opened isn't in there yet, so it's simply absent from this map — SeasonCard
   // already renders "Tap to view episodes" for that case (hasCounts=false),
   // same as before this phase.
-  const today = useMemo(() => todayLocalIso(), []);
   const seasonProgress = useMemo(() => {
     const map = new Map<number, { episodeCount: number; watchedCount: number }>();
     const episodes = watchlistEntry?.show.episodes ?? [];
     for (const ep of episodes) {
-      if (!ep.air_date || ep.air_date > today) continue;
+      if (!hasAired(ep.air_date)) continue;
       const bucket = map.get(ep.season_number) ?? { episodeCount: 0, watchedCount: 0 };
       bucket.episodeCount += 1;
       if (ep.is_watched) bucket.watchedCount += 1;
       map.set(ep.season_number, bucket);
     }
     return map;
-  }, [watchlistEntry?.show.episodes, today]);
+  }, [watchlistEntry?.show.episodes]);
 
   /** Shared finalize step for both the direct-unmark path and every
    *  CascadeModal outcome (confirm/cancel/never-for-show) — identical
@@ -359,7 +354,7 @@ export default function ShowDetailScreen() {
       setTogglingSeasonNumber(seasonNumber);
       try {
         const res = await api.get<Episode[]>(`/shows/${tmdbId}/season/${seasonNumber}/`);
-        const aired = res.data.filter((ep) => ep.air_date && ep.air_date <= today);
+        const aired = res.data.filter((ep) => hasAired(ep.air_date));
         if (aired.length === 0) {
           setTogglingSeasonNumber(null);
           return;
@@ -388,7 +383,7 @@ export default function ShowDetailScreen() {
         setTogglingSeasonNumber(null);
       }
     },
-    [togglingSeasonNumber, tmdbId, today, catchup, finalizeSeasonWatch, displayShow]
+    [togglingSeasonNumber, tmdbId, catchup, finalizeSeasonWatch, displayShow]
   );
 
   if (isLoadingShow && !displayShow) {
@@ -462,20 +457,13 @@ export default function ShowDetailScreen() {
                 <Share2 color="#FFFFFF" size={20} />
               </PressableScale>
               <PressableScale
-                onPress={handleToggleArchive}
-                disabled={isTogglingArchive}
+                onPress={() => setIsAddToListVisible(true)}
                 hitSlop={8}
-                style={[styles.iconButton, isTogglingArchive && styles.iconButtonBusy]}
+                style={styles.iconButton}
                 accessibilityRole="button"
-                accessibilityLabel={isArchived ? 'Unarchive' : 'Archive'}
+                accessibilityLabel="Add to List"
               >
-                {isTogglingArchive ? (
-                  <ActivityIndicator color="#FFFFFF" size="small" />
-                ) : isArchived ? (
-                  <ArchiveRestore color={c.accentFill} size={20} />
-                ) : (
-                  <Archive color="#FFFFFF" size={20} />
-                )}
+                <ListPlus color="#FFFFFF" size={20} />
               </PressableScale>
               <PressableScale
                 onPress={handleToggleFavorite}
@@ -757,6 +745,13 @@ export default function ShowDetailScreen() {
         message={reviewSnackbarMessage ?? ''}
         onDismiss={() => setReviewSnackbarMessage(null)}
       />
+
+      <AddToListSheet
+        visible={isAddToListVisible}
+        onClose={() => setIsAddToListVisible(false)}
+        mediaType="tv"
+        tmdbId={tmdbId}
+      />
     </SafeAreaView>
   );
 }
@@ -829,9 +824,15 @@ const styles = StyleSheet.create({
   },
   heroTextColumn: {
     flex: 1,
-    justifyContent: 'flex-end',
+    // flex-start + paddingTop matching |heroRow.marginTop| — not flex-end.
+    // Bottom-anchoring let a tall content stack (3-line title + meta row)
+    // spill its TOP upward into the backdrop's photo/gradient, illegible
+    // in light theme. Top-anchoring below the backdrop's edge means it can
+    // never overlap the photo regardless of content height.
+    justifyContent: 'flex-start',
     gap: 6,
     paddingBottom: 4,
+    paddingTop: 48,
   },
   title: {
     fontSize: 20,

@@ -48,6 +48,7 @@ import RatingReviewCard from '../../components/RatingReviewCard';
 import Snackbar from '../../components/Snackbar';
 import TrailerButton from '../../components/TrailerButton';
 import { api } from '../../lib/api';
+import { hasAired } from '../../lib/dateFormat';
 import { extractErrorMessage } from '../../lib/errors';
 import { useAppTheme } from '../../lib/theme';
 import { RemovedMovieSnapshot, useWatchStore } from '../../store/watchStore';
@@ -277,7 +278,16 @@ export default function MovieDetailScreen() {
   useEffect(() => {
     loadDetails();
     loadSecondary();
-    fetchMovieWatchlist();
+    // Skip when the store already has movie-watchlist data loaded — same
+    // reasoning as show/[id].tsx's identical guard: this screen only needs
+    // it to look up this movie's own entry (isInWatchlist/isWatched
+    // below), and the Movies Hub tab already keeps it fresh on its own
+    // focus effect. getState() so this only runs once on mount.
+    const current = useWatchStore.getState().movieWatchlist;
+    const hasMovieWatchlistData = current.watch_next.length > 0 || current.watched.length > 0;
+    if (!hasMovieWatchlistData) {
+      fetchMovieWatchlist();
+    }
   }, [loadDetails, loadSecondary, fetchMovieWatchlist]);
 
   /** Context-sensitive primary action, mirrors TV Time's Add → Track flow:
@@ -304,6 +314,15 @@ export default function MovieDetailScreen() {
     }
 
     if (isTogglingWatch) return;
+
+    // Can't mark an unreleased movie watched. (Un-watching is always
+    // allowed — only guard the watch direction, mirrors ShowRow/episode
+    // detail's identical air-date guard on the TV side.)
+    if (!isWatched && !hasAired(displayMovie?.release_date)) {
+      setSectionError("This movie hasn't released yet — you can't mark it watched.");
+      return;
+    }
+
     setIsTogglingWatch(true);
     const ok = await toggleMovieWatchState(tmdbId);
     setIsTogglingWatch(false);
@@ -375,6 +394,9 @@ export default function MovieDetailScreen() {
 
   const d = displayMovie!;
   const year = d.release_date ? new Date(d.release_date).getFullYear() : null;
+  // Only locks the WATCH direction once already tracked — adding an
+  // unreleased movie to the watchlist is fine, marking it watched isn't.
+  const lockedUnreleased = isInWatchlist && !isWatched && !hasAired(d.release_date);
 
   return (
     <View style={[styles.container, { backgroundColor: c.bg }]}>
@@ -466,12 +488,22 @@ export default function MovieDetailScreen() {
               )}
               <PressableScale
                 onPress={handlePrimaryAction}
-                disabled={isTogglingWatch || isAddingToWatchlist}
+                disabled={isTogglingWatch || isAddingToWatchlist || lockedUnreleased}
                 hitSlop={8}
-                style={[styles.iconBtn, (isTogglingWatch || isAddingToWatchlist) && styles.iconBtnBusy]}
+                style={[
+                  styles.iconBtn,
+                  (isTogglingWatch || isAddingToWatchlist) && styles.iconBtnBusy,
+                  lockedUnreleased && styles.iconBtnBusy,
+                ]}
                 accessibilityRole="button"
                 accessibilityLabel={
-                  !isInWatchlist ? 'Add to Watchlist' : isWatched ? 'Watched' : 'Mark as Watched'
+                  !isInWatchlist
+                    ? 'Add to Watchlist'
+                    : isWatched
+                    ? 'Watched'
+                    : lockedUnreleased
+                    ? "Hasn't released yet"
+                    : 'Mark as Watched'
                 }
               >
                 {isTogglingWatch || isAddingToWatchlist ? (
@@ -532,9 +564,10 @@ export default function MovieDetailScreen() {
                   styles.watchBtn,
                   { backgroundColor: c.accentDim, borderColor: c.accentInk },
                   isWatched && { backgroundColor: c.accentFill, borderColor: c.accentFill },
+                  lockedUnreleased && styles.watchBtnDisabled,
                 ]}
                 onPress={handlePrimaryAction}
-                disabled={isTogglingWatch || isAddingToWatchlist}
+                disabled={isTogglingWatch || isAddingToWatchlist || lockedUnreleased}
               >
                 {isTogglingWatch || isAddingToWatchlist ? (
                   <ActivityIndicator color={isWatched ? c.onAccent : c.accentInk} size="small" />
@@ -544,7 +577,13 @@ export default function MovieDetailScreen() {
                   <BookmarkPlus color={c.accentInk} size={15} strokeWidth={2.5} />
                 )}
                 <Text style={[styles.watchBtnText, { color: c.accentInk }, isWatched && { color: c.onAccent }]}>
-                  {!isInWatchlist ? 'Add to Watchlist' : isWatched ? 'Watched' : 'Mark as Watched'}
+                  {!isInWatchlist
+                    ? 'Add to Watchlist'
+                    : isWatched
+                    ? 'Watched'
+                    : lockedUnreleased
+                    ? "Not released yet"
+                    : 'Mark as Watched'}
                 </Text>
               </PressableScale>
               <TrailerButton trailerKey={movie?.trailer_key} />
@@ -814,10 +853,16 @@ const styles = StyleSheet.create({
   },
   heroMeta: {
     flex: 1,
-    justifyContent: 'flex-end',
+    // flex-start + paddingTop matching |heroRow.marginTop| — not flex-end.
+    // Bottom-anchoring let a tall content stack (3-line title + meta row +
+    // genre chips + action row) spill its TOP upward into the backdrop's
+    // photo/gradient, where text is illegible (esp. light-theme ink).
+    // Top-anchoring below the backdrop's edge means it can never overlap
+    // the photo regardless of how much text it holds.
+    justifyContent: 'flex-start',
     gap: 8,
     paddingBottom: 4,
-    paddingTop: 12,
+    paddingTop: 60,
   },
   movieTitle: {
     fontSize: 20,
@@ -862,6 +907,7 @@ const styles = StyleSheet.create({
     alignSelf: 'flex-start',
   },
   watchBtnText: { fontSize: 12, fontWeight: '700' },
+  watchBtnDisabled: { opacity: 0.5 },
 
   // Sections
   section: { marginTop: 28, gap: 12 },

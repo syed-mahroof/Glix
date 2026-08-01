@@ -2,9 +2,21 @@
 // Non-persisted, in-memory Zustand store for the Discover Hub.
 // Kept separate from watchStore.ts to avoid polluting the persisted slice.
 
+import axios from 'axios';
 import { create } from 'zustand';
 import { api } from '../lib/api';
 import { extractErrorMessage } from '../lib/errors';
+
+// In-flight request trackers for runSearch/fetchFilteredResults — plain
+// module-scope refs, not store state, since nothing needs to re-render on
+// their own account. Neither guard here checked *completed* state (the
+// only kind Zustand's own `set` naturally lets you gate on), so fast
+// typing/toggling fired overlapping requests with no relationship to each
+// other; whichever happened to resolve last "won" regardless of which
+// query/filter it was actually for. Aborting the previous one before
+// starting the next fixes both the wasted network calls and the race.
+let searchAbortController: AbortController | null = null;
+let filteredAbortController: AbortController | null = null;
 
 // ─── Types ─────────────────────────────────────────────────────────────────────
 
@@ -279,14 +291,20 @@ export const useDiscoverStore = create<DiscoverState>((set, get) => ({
   },
 
   runSearch: async (query) => {
+    searchAbortController?.abort();
     if (!query.trim()) {
+      searchAbortController = null;
       set({ searchResults: [], isSearching: false, searchError: null, searchPage: 1, searchTotalPages: 1 });
       return;
     }
+    const controller = new AbortController();
+    searchAbortController = controller;
+
     set({ isSearching: true, searchError: null });
     try {
       const response = await api.get<UniversalSearchResponse>(
-        `/search/universal/?query=${encodeURIComponent(query)}`
+        `/search/universal/?query=${encodeURIComponent(query)}`,
+        { signal: controller.signal }
       );
       set({
         searchResults: response.data.results,
@@ -295,6 +313,7 @@ export const useDiscoverStore = create<DiscoverState>((set, get) => ({
         isSearching: false,
       });
     } catch (err) {
+      if (axios.isCancel(err)) return;
       set({ searchError: extractErrorMessage(err), isSearching: false, searchResults: [] });
     }
   },
@@ -333,6 +352,13 @@ export const useDiscoverStore = create<DiscoverState>((set, get) => ({
     }),
 
   fetchFilteredResults: async () => {
+    // Had no guard at all — every genre/sort/language/anime toggle in the
+    // Filter & Sort sheet calls this, and each one raced the last with no
+    // way to know which response arrived for which filter combination.
+    filteredAbortController?.abort();
+    const controller = new AbortController();
+    filteredAbortController = controller;
+
     const { activeSegment, selectedGenreId, sortOrder, selectedLanguage, animeOnly } = get();
     set({ isLoadingFiltered: true, filteredError: null });
     try {
@@ -346,7 +372,10 @@ export const useDiscoverStore = create<DiscoverState>((set, get) => ({
       if (animeOnly) {
         params.anime = 'true';
       }
-      const response = await api.get<UniversalSearchResponse>('/discover/filter/', { params });
+      const response = await api.get<UniversalSearchResponse>('/discover/filter/', {
+        params,
+        signal: controller.signal,
+      });
       set({
         filteredResults: response.data.results,
         filteredPage: response.data.page,
@@ -354,6 +383,7 @@ export const useDiscoverStore = create<DiscoverState>((set, get) => ({
         isLoadingFiltered: false,
       });
     } catch (err) {
+      if (axios.isCancel(err)) return;
       set({ filteredError: extractErrorMessage(err), isLoadingFiltered: false, filteredResults: [] });
     }
   },

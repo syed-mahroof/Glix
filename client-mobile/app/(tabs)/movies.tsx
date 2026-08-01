@@ -23,6 +23,7 @@ import LayoutToggle from '../../components/LayoutToggle';
 import MoviePosterCard from '../../components/MoviePosterCard';
 import MovieRow from '../../components/MovieRow';
 import PressableScale from '../../components/PressableScale';
+import { hasAired } from '../../lib/dateFormat';
 import { useAppTheme } from '../../lib/theme';
 import { MovieWatchlistItem, useWatchStore } from '../../store/watchStore';
 
@@ -166,6 +167,7 @@ export default function MoviesScreen() {
         runtimeMinutes={item.movie.runtime_minutes}
         genresString={item.movie.genres_string}
         isWatched={item.movie.is_watched}
+        isReleased={hasAired(item.movie.release_date)}
         onCheckPress={handleCheckPress}
         onAnimationComplete={handleAnimationComplete}
       />
@@ -186,6 +188,7 @@ export default function MoviesScreen() {
           ratingBadge={item.movie.vote_average > 0 ? `★ ${item.movie.vote_average.toFixed(1)}` : undefined}
           checkmark={{
             isWatched: item.movie.is_watched,
+            disabled: !hasAired(item.movie.release_date) && !item.movie.is_watched,
             onPress: () => toggleMovieWatchState(item.movie.tmdb_id),
           }}
         />

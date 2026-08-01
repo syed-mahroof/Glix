@@ -1,13 +1,13 @@
 // client-mobile/components/RatingReviewCard.tsx
-// Dynamic 1-5 star rating + optional note (Phase L; Phase 59 added save
-// confirmation, an explicit note-save button, and a per-star pop
-// animation). Self-contained: fetches the current user's review for this
-// title on mount, saves via the backend's update_or_create semantics
-// (POST always upserts — no separate create/update UI distinction), offers
-// delete once a review exists. Deliberately local to the detail screen
-// rather than a global store slice — nothing else in the app currently
-// needs to react to a review changing (no "My Reviews" screen wired into
-// the UI yet; the list endpoints exist server-side for one later).
+// Half-star (0.5-5, Letterboxd-style) rating + optional note (Phase L;
+// Phase 59 added save confirmation, an explicit note-save button, and a
+// per-star pop animation; Phase 74 upgraded whole-star to half-star).
+// Self-contained: fetches the current user's review for this title on
+// mount, saves via the backend's update_or_create semantics (POST always
+// upserts — no separate create/update UI distinction), offers delete once
+// a review exists. Deliberately local to the detail screen rather than a
+// global store slice — the read-only StarRatingDisplay.tsx is what
+// app/profile/reviews.tsx's list rows use instead of duplicating this.
 // Private by default — see ShowReview's model docstring for why this isn't
 // wired into the public Comment system. Save confirmation is reported to
 // the caller via onSaved rather than shown here directly — the host
@@ -18,7 +18,7 @@
 
 import { Star, Trash2 } from 'lucide-react-native';
 import React, { useEffect, useRef, useState } from 'react';
-import { ActivityIndicator, StyleSheet, Text, TextInput, View } from 'react-native';
+import { ActivityIndicator, type GestureResponderEvent, StyleSheet, Text, TextInput, View } from 'react-native';
 import Animated, {
   useAnimatedStyle,
   useSharedValue,
@@ -38,6 +38,8 @@ interface ReviewResponse {
   note: string;
 }
 
+const STAR_SIZE = 28;
+
 interface RatingReviewCardProps {
   mediaType: 'show' | 'movie';
   tmdbId: number;
@@ -48,43 +50,78 @@ interface RatingReviewCardProps {
 }
 
 interface AnimatedStarProps {
+  /** This star's integer position, 1-5 — used for the ripple stagger
+   *  delay and the half/full hit-zone math, NOT the rating value itself. */
   value: number;
-  active: boolean;
+  /** How much of *this* star is filled: 0 (empty), 0.5 (half), or 1 (full). */
+  fillLevel: 0 | 0.5 | 1;
   color: string;
   inactiveColor: string;
   disabled: boolean;
-  onPress: () => void;
+  /** Fired with the exact rating this star represents once tapped — 0.5
+   *  less than `value` for a left-half tap, `value` for a right-half tap. */
+  onSelect: (starValue: number) => void;
 }
 
-function AnimatedStar({ value, active, color, inactiveColor, disabled, onPress }: AnimatedStarProps) {
+function AnimatedStar({ value, fillLevel, color, inactiveColor, disabled, onSelect }: AnimatedStarProps) {
   const scale = useSharedValue(1);
-  const wasActive = useRef(active);
+  const prevFillLevel = useRef(fillLevel);
 
   useEffect(() => {
-    if (active && !wasActive.current) {
+    if (fillLevel > prevFillLevel.current) {
       // Ripple left-to-right (staggered by position) so jumping straight
       // from e.g. 1 to 5 stars reads as one sweeping gesture instead of
-      // five stars popping in unison.
+      // five stars popping in unison. Keyed on "fill increased" (not
+      // "became active") so 3→3.5 pops the 4th star and 3.5→3 doesn't
+      // re-pop it.
       scale.value = withDelay(
         (value - 1) * 35,
         withSequence(withTiming(1.35, { duration: 90 }), withSpring(1, { damping: 7, stiffness: 300 }))
       );
     }
-    wasActive.current = active;
-  }, [active, value]);
+    prevFillLevel.current = fillLevel;
+  }, [fillLevel, value]);
 
   const animatedStyle = useAnimatedStyle(() => ({ transform: [{ scale: scale.value }] }));
 
+  // Two-zone hit target (left half -> value-0.5, right half -> value) derived
+  // from touch position on a single PressableScale — deliberately not two
+  // nested Pressables, which would win the touch and kill the outer scale
+  // animation above.
+  const handlePress = (e: GestureResponderEvent) => {
+    const isLeftHalf = e.nativeEvent.locationX < STAR_SIZE / 2;
+    onSelect(isLeftHalf ? value - 0.5 : value);
+  };
+
   return (
     <PressableScale
-      onPress={onPress}
+      onPress={handlePress}
       disabled={disabled}
       hitSlop={6}
       accessibilityRole="button"
-      accessibilityLabel={`Rate ${value} star${value !== 1 ? 's' : ''}`}
+      accessibilityLabel={`Rate ${value} stars`}
+      accessibilityHint="Tap the left half of the star for a half rating"
     >
-      <Animated.View style={animatedStyle}>
-        <Star color={active ? color : inactiveColor} fill={active ? color : 'transparent'} size={28} />
+      <Animated.View style={[animatedStyle, { width: STAR_SIZE, height: STAR_SIZE }]}>
+        <Star color={inactiveColor} fill="transparent" size={STAR_SIZE} />
+        {fillLevel > 0 && (
+          // Left-anchored clip, not StyleSheet.absoluteFill (which also
+          // sets `right:0` — combined with an explicit `width` that's an
+          // ambiguous double-constraint on Yoga's layout). top/left/height
+          // + a plain width is unambiguous: it always clips from the left.
+          <View
+            style={{
+              position: 'absolute',
+              top: 0,
+              left: 0,
+              height: STAR_SIZE,
+              width: fillLevel >= 1 ? STAR_SIZE : STAR_SIZE / 2,
+              overflow: 'hidden',
+            }}
+          >
+            <Star color={color} fill={color} size={STAR_SIZE} />
+          </View>
+        )}
       </Animated.View>
     </PressableScale>
   );
@@ -138,6 +175,19 @@ export default function RatingReviewCard({ mediaType, tmdbId, onSaved }: RatingR
 
   const handleSelectStar = async (value: number) => {
     if (isSaving || Number.isNaN(tmdbId)) return;
+
+    // Re-tapping the exact current rating clears it — but only when there's
+    // no note to lose. DELETE removes the note too, so auto-firing it on a
+    // re-tap when a note exists would be real data loss for a fat-fingered
+    // user; the explicit Trash2 button remains the path in that case (a
+    // silent no-op here, not an error, since the tap itself is a normal,
+    // expected gesture).
+    if (hasReview && value === rating) {
+      if (savedNote) return;
+      await handleDelete();
+      return;
+    }
+
     const previousRating = rating;
     const previousHasReview = hasReview;
     setRating(value);
@@ -217,18 +267,23 @@ export default function RatingReviewCard({ mediaType, tmdbId, onSaved }: RatingR
         )}
       </View>
 
-      <View style={styles.starsRow}>
-        {[1, 2, 3, 4, 5].map((value) => (
-          <AnimatedStar
-            key={value}
-            value={value}
-            active={value <= rating}
-            color={c.accentInk}
-            inactiveColor={c.textTertiary}
-            disabled={isSaving}
-            onPress={() => handleSelectStar(value)}
-          />
-        ))}
+      <View style={styles.starsRow} accessibilityValue={{ min: 0, max: 5, now: rating }}>
+        {[1, 2, 3, 4, 5].map((value) => {
+          // rating only ever moves in 0.5 steps (see ALLOWED_RATINGS on the
+          // backend), so this clamp always lands on exactly 0, 0.5, or 1.
+          const fillLevel = Math.max(0, Math.min(1, rating - (value - 1))) as 0 | 0.5 | 1;
+          return (
+            <AnimatedStar
+              key={value}
+              value={value}
+              fillLevel={fillLevel}
+              color={c.accentInk}
+              inactiveColor={c.textTertiary}
+              disabled={isSaving}
+              onSelect={handleSelectStar}
+            />
+          );
+        })}
       </View>
 
       {rating > 0 && (

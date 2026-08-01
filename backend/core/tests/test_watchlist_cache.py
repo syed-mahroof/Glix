@@ -137,7 +137,12 @@ def test_movie_watchlist_reflects_toggle_and_exposes_watched_at(api_client, crea
     user = create_user()
     api_client.force_authenticate(user=user)
 
-    movie = MovieCache.objects.create(tmdb_id=6001, title="Cache Test Movie", runtime_minutes=100)
+    # release_date in the past — Phase 74's release-date gate on
+    # MovieWatchStateToggleView otherwise rejects the toggle below (a
+    # movie with no release_date is treated as not-yet-released).
+    movie = MovieCache.objects.create(
+        tmdb_id=6001, title="Cache Test Movie", runtime_minutes=100, release_date="2020-01-01"
+    )
     MovieWatchlist.objects.create(user=user, movie=movie)
 
     url = reverse("movies-watchlist")

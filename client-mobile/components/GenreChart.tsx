@@ -7,14 +7,19 @@ import type { GenreStat } from '../store/watchStore';
 import { useAppTheme } from '../lib/theme';
 
 interface GenreChartProps {
-  data: GenreStat[];
+  // Widened from GenreStat[] (Phase 74) so AnalyticsMoviesView's
+  // top_genres — which has no episodes_watched/shows_watched, only
+  // genre+count+percentage — is assignable here too, without a parallel
+  // MovieGenreChart component for what's visually the identical bar chart.
+  data: Pick<GenreStat, 'genre' | 'percentage'>[];
   maxItems?: number;
+  title?: string;
 }
 
 const BAR_HEIGHT = 8;
 const BAR_RADIUS = 4;
 
-export default function GenreChart({ data, maxItems = 8 }: GenreChartProps) {
+export default function GenreChart({ data, maxItems = 8, title = 'Top Genres' }: GenreChartProps) {
   const { theme } = useAppTheme();
   const c = theme.colors;
   const items = data.slice(0, maxItems);
@@ -22,7 +27,7 @@ export default function GenreChart({ data, maxItems = 8 }: GenreChartProps) {
 
   return (
     <View style={[styles.container, { backgroundColor: c.glassFill, borderColor: c.hairline }]}>
-      <Text style={[styles.title, { color: c.textPrimary }]}>Top Genres</Text>
+      <Text style={[styles.title, { color: c.textPrimary }]}>{title}</Text>
       {items.length === 0 ? (
         <Text style={[styles.empty, { color: c.textTertiary }]}>No genre data yet — start watching!</Text>
       ) : (

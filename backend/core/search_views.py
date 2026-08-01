@@ -196,8 +196,12 @@ class ShowDetailView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request, tmdb_id: int):
+        # One instance, reused below — TMDBService() is cheap (shared
+        # session, see services.py), but two calls in the same request
+        # each building their own instance was still pointless churn.
+        tmdb = TMDBService()
         try:
-            show = TMDBService().get_show_details(tmdb_id)
+            show = tmdb.get_show_details(tmdb_id)
         except TMDBNotFoundError as exc:
             return Response({"detail": str(exc)}, status=status.HTTP_404_NOT_FOUND)
         except TMDBRateLimitError as exc:
@@ -211,7 +215,7 @@ class ShowDetailView(APIView):
         # detail screen (same "degrade, don't fail" precedent as
         # EpisodeDetailView's credits block).
         try:
-            trailer = TMDBService().get_show_trailer(tmdb_id)
+            trailer = tmdb.get_show_trailer(tmdb_id)
         except TMDBServiceError:
             trailer = None
         data["trailer_key"] = trailer["key"] if trailer else None
@@ -393,8 +397,10 @@ class MovieDetailView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request, tmdb_id: int):
+        # One instance, reused below — same reasoning as ShowDetailView.
+        tmdb = TMDBService()
         try:
-            movie = TMDBService().get_movie_details(tmdb_id)
+            movie = tmdb.get_movie_details(tmdb_id)
         except TMDBNotFoundError as exc:
             return Response({"detail": str(exc)}, status=status.HTTP_404_NOT_FOUND)
         except TMDBRateLimitError as exc:
@@ -403,7 +409,7 @@ class MovieDetailView(APIView):
             return Response({"detail": str(exc)}, status=status.HTTP_502_BAD_GATEWAY)
 
         try:
-            trailer = TMDBService().get_movie_trailer(tmdb_id)
+            trailer = tmdb.get_movie_trailer(tmdb_id)
         except TMDBServiceError:
             trailer = None
 

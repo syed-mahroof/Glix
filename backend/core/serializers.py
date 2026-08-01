@@ -7,6 +7,10 @@ computed via SerializerMethodField so the mobile client never has to
 duplicate that arithmetic.
 """
 
+from django.contrib.auth import get_user_model
+from django.contrib.auth.validators import UnicodeUsernameValidator
+from django.core.exceptions import ValidationError as DjangoValidationError
+from django.db import IntegrityError
 from django.utils import timezone
 from rest_framework import serializers
 
@@ -26,13 +30,26 @@ from core.models import (
     NotificationPreference,
 )
 
+User = get_user_model()
+_username_validator = UnicodeUsernameValidator()
+
 
 class UserProfileSerializer(serializers.ModelSerializer):
-    username = serializers.CharField(source="user.username", read_only=True)
+    # source="user.username" is writable (Phase 74) — DRF's nested source
+    # builds validated_data["user"] = {"username": ...} on write, which
+    # update() below pops and saves onto the related User row. email stays
+    # read_only: no verification flow exists for changing it, out of scope.
+    username = serializers.CharField(source="user.username", max_length=150)
     email = serializers.EmailField(source="user.email", read_only=True)
     watched_days = serializers.SerializerMethodField()
     watched_hours = serializers.SerializerMethodField()
     watched_minutes = serializers.SerializerMethodField()
+    # Phase 74 — index-only counts on the Follow table so the Profile
+    # social bar's Followers/Following cells get real numbers without a
+    # second network request; this endpoint is already fetched on every
+    # Profile focus.
+    follower_count = serializers.SerializerMethodField()
+    following_count = serializers.SerializerMethodField()
 
     class Meta:
         model = UserProfile
@@ -41,14 +58,58 @@ class UserProfileSerializer(serializers.ModelSerializer):
             "username",
             "email",
             "profile_picture",
+            "is_private",
             "total_time_watched",
             "watched_days",
             "watched_hours",
             "watched_minutes",
             "earned_badges",
+            "follower_count",
+            "following_count",
             "created_at",
         ]
         read_only_fields = ["id", "total_time_watched", "earned_badges", "created_at"]
+
+    def get_follower_count(self, obj: UserProfile) -> int:
+        return obj.user.incoming_follows.count()
+
+    def get_following_count(self, obj: UserProfile) -> int:
+        return obj.user.outgoing_follows.count()
+
+    def validate_username(self, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise serializers.ValidationError("Username cannot be blank.")
+        try:
+            _username_validator(value)
+        except DjangoValidationError as exc:
+            raise serializers.ValidationError(list(exc.messages))
+        qs = User.objects.filter(username__iexact=value)
+        if self.instance is not None:
+            qs = qs.exclude(pk=self.instance.user_id)
+        if qs.exists():
+            raise serializers.ValidationError("That username is already taken.")
+        return value
+
+    def update(self, instance, validated_data):
+        user_data = validated_data.pop("user", None)
+        if user_data and "username" in user_data:
+            instance.user.username = user_data["username"]
+            try:
+                instance.user.save(update_fields=["username"])
+            except IntegrityError:
+                # validate_username's iexact pre-check has a TOCTOU race
+                # window — two concurrent renames landing on the exact
+                # same username can both pass it before either commits.
+                # User.username's DB-level unique constraint is the real
+                # backstop; without this catch, the second save's
+                # IntegrityError would propagate as an unhandled 500
+                # instead of the same "already taken" 400 the pre-check
+                # normally returns.
+                raise serializers.ValidationError(
+                    {"username": ["That username is already taken."]}
+                )
+        return super().update(instance, validated_data)
 
     def get_watched_days(self, obj: UserProfile) -> int:
         return obj.total_time_watched // 1440
@@ -418,18 +479,26 @@ class CustomListSerializer(serializers.ModelSerializer):
     """
 
     item_count = serializers.SerializerMethodField()
+    tv_count = serializers.SerializerMethodField()
+    movie_count = serializers.SerializerMethodField()
     cover_posters = serializers.SerializerMethodField()
 
     class Meta:
         model = CustomList
         fields = [
             "id", "name", "description", "is_private",
-            "item_count", "cover_posters", "created_at", "updated_at",
+            "item_count", "tv_count", "movie_count", "cover_posters", "created_at", "updated_at",
         ]
 
     def get_item_count(self, obj):
         counts = self.context.get("item_counts", {})
         return counts.get(obj.id, 0)
+
+    def get_tv_count(self, obj):
+        return self.context.get("media_counts", {}).get((obj.id, "tv"), 0)
+
+    def get_movie_count(self, obj):
+        return self.context.get("media_counts", {}).get((obj.id, "movie"), 0)
 
     def get_cover_posters(self, obj):
         cover_map = self.context.get("cover_map", {})

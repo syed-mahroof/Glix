@@ -696,6 +696,20 @@ def _import_one_movie(tmdb: TMDBService, user, item: dict, errors: list):
     if not item.get("is_watched"):
         return True, 0
 
+    # A future release date against a watched movie means the matched TMDB
+    # record is probably wrong (e.g. resolved to a remake/different title
+    # than the one the user actually watched) — same reasoning as the
+    # air_date guard in _import_one_show above. Deliberately NOT
+    # has_released(): that helper treats a null date as "not released" for
+    # the user-initiated toggle gate, but here we're trusting an external
+    # import's evidence (TV Time already reported this as watched) unless
+    # we have positive proof of a mismatch — a null release_date (TMDB
+    # hasn't dated the movie) must be allowed through, not treated as
+    # unreleased, or genuine history would be silently dropped.
+    today = timezone.now().date()
+    if cached_movie.release_date is not None and cached_movie.release_date > today:
+        return True, 0
+
     watched_at = _parse_watched_at(item.get("watched_at"))
     _, created = MovieWatchState.objects.get_or_create(
         user=user,

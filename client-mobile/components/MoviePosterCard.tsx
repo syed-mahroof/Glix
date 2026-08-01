@@ -8,7 +8,7 @@
 
 import { Image } from 'expo-image';
 import { useRouter } from 'expo-router';
-import React from 'react';
+import React, { memo } from 'react';
 import { StyleSheet, Text, View } from 'react-native';
 
 import { useAppTheme } from '../lib/theme';
@@ -26,11 +26,14 @@ export interface MoviePosterCardProps {
   ratingBadge?: string;
   checkmark?: {
     isWatched: boolean;
+    disabled?: boolean;
     onPress: () => void;
   };
 }
 
-export default function MoviePosterCard({
+// Not memoized before (Phase 74 perf pass) — same reasoning as
+// ShowPosterCard/ShowRow.
+function MoviePosterCardComponent({
   movieId,
   title,
   posterPath,
@@ -68,11 +71,18 @@ export default function MoviePosterCard({
           {checkmark && (
             <PressableScale
               onPress={checkmark.onPress}
+              disabled={checkmark.disabled}
               hitSlop={8}
-              style={styles.checkBtn}
+              style={[styles.checkBtn, checkmark.disabled && styles.checkBtnDisabled]}
               accessibilityRole="checkbox"
-              accessibilityState={{ checked: checkmark.isWatched }}
-              accessibilityLabel={checkmark.isWatched ? 'Mark as unwatched' : 'Mark as watched'}
+              accessibilityState={{ checked: checkmark.isWatched, disabled: checkmark.disabled }}
+              accessibilityLabel={
+                checkmark.disabled
+                  ? "Hasn't released yet"
+                  : checkmark.isWatched
+                  ? 'Mark as unwatched'
+                  : 'Mark as watched'
+              }
             >
               <View
                 style={[
@@ -100,6 +110,8 @@ export default function MoviePosterCard({
     </View>
   );
 }
+
+export default memo(MoviePosterCardComponent);
 
 const styles = StyleSheet.create({
   wrap: {
@@ -135,6 +147,9 @@ const styles = StyleSheet.create({
     position: 'absolute',
     bottom: 8,
     right: 8,
+  },
+  checkBtnDisabled: {
+    opacity: 0.4,
   },
   checkCircle: {
     width: 30,

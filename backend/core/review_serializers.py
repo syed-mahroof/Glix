@@ -2,8 +2,8 @@
 backend/core/review_serializers.py
 
 Serializers for the show/movie review system (Phase L) — a private-by-
-default personal 1-5 star rating + optional note, distinct from the
-public Comment/CommentLike/CommentReport community system (see
+default personal half-star (0.5-5.0) rating + optional note, distinct
+from the public Comment/CommentLike/CommentReport community system (see
 ShowReview's own model docstring for why the two are kept separate).
 """
 
@@ -16,6 +16,13 @@ class ShowReviewSerializer(serializers.ModelSerializer):
     show_id = serializers.IntegerField(read_only=True)
     show_title = serializers.CharField(source="show.title", read_only=True)
     show_poster_path = serializers.CharField(source="show.poster_path", read_only=True)
+    # coerce_to_string=False: DRF's DecimalField renders Decimal("3.5") as
+    # the STRING "3.5" by default. The client types `rating: number` and
+    # does `value <= rating` — JS would coerce and *appear* to work, which
+    # is worse than a clean break because the type would be silently a
+    # lie. Per-field, not the global COERCE_DECIMAL_TO_STRING setting —
+    # this is the only DecimalField in the backend.
+    rating = serializers.DecimalField(max_digits=2, decimal_places=1, coerce_to_string=False)
 
     class Meta:
         model = ShowReview
@@ -36,6 +43,7 @@ class MovieReviewSerializer(serializers.ModelSerializer):
     movie_id = serializers.IntegerField(read_only=True)
     movie_title = serializers.CharField(source="movie.title", read_only=True)
     movie_poster_path = serializers.CharField(source="movie.poster_path", read_only=True)
+    rating = serializers.DecimalField(max_digits=2, decimal_places=1, coerce_to_string=False)
 
     class Meta:
         model = MovieReview

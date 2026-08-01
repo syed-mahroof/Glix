@@ -2,8 +2,12 @@
 backend/core/profile_views.py
 
 GET returns the authenticated user's profile with computed watch-time
-breakdowns; PATCH allows updating the mutable subset of fields
-(currently just the avatar URL).
+breakdowns and follower/following counts; PATCH allows updating the
+mutable subset of fields — the avatar URL (profile_picture) and, since
+Phase 74, the username (case-insensitive uniqueness + Django's standard
+username charset, enforced in UserProfileSerializer.validate_username/
+update) and is_private ("ghost mode" — see UserProfile.is_private and
+core/social_views.py). email stays read-only.
 """
 
 from django.core.cache import cache

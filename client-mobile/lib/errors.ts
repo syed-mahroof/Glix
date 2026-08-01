@@ -15,9 +15,25 @@ import axios from 'axios';
 // calls this shared helper gets the fix for free.
 export function extractErrorMessage(error: unknown): string {
   if (axios.isAxiosError(error)) {
-    const data = error.response?.data as { detail?: string } | undefined;
+    const data = error.response?.data as Record<string, unknown> | undefined;
     if (data && typeof data.detail === 'string' && data.detail.length > 0) {
       return data.detail;
+    }
+    // DRF field-level validation errors (raised from a serializer's
+    // validate_<field>, e.g. UserProfileSerializer.validate_username) come
+    // back shaped {"username": ["That username is already taken."]}, not
+    // {"detail": "..."} — falling through to error.message below would
+    // discard the specific message for axios's generic "Request failed
+    // with status code 400". Ported from register.tsx's local duplicate of
+    // this function (PROJECT_STATUS.md's tracked "error extraction
+    // duplicated" debt) so every screen gets field-error messages, not
+    // just Register.
+    if (data && typeof data === 'object') {
+      const firstKey = Object.keys(data)[0];
+      const firstValue = firstKey ? data[firstKey] : undefined;
+      if (Array.isArray(firstValue) && typeof firstValue[0] === 'string') {
+        return `${firstKey}: ${firstValue[0]}`;
+      }
     }
     if (error.code === 'ECONNABORTED') {
       return "This is taking longer than expected. Check your connection and try again.";

@@ -1,8 +1,11 @@
 """
 Phase L: show/movie review system — create/update/delete/list, scoped to
-the requesting user, 1-5 rating validation, and the private-by-default
-decision (no leakage into another user's view of the same title).
+the requesting user, half-star (0.5-5.0) rating validation (Phase 74:
+was whole-star 1-5), and the private-by-default decision (no leakage
+into another user's view of the same title).
 """
+
+from decimal import Decimal
 
 import pytest
 from django.contrib.auth import get_user_model
@@ -66,7 +69,7 @@ def test_show_review_create_then_update_in_place(api_client, create_user):
 
 
 @pytest.mark.django_db
-@pytest.mark.parametrize("rating", [0, 6, -1, "not-a-number"])
+@pytest.mark.parametrize("rating", [0, 6, -1, "not-a-number", 3.7, 0.25, 5.5])
 def test_show_review_rejects_invalid_rating(api_client, create_user, rating):
     user = create_user()
     api_client.force_authenticate(user=user)
@@ -76,6 +79,25 @@ def test_show_review_rejects_invalid_rating(api_client, create_user, rating):
     )
     assert response.status_code == 400
     assert not ShowReview.objects.filter(show=show).exists()
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("rating", [0.5, 3.5])
+def test_show_review_accepts_half_star_rating(api_client, create_user, rating):
+    """Phase 74: half-star ratings (Letterboxd-style) — the pre-Phase-74
+    `int(rating)` here silently truncated 3.5 to 3 with a 200 OK instead
+    of rejecting it; this asserts the exact value round-trips instead."""
+    user = create_user()
+    api_client.force_authenticate(user=user)
+    show = CachedShow.objects.create(tmdb_id=910 if rating == 0.5 else 911, title="Show", status=CachedShow.Status.ENDED)
+    response = api_client.post(
+        reverse("show-review-detail", args=[show.tmdb_id]), {"rating": rating}, format="json"
+    )
+    assert response.status_code == 201
+    # coerce_to_string=False -> a real numeric Decimal in .data, not "3.5".
+    assert response.data["rating"] == Decimal(str(rating))
+    assert not isinstance(response.data["rating"], str)
+    assert ShowReview.objects.get(user=user, show=show).rating == Decimal(str(rating))
 
 
 @pytest.mark.django_db

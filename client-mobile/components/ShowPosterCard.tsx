@@ -12,7 +12,7 @@
 
 import { Image } from 'expo-image';
 import { useRouter } from 'expo-router';
-import React from 'react';
+import React, { memo } from 'react';
 import { StyleSheet, Text, View } from 'react-native';
 
 import { useAppTheme } from '../lib/theme';
@@ -43,7 +43,10 @@ export interface ShowPosterCardProps {
   };
 }
 
-export default function ShowPosterCard({
+// Not memoized before (Phase 74 perf pass) — same reasoning as ShowRow:
+// the grid-view list re-rendered every visible card on any watchlist
+// mutation anywhere, not just the card that actually changed.
+function ShowPosterCardComponent({
   showId,
   title,
   posterPath,
@@ -139,6 +142,8 @@ export default function ShowPosterCard({
     </View>
   );
 }
+
+export default memo(ShowPosterCardComponent);
 
 const styles = StyleSheet.create({
   wrap: {

@@ -310,34 +310,37 @@ const src = StyleSheet.create({
 // ─── Main Screen ───────────────────────────────────────────────────────────────
 
 export default function DiscoverScreen() {
-  const {
-    activeSegment,
-    setActiveSegment,
-    searchQuery,
-    setSearchQuery,
-    filterSheetVisible,
-    toggleFilterSheet,
-    feedData,
-    isLoadingFeed,
-    feedError,
-    fetchFeed,
-    searchResults,
-    isSearching,
-    isLoadingMoreSearch,
-    loadMoreSearchResults,
-    runSearch,
-    clearSearch,
-    filteredResults,
-    isLoadingFiltered,
-    isLoadingMoreFiltered,
-    loadMoreFilteredResults,
-    filteredError,
-    isFilterActive,
-    setSelectedGenreId,
-    fetchGenreCovers,
-    forYou,
-    fetchForYou,
-  } = useDiscoverStore();
+  // Scoped selectors, not a bare useDiscoverStore() — see app/_layout.tsx's
+  // note (index.tsx/movies.tsx/profile/*/community.tsx already fixed this
+  // exact pattern; Discover was missed). A bare destructure of ~25 fields
+  // re-rendered this whole screen, including both feed lists, on every
+  // keystroke in search.
+  const activeSegment = useDiscoverStore((s) => s.activeSegment);
+  const setActiveSegment = useDiscoverStore((s) => s.setActiveSegment);
+  const searchQuery = useDiscoverStore((s) => s.searchQuery);
+  const setSearchQuery = useDiscoverStore((s) => s.setSearchQuery);
+  const filterSheetVisible = useDiscoverStore((s) => s.filterSheetVisible);
+  const toggleFilterSheet = useDiscoverStore((s) => s.toggleFilterSheet);
+  const feedData = useDiscoverStore((s) => s.feedData);
+  const isLoadingFeed = useDiscoverStore((s) => s.isLoadingFeed);
+  const feedError = useDiscoverStore((s) => s.feedError);
+  const fetchFeed = useDiscoverStore((s) => s.fetchFeed);
+  const searchResults = useDiscoverStore((s) => s.searchResults);
+  const isSearching = useDiscoverStore((s) => s.isSearching);
+  const isLoadingMoreSearch = useDiscoverStore((s) => s.isLoadingMoreSearch);
+  const loadMoreSearchResults = useDiscoverStore((s) => s.loadMoreSearchResults);
+  const runSearch = useDiscoverStore((s) => s.runSearch);
+  const clearSearch = useDiscoverStore((s) => s.clearSearch);
+  const filteredResults = useDiscoverStore((s) => s.filteredResults);
+  const isLoadingFiltered = useDiscoverStore((s) => s.isLoadingFiltered);
+  const isLoadingMoreFiltered = useDiscoverStore((s) => s.isLoadingMoreFiltered);
+  const loadMoreFilteredResults = useDiscoverStore((s) => s.loadMoreFilteredResults);
+  const filteredError = useDiscoverStore((s) => s.filteredError);
+  const isFilterActive = useDiscoverStore((s) => s.isFilterActive);
+  const setSelectedGenreId = useDiscoverStore((s) => s.setSelectedGenreId);
+  const fetchGenreCovers = useDiscoverStore((s) => s.fetchGenreCovers);
+  const forYou = useDiscoverStore((s) => s.forYou);
+  const fetchForYou = useDiscoverStore((s) => s.fetchForYou);
   const filterActive = isFilterActive();
   const { theme } = useAppTheme();
   const c = theme.colors;

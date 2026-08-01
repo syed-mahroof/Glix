@@ -18,6 +18,10 @@ export interface CustomListSummary {
   description: string;
   is_private: boolean;
   item_count: number;
+  /** Per-media-type breakdown, powers the All/Shows/Movies filter on the
+   *  "My Lists" hub — a list can hold both, so item_count alone can't. */
+  tv_count: number;
+  movie_count: number;
   cover_posters: string[];
   created_at: string;
   updated_at: string;
@@ -149,9 +153,11 @@ export const useListsStore = create<ListsStoreState>()((set, get) => ({
     // Optimistic — the sheet's checkmark flips immediately.
     const optimisticIds = wasIn ? previousIds.filter((id) => id !== listId) : [...previousIds, listId];
     set((state) => ({ membership: { ...state.membership, [key]: optimisticIds } }));
+    const delta = wasIn ? -1 : 1;
+    const countField = mediaType === 'tv' ? 'tv_count' : 'movie_count';
     set((state) => ({
       lists: state.lists.map((l) =>
-        l.id === listId ? { ...l, item_count: l.item_count + (wasIn ? -1 : 1) } : l
+        l.id === listId ? { ...l, item_count: l.item_count + delta, [countField]: l[countField] + delta } : l
       ),
     }));
 
@@ -162,7 +168,7 @@ export const useListsStore = create<ListsStoreState>()((set, get) => ({
       set((state) => ({
         membership: { ...state.membership, [key]: previousIds },
         lists: state.lists.map((l) =>
-          l.id === listId ? { ...l, item_count: l.item_count + (wasIn ? 1 : -1) } : l
+          l.id === listId ? { ...l, item_count: l.item_count - delta, [countField]: l[countField] - delta } : l
         ),
         error: extractErrorMessage(error),
       }));

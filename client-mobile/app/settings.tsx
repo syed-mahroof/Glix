@@ -6,11 +6,13 @@
 import axios from 'axios';
 import { useRouter } from 'expo-router';
 import * as SecureStore from 'expo-secure-store';
-import { ArrowLeft, LogOut, Monitor, Moon, Sun } from 'lucide-react-native';
-import React, { useEffect, useState } from 'react';
-import { ScrollView, StyleSheet, Switch, Text, View } from 'react-native';
+import { ArrowLeft, ChevronRight, LogOut, Monitor, Moon, Sun } from 'lucide-react-native';
+import React, { useEffect, useMemo, useState } from 'react';
+import { Alert, ScrollView, StyleSheet, Switch, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
+import AvatarPickerModal from '../components/AvatarPickerModal';
+import EditProfileSheet from '../components/EditProfileSheet';
 import LogoutConfirmModal from '../components/LogoutConfirmModal';
 import PressableScale from '../components/PressableScale';
 import { SegmentedControl } from '../components/SegmentedControl';
@@ -55,9 +57,18 @@ export default function SettingsScreen() {
   const { theme, name, preference, setPreference } = useAppTheme();
   const c = theme.colors;
   const profile = useWatchStore((state) => state.profile);
+  const updateProfilePicture = useWatchStore((state) => state.updateProfilePicture);
+  const updateUsername = useWatchStore((state) => state.updateUsername);
+  const updateIsPrivate = useWatchStore((state) => state.updateIsPrivate);
   const [notifyNewEpisode, setNotifyNewEpisode] = useState(true);
   const [notifyWeeklyDigest, setNotifyWeeklyDigest] = useState(false);
   const [isLoggingOut, setIsLoggingOut] = useState(false);
+  const [editProfileVisible, setEditProfileVisible] = useState(false);
+  const [avatarPickerVisible, setAvatarPickerVisible] = useState(false);
+  const initials = useMemo(() => {
+    if (!profile?.username) return '?';
+    return profile.username.slice(0, 2).toUpperCase();
+  }, [profile?.username]);
   const [isLogoutModalVisible, setIsLogoutModalVisible] = useState(false);
 
   useEffect(() => {
@@ -155,15 +166,34 @@ export default function SettingsScreen() {
 
         <Text style={[styles.sectionTitle, { color: c.textSecondary }]}>Account</Text>
         <View style={[styles.card, { backgroundColor: c.glassFill, borderColor: c.hairline }]}>
-          <View style={styles.row}>
+          <PressableScale style={styles.row} onPress={() => setEditProfileVisible(true)}>
             <Text style={[styles.rowLabel, { color: c.textPrimary }]}>Username</Text>
-            <Text style={[styles.rowValue, { color: c.textSecondary }]}>{profile?.username ?? '—'}</Text>
-          </View>
+            <View style={styles.rowValueGroup}>
+              <Text style={[styles.rowValue, { color: c.textSecondary }]}>{profile?.username ?? '—'}</Text>
+              <ChevronRight color={c.textTertiary} size={16} />
+            </View>
+          </PressableScale>
           <View style={[styles.divider, { backgroundColor: c.hairline }]} />
           <View style={styles.row}>
             <Text style={[styles.rowLabel, { color: c.textPrimary }]}>Email</Text>
             <Text style={[styles.rowValue, { color: c.textSecondary }]}>{profile?.email || '—'}</Text>
           </View>
+        </View>
+
+        <Text style={[styles.sectionTitle, { color: c.textSecondary }]}>Privacy</Text>
+        <View style={[styles.card, { backgroundColor: c.glassFill, borderColor: c.hairline }]}>
+          <SwitchRow
+            label="Private account"
+            value={profile?.is_private ?? false}
+            onValueChange={(next) => {
+              updateIsPrivate(next).then((ok) => {
+                if (!ok) Alert.alert('Update Failed', 'Could not change your privacy setting. Please try again.');
+              });
+            }}
+          />
+          <Text style={[styles.privacyHint, { color: c.textTertiary }]}>
+            Hides you from search, activity feeds, and everyone else's view of your profile.
+          </Text>
         </View>
 
         <PressableScale
@@ -185,6 +215,32 @@ export default function SettingsScreen() {
         visible={isLogoutModalVisible}
         onConfirm={performLogout}
         onCancel={() => setIsLogoutModalVisible(false)}
+      />
+
+      <EditProfileSheet
+        visible={editProfileVisible}
+        username={profile?.username ?? ''}
+        avatarUrl={profile?.profile_picture ?? null}
+        avatarInitials={initials}
+        onClose={() => setEditProfileVisible(false)}
+        onChangePhoto={() => {
+          setEditProfileVisible(false);
+          setAvatarPickerVisible(true);
+        }}
+        onSaveUsername={updateUsername}
+      />
+
+      <AvatarPickerModal
+        visible={avatarPickerVisible}
+        currentAvatar={profile?.profile_picture ?? null}
+        onClose={() => setAvatarPickerVisible(false)}
+        onSelect={async (url) => {
+          setAvatarPickerVisible(false);
+          const ok = await updateProfilePicture(url);
+          if (!ok) {
+            Alert.alert('Update Failed', 'Could not save your new avatar. Please try again.');
+          }
+        }}
       />
     </SafeAreaView>
   );
@@ -250,6 +306,11 @@ const styles = StyleSheet.create({
   rowValue: {
     fontSize: 14,
   },
+  rowValueGroup: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+  },
   appearanceLabelRow: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -258,6 +319,13 @@ const styles = StyleSheet.create({
   appearanceHint: {
     fontSize: 12,
     lineHeight: 16,
+  },
+  privacyHint: {
+    fontSize: 12,
+    lineHeight: 16,
+    paddingHorizontal: 16,
+    paddingBottom: 14,
+    marginTop: -6,
   },
   logoutButton: {
     flexDirection: 'row',

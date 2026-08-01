@@ -12,7 +12,7 @@
 import * as Haptics from 'expo-haptics';
 import { Image } from 'expo-image';
 import { useRouter } from 'expo-router';
-import React, { useCallback, useRef } from 'react';
+import React, { memo, useCallback, useRef } from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 import Animated, {
   interpolate,
@@ -80,7 +80,12 @@ function pad(n: number) {
 
 // ─── Component ────────────────────────────────────────────────────────────────
 
-export default function ShowRow({
+// Not memoized before (Phase 74 perf pass) — the Shows Hub list re-rendered
+// every visible row on any watchlist mutation anywhere, not just the row
+// whose own props actually changed, which is exactly what a tap on one
+// row's checkmark feeling like it's dragging the whole list with it looks
+// like. Same memo(...) pattern EpisodeRow/CommentCard already use.
+function ShowRowComponent({
   showId,
   showTitle,
   posterPath,
@@ -341,6 +346,8 @@ export default function ShowRow({
     </Animated.View>
   );
 }
+
+export default memo(ShowRowComponent);
 
 const styles = StyleSheet.create({
   row: {

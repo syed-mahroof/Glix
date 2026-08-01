@@ -55,6 +55,13 @@ const MAX_NETWORK_RETRIES = 2;
 const RETRY_DELAYS_MS = [600, 1500];
 
 function isRetryableFailure(error: AxiosError): boolean {
+  // A request the caller itself aborted (AbortController — see
+  // discoverStore.ts's in-flight-request dedup) must never be retried:
+  // without this check, `!error.response` below reads a deliberate
+  // cancellation identically to a dropped connection and retries the very
+  // request the caller just superseded, silently undoing the point of
+  // cancelling it.
+  if (axios.isCancel(error)) return false;
   // No `response` at all means the request never got a reply (timeout,
   // connection refused, DNS hiccup) — worth a retry. A 4xx got a real
   // answer from the server and will fail the same way again.

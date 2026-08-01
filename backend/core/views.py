@@ -34,6 +34,7 @@ from core.models import (
     NotificationPreference,
 )
 from core.cache_keys import CACHE_TTL_SECONDS, movie_watchlist_cache_key, watchlist_cache_key
+from core.dates import has_released
 from core.pagination import StandardResultsPagination
 from core.serializers import (
     LEAN_EPISODE_FIELDS,
@@ -278,9 +279,28 @@ class DiscoverFilterView(APIView):
             for r in results:
                 r.pop("genre_ids", None)
                 r.pop("original_language", None)
+
+            is_filtered = bool(genre_id or anime or language)
+            # TMDB's /trending endpoint has no with_genres/original_language
+            # support, so this filtering happens page-by-page in Python
+            # after the fact — there is no way to know the TRUE cross-page
+            # total without fetching and filtering every one of TMDB's
+            # pages up front. total_results is honest (this page's actual
+            # count, which can legitimately be 0-3 after filtering); raw
+            # trending total_pages, left uncapped, would let the client
+            # "load more" dozens of times past the point where filtered
+            # pages are reliably empty. Capped defensively when a filter is
+            # active — not a real fix (that would need TMDB to support
+            # server-side genre filtering on /trending, which it doesn't),
+            # just a bound on how much wasted pagination this can cause.
+            FILTERED_TRENDING_MAX_PAGES = 20
             data = {
                 "page": trending.get("page", page),
-                "total_pages": trending.get("total_pages", 1),
+                "total_pages": (
+                    min(trending.get("total_pages", 1), FILTERED_TRENDING_MAX_PAGES)
+                    if is_filtered
+                    else trending.get("total_pages", 1)
+                ),
                 "total_results": len(results),
                 "results": results,
             }
@@ -345,18 +365,26 @@ class DiscoverGenresView(APIView):
         tmdb = TMDBService()
         genre_ids = self.TV_GENRE_IDS if media_type == "tv" else self.MOVIE_GENRE_IDS
 
-        results = []
-        for genre_id in genre_ids:
+        # Was a sequential loop — 16 independent TMDB calls on a 24h cache
+        # miss, blocking one of the app's 4 gunicorn threads for the sum of
+        # all 16 instead of the slowest single one. Same ThreadPoolExecutor
+        # pattern as DiscoverFeedView (:109) and get_popular_characters()
+        # (services.py) — pool.map preserves genre_ids' order in its
+        # results regardless of completion order.
+        def _fetch_genre_cover(genre_id: int) -> dict:
             if media_type == "tv":
                 data = tmdb.discover_tv(genre_id=genre_id, sort_by="popularity.desc", page=1)
             else:
                 data = tmdb.discover_movies(genre_id=genre_id, sort_by="popularity.desc", page=1)
             top = data["results"][0] if data.get("results") else None
-            results.append({
+            return {
                 "id": genre_id,
                 "backdrop_path": top.get("backdrop_path") if top else None,
                 "poster_path": top.get("poster_path") if top else None,
-            })
+            }
+
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            results = list(pool.map(_fetch_genre_cover, genre_ids))
 
         cache.set(cache_key, results, timeout=self.CACHE_TTL_SECONDS)
         return Response(results, status=status.HTTP_200_OK)
@@ -678,20 +706,29 @@ class BulkWatchStateToggleView(APIView):
                 ).values_list("episode_id", flat=True)
             )
 
+            skipped_unaired_ids: list[int] = []
+            applied_ids: list[int] = []
+
             if watched:
                 # Only create states for episodes not yet watched AND already
                 # aired — a Cascade Catch-Up must never mark a future episode
                 # watched (same rule as the single-episode toggle). Unaired
-                # ids in the batch are silently dropped rather than erroring
-                # the whole cascade.
-                today = timezone.now().date()
+                # ids in the batch are dropped from to_create, but — unlike
+                # before — reported back explicitly via skipped_unaired_ids
+                # rather than silently echoed as "successful" in episode_ids,
+                # which let the client's optimistic state diverge from the
+                # server with no error (AUDIT.md).
                 to_create = [
                     ep
                     for ep in episodes
-                    if ep.pk not in existing_states
-                    and ep.air_date is not None
-                    and ep.air_date <= today
+                    if ep.pk not in existing_states and has_released(ep.air_date)
                 ]
+                skipped_unaired_ids = [
+                    ep.tmdb_id
+                    for ep in episodes
+                    if ep.pk not in existing_states and not has_released(ep.air_date)
+                ]
+                applied_ids = [ep.tmdb_id for ep in to_create]
                 if to_create:
                     WatchState.objects.bulk_create(
                         [WatchState(user=request.user, episode=ep) for ep in to_create],
@@ -731,6 +768,7 @@ class BulkWatchStateToggleView(APIView):
             else:
                 # Only delete states that currently exist
                 to_delete = [ep for ep in episodes if ep.pk in existing_states]
+                applied_ids = [ep.tmdb_id for ep in to_delete]
                 if to_delete:
                     WatchState.objects.filter(
                         user=request.user, episode__in=to_delete
@@ -749,7 +787,11 @@ class BulkWatchStateToggleView(APIView):
 
         return Response(
             {
+                # Kept for backward compatibility — every requested id, not
+                # just the ones actually applied. Prefer applied_episode_ids.
                 "episode_ids": [ep.tmdb_id for ep in episodes],
+                "applied_episode_ids": applied_ids,
+                "skipped_unaired_ids": skipped_unaired_ids,
                 "watched": watched,
                 "total_time_watched": profile.total_time_watched,
                 "newly_earned_badges": newly_earned_badges,
@@ -934,7 +976,17 @@ class CatchupCheckView(APIView):
         else:
             prev_qs = CachedEpisode.objects.filter(show=show, season_number__lt=target_season)
 
-        ids = list(prev_qs.exclude(pk__in=watched_ids).values_list("tmdb_id", flat=True))
+        # Only count episodes that have actually aired — bulk-toggle will
+        # refuse to create WatchState rows for unaired ones (see
+        # BulkWatchStateToggleView), so counting them here would let the
+        # Catch-Up modal promise "N previous episodes" that the follow-up
+        # bulk-toggle then silently can't deliver on.
+        today = timezone.now().date()
+        ids = list(
+            prev_qs.exclude(pk__in=watched_ids)
+            .filter(air_date__isnull=False, air_date__lte=today)
+            .values_list("tmdb_id", flat=True)
+        )
 
         return Response({"has": len(ids) > 0, "ids": ids, "count": len(ids)}, status=status.HTTP_200_OK)
 
@@ -1378,6 +1430,16 @@ class MovieWatchStateToggleView(APIView):
                 )
                 watched = False
             else:
+                # Can't mark a movie watched before it's released. Un-watching
+                # (the branch above) is always allowed — this only gates the
+                # "create MovieWatchState" direction. release_date is null for
+                # movies TMDB hasn't dated yet; treat those as not-yet-released
+                # too. Mirrors WatchStateToggleView's identical episode gate.
+                if not has_released(movie.release_date):
+                    return Response(
+                        {"detail": "This movie hasn't released yet — you can't mark it watched."},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
                 UserProfile.objects.filter(pk=profile.pk).update(
                     total_time_watched=F("total_time_watched") + movie.runtime_minutes
                 )

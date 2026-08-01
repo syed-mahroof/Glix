@@ -10,7 +10,7 @@
 import * as Haptics from 'expo-haptics';
 import { Image } from 'expo-image';
 import { useRouter } from 'expo-router';
-import React, { useCallback, useRef } from 'react';
+import React, { memo, useCallback, useRef } from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 import Animated, {
   Easing,
@@ -38,6 +38,11 @@ export interface MovieRowProps {
   runtimeMinutes: number;
   genresString: string;
   isWatched: boolean;
+  /** Whether this movie has released. An unreleased movie can't be marked
+   *  watched — the checkmark is disabled + dimmed when false. Defaults true
+   *  so callers that don't pass it keep the old behaviour. Mirrors
+   *  ShowRow's isAired prop. */
+  isReleased?: boolean;
   onCheckPress: (movieId: number) => void;
   onAnimationComplete?: (movieId: number) => void;
 }
@@ -51,13 +56,17 @@ function formatRuntime(minutes: number): string {
   return `${h}h ${m}m`;
 }
 
-export default function MovieRow({
+// Not memoized before (Phase 74 perf pass) — same fix as ShowRow, same
+// reasoning: the Movies Hub list re-rendered every visible row on any
+// watchlist mutation anywhere, not just the row that actually changed.
+function MovieRowComponent({
   movieId,
   title,
   posterPath,
   runtimeMinutes,
   genresString,
   isWatched,
+  isReleased = true,
   onCheckPress,
   onAnimationComplete,
 }: MovieRowProps) {
@@ -106,6 +115,9 @@ export default function MovieRow({
 
   const handleCheckPress = useCallback(() => {
     if (isAnimating.current) return;
+    // Can't mark an unreleased movie watched. (Un-watching is impossible
+    // here anyway since an unreleased movie can't already be watched.)
+    if (!isReleased && !isWatched) return;
 
     runOnJS(triggerHaptic)();
     runOnJS(notifyParent)(movieId);
@@ -159,6 +171,7 @@ export default function MovieRow({
   }, [
     movieId,
     isWatched,
+    isReleased,
     fillProgress,
     tickScale,
     checkBounce,
@@ -237,13 +250,20 @@ export default function MovieRow({
         </View>
 
         {/* Animated Checkmark */}
-        <Animated.View style={checkBounceStyle}>
+        <Animated.View style={[checkBounceStyle, !isReleased && !isWatched && styles.checkDisabled]}>
           <Pressable
             onPress={handleCheckPress}
+            disabled={!isReleased && !isWatched}
             hitSlop={12}
             accessibilityRole="checkbox"
-            accessibilityState={{ checked: isWatched }}
-            accessibilityLabel={isWatched ? 'Mark as unwatched' : 'Mark as watched'}
+            accessibilityState={{ checked: isWatched, disabled: !isReleased && !isWatched }}
+            accessibilityLabel={
+              !isReleased && !isWatched
+                ? "Hasn't released yet"
+                : isWatched
+                ? 'Mark as unwatched'
+                : 'Mark as watched'
+            }
           >
             <Animated.View style={[styles.checkCircle, circleStyle]}>
               <Animated.Text style={[styles.checkMark, { color: c.onAccent }, tickStyle]}>✓</Animated.Text>
@@ -254,6 +274,8 @@ export default function MovieRow({
     </Animated.View>
   );
 }
+
+export default memo(MovieRowComponent);
 
 const styles = StyleSheet.create({
   row: {
@@ -296,5 +318,8 @@ const styles = StyleSheet.create({
     fontSize: 20,
     fontWeight: '900',
     lineHeight: 24,
+  },
+  checkDisabled: {
+    opacity: 0.3,
   },
 });

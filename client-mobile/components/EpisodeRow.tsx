@@ -4,7 +4,7 @@ import { Check, Eye } from 'lucide-react-native';
 import React, { memo, useState } from 'react';
 import { ActivityIndicator, StyleSheet, Text, View } from 'react-native';
 
-import { pad, todayLocalIso } from '../lib/dateFormat';
+import { hasAired, pad } from '../lib/dateFormat';
 import { useAppTheme } from '../lib/theme';
 import { Episode } from '../store/watchStore';
 import PressableScale from './PressableScale';
@@ -33,8 +33,7 @@ function EpisodeRowComponent({
 
   // A future episode can't be marked watched — disable its toggle. Un-watching
   // stays possible (an already-watched episode with a bad/late air_date).
-  const todayIso = todayLocalIso();
-  const isAired = !!episode.air_date && episode.air_date <= todayIso;
+  const isAired = hasAired(episode.air_date);
   const toggleDisabled = isToggling || (!isAired && !episode.is_watched);
 
   return (

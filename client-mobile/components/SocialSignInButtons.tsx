@@ -81,13 +81,21 @@ export default function SocialSignInButtons({ onSuccess, onError, disabled }: So
             <ActivityIndicator color={c.textSecondary} />
           </View>
         ) : (
-          <GoogleSigninButton
-            size={GoogleSigninButton.Size.Wide}
-            color={isDark ? GoogleSigninButton.Color.Light : GoogleSigninButton.Color.Dark}
-            onPress={handleGoogle}
-            disabled={isBusy}
-            style={styles.googleButton}
-          />
+          // GoogleSigninButton is a native view — its own drawable draws
+          // square-ish corners, so borderRadius on the button's own style
+          // doesn't reliably clip on Android. Wrapping it in an
+          // overflow:'hidden' View clips the native content instead,
+          // matching Apple's cornerRadius={14} on its neighbour above and
+          // the app's submitButton radius (login.tsx/register.tsx).
+          <View style={styles.googleButtonClip}>
+            <GoogleSigninButton
+              size={GoogleSigninButton.Size.Wide}
+              color={isDark ? GoogleSigninButton.Color.Light : GoogleSigninButton.Color.Dark}
+              onPress={handleGoogle}
+              disabled={isBusy}
+              style={styles.googleButton}
+            />
+          </View>
         )}
 
         {Platform.OS === 'ios' && isAppleAvailable && (
@@ -133,6 +141,12 @@ const styles = StyleSheet.create({
   },
   buttonStack: {
     gap: 10,
+  },
+  googleButtonClip: {
+    width: '100%',
+    height: 52,
+    borderRadius: 14,
+    overflow: 'hidden',
   },
   googleButton: {
     width: '100%',

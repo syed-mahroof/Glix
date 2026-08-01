@@ -8,7 +8,7 @@
 import { FlashList } from '@shopify/flash-list';
 import { Image } from 'expo-image';
 import { useLocalSearchParams, useRouter } from 'expo-router';
-import { CalendarDays, ChevronDown, ChevronUp, LayoutGrid, List as ListIcon, RefreshCw, Tv } from 'lucide-react-native';
+import { CalendarDays, ChevronDown, ChevronUp, LayoutGrid, List as ListIcon, ListChecks, RefreshCw, Tv } from 'lucide-react-native';
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   ActivityIndicator,
@@ -30,7 +30,7 @@ import { SegmentedControl } from '../../components/SegmentedControl';
 import ShowPosterCard from '../../components/ShowPosterCard';
 import ShowRow from '../../components/ShowRow';
 import Snackbar from '../../components/Snackbar';
-import { formatCountdown, formatDaysAgo, pad, todayLocalIso } from '../../lib/dateFormat';
+import { formatCountdown, formatDaysAgo, hasAired, pad, todayLocalIso } from '../../lib/dateFormat';
 import { useAppTheme } from '../../lib/theme';
 import {
   buildUpcomingItems,
@@ -109,7 +109,6 @@ function buildRows(entries: WatchlistEntry[], filter: FilterKey): ShowEpisodeRow
   // We return empty here so the FlashList for HISTORY is fed from the new data source instead.
   if (filter === 'HISTORY') return [];
 
-  const todayIso = todayLocalIso();
   const todayMs = Date.now();
   const INACTIVITY_MS = 14 * 24 * 60 * 60 * 1000;
   const rows: ShowEpisodeRow[] = [];
@@ -166,7 +165,7 @@ function buildRows(entries: WatchlistEntry[], filter: FilterKey): ShowEpisodeRow
       showTitle: entry.show.title,
       posterPath: entry.show.poster_path,
       episode,
-      isAired: !!episode?.air_date && episode.air_date <= todayIso,
+      isAired: hasAired(episode?.air_date),
       lastWatchedAt: entry.last_watched_at,
     });
   }
@@ -327,7 +326,7 @@ function UpcomingRow({
   const target = new Date(`${item.airDate}T00:00:00`);
   const { formatted, isImminent, dayOfWeek } = formatCountdown(target, now);
   const todayIso = todayLocalIso(now);
-  const isAired = item.airDate <= todayIso;
+  const isAired = hasAired(item.airDate, now);
   // Distinct from isAired: a TODAY item is technically "aired" (markable —
   // WatchStateToggleView's own gate is air_date <= today) but still shows
   // its normal countdown text; only a genuinely past date (Phase G's
@@ -479,6 +478,7 @@ export default function ShowsScreen() {
   const { highlightFilter } = useLocalSearchParams<{ highlightFilter?: string }>();
   const { theme } = useAppTheme();
   const c = theme.colors;
+  const router = useRouter();
 
   const [activeTab, setActiveTab] = useState<HubTab>('watchlist');
   const [upcomingView, setUpcomingView] = useState<UpcomingView>('list');
@@ -747,7 +747,7 @@ export default function ShowsScreen() {
       const item = entry.data;
       const todayIso = todayLocalIso(now);
       const isOverdue = item.airDate < todayIso;
-      const isAired = item.airDate <= todayIso;
+      const isAired = hasAired(item.airDate, now);
       const target = new Date(`${item.airDate}T00:00:00`);
       const { formatted, isImminent, dayOfWeek } = formatCountdown(target, now);
       return (
@@ -792,7 +792,17 @@ export default function ShowsScreen() {
           stacking both read as two redundant, cluttered controls. */}
       <View style={styles.header}>
         <Text style={[styles.headerTitle, { color: c.textPrimary }]}>Shows</Text>
-        {activeTab === 'watchlist' && <LayoutToggle />}
+        <View style={styles.headerRight}>
+          <PressableScale
+            style={[styles.headerIcon, { backgroundColor: c.glassFill, borderColor: c.hairline }]}
+            onPress={() => router.push('/lists' as any)}
+            accessibilityRole="button"
+            accessibilityLabel="My Lists"
+          >
+            <ListChecks color={c.accentInk} size={22} strokeWidth={2} />
+          </PressableScale>
+          {activeTab === 'watchlist' && <LayoutToggle />}
+        </View>
       </View>
 
       {/* ── Error Banner ── */}
@@ -1081,6 +1091,19 @@ const styles = StyleSheet.create({
     fontSize: 32,
     fontWeight: '700',
     letterSpacing: -0.8,
+  },
+  headerRight: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+  },
+  headerIcon: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    borderWidth: StyleSheet.hairlineWidth,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   errorBanner: {
     marginHorizontal: 20,

@@ -21,7 +21,7 @@ from django.db.models.signals import post_delete, post_save
 from django.dispatch import receiver
 from django.utils import timezone
 
-from core.cache_keys import movie_watchlist_cache_key, watchlist_cache_key
+from core.cache_keys import analytics_movies_cache_key, movie_watchlist_cache_key, watchlist_cache_key
 
 from core.badge_constants import (
     ANIME_GENRES,
@@ -280,6 +280,10 @@ def _bust_movie_watchlist_cache(user_id):
     transaction.on_commit(lambda: cache.delete(movie_watchlist_cache_key(user_id)))
 
 
+def _bust_analytics_movies_cache(user_id):
+    transaction.on_commit(lambda: cache.delete(analytics_movies_cache_key(user_id)))
+
+
 @receiver(post_save, sender=Watchlist)
 @receiver(post_delete, sender=Watchlist)
 def invalidate_watchlist_cache(sender, instance, **kwargs):
@@ -296,9 +300,11 @@ def invalidate_watchlist_cache_on_watchstate(sender, instance, **kwargs):
 @receiver(post_delete, sender=MovieWatchlist)
 def invalidate_movie_watchlist_cache(sender, instance, **kwargs):
     _bust_movie_watchlist_cache(instance.user_id)
+    _bust_analytics_movies_cache(instance.user_id)
 
 
 @receiver(post_save, sender=MovieWatchState)
 @receiver(post_delete, sender=MovieWatchState)
 def invalidate_movie_watchlist_cache_on_watchstate(sender, instance, **kwargs):
     _bust_movie_watchlist_cache(instance.user_id)
+    _bust_analytics_movies_cache(instance.user_id)

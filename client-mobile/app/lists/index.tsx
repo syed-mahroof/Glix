@@ -1,12 +1,14 @@
 // client-mobile/app/lists/index.tsx
-// "My Lists" hub — user-created lists (e.g. "Movies2026"), reached from the
-// Movies Hub header (replacing the old shortcut to Discover, which is
-// still one tap away via the bottom tab bar).
+// "My Lists" hub — user-created lists (e.g. "Movies2026"). Reached from
+// three places (Phase 74): the Movies Hub header, the Shows Hub header,
+// and a row on the Profile Hub. Lists are mixed-media (a single list can
+// hold both shows and movies — see CustomListItem.media_type), so instead
+// of splitting into two screens this hub gets an All/Shows/Movies filter.
 
 import { Image } from 'expo-image';
 import { useRouter } from 'expo-router';
 import { ArrowLeft, ListChecks, Lock, Plus } from 'lucide-react-native';
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   ActivityIndicator,
   FlatList,
@@ -19,8 +21,17 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 
 import GlassSurface from '../../components/GlassSurface';
 import PressableScale from '../../components/PressableScale';
+import { SegmentedControl } from '../../components/SegmentedControl';
 import { useAppTheme } from '../../lib/theme';
 import { type CustomListSummary, useListsStore } from '../../store/listsStore';
+
+type MediaFilter = 'all' | 'tv' | 'movie';
+
+const MEDIA_FILTERS: { value: MediaFilter; label: string }[] = [
+  { value: 'all', label: 'All' },
+  { value: 'tv', label: 'Shows' },
+  { value: 'movie', label: 'Movies' },
+];
 
 const POSTER_BASE_URL = 'https://image.tmdb.org/t/p/w200';
 
@@ -87,10 +98,16 @@ export default function ListsHubScreen() {
 
   const [newListName, setNewListName] = useState('');
   const [isCreating, setIsCreating] = useState(false);
+  const [mediaFilter, setMediaFilter] = useState<MediaFilter>('all');
 
   useEffect(() => {
     fetchLists();
   }, [fetchLists]);
+
+  const filteredLists = useMemo(() => {
+    if (mediaFilter === 'all') return lists;
+    return lists.filter((l) => (mediaFilter === 'tv' ? l.tv_count > 0 : l.movie_count > 0));
+  }, [lists, mediaFilter]);
 
   const handleCreate = useCallback(async () => {
     const name = newListName.trim();
@@ -131,6 +148,12 @@ export default function ListsHubScreen() {
         </PressableScale>
       </View>
 
+      {lists.length > 0 && (
+        <View style={styles.filterRow}>
+          <SegmentedControl segments={MEDIA_FILTERS} selectedValue={mediaFilter} onValueChange={setMediaFilter} />
+        </View>
+      )}
+
       {isLoadingLists && lists.length === 0 ? (
         <ActivityIndicator color={c.accentInk} style={{ marginTop: 40 }} />
       ) : lists.length === 0 ? (
@@ -138,12 +161,22 @@ export default function ListsHubScreen() {
           <ListChecks color={c.textTertiary} size={48} strokeWidth={1.5} />
           <Text style={[styles.emptyTitle, { color: c.textPrimary }]}>No lists yet</Text>
           <Text style={[styles.emptySubtitle, { color: c.textTertiary }]}>
-            Create a list above, or tap "Add to List" from any movie to start one.
+            Create a list above, or tap "Add to List" from any show or movie to start one.
+          </Text>
+        </View>
+      ) : filteredLists.length === 0 ? (
+        <View style={styles.emptyState}>
+          <ListChecks color={c.textTertiary} size={48} strokeWidth={1.5} />
+          <Text style={[styles.emptyTitle, { color: c.textPrimary }]}>
+            No {mediaFilter === 'tv' ? 'show' : 'movie'} lists yet
+          </Text>
+          <Text style={[styles.emptySubtitle, { color: c.textTertiary }]}>
+            Lists with a {mediaFilter === 'tv' ? 'show' : 'movie'} in them will show up here.
           </Text>
         </View>
       ) : (
         <FlatList
-          data={lists}
+          data={filteredLists}
           keyExtractor={(item) => String(item.id)}
           renderItem={({ item }) => <ListCard item={item} />}
           contentContainerStyle={styles.listContent}
@@ -173,6 +206,10 @@ const styles = StyleSheet.create({
   headerTitle: {
     fontSize: 20,
     fontWeight: '700',
+  },
+  filterRow: {
+    paddingHorizontal: 20,
+    marginBottom: 16,
   },
   createRow: {
     flexDirection: 'row',

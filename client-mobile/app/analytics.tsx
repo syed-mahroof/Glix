@@ -9,10 +9,11 @@ import {
   Activity,
   ArrowLeft,
   ChevronRight,
+  Clapperboard,
   Flame,
   Trophy,
 } from 'lucide-react-native';
-import React, { useCallback, useMemo } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   ActivityIndicator,
   ScrollView,
@@ -28,7 +29,9 @@ import CompletionRateCard from '../components/CompletionRateCard';
 import ErrorState from '../components/ErrorState';
 import GenreChart from '../components/GenreChart';
 import GlassSurface from '../components/GlassSurface';
+import HorizontalMediaList, { type MediaItem } from '../components/HorizontalMediaList';
 import PressableScale from '../components/PressableScale';
+import { SegmentedControl } from '../components/SegmentedControl';
 import StatsCard from '../components/StatsCard';
 import TimeWatchedCard from '../components/TimeWatchedCard';
 import TrendChip from '../components/TrendChip';
@@ -73,6 +76,21 @@ export default function AnalyticsScreen() {
   const monthlyRecap = useWatchStore((s) => s.monthlyRecap);
   const isLoading = useWatchStore((s) => s.isLoadingAnalytics);
   const analyticsError = useWatchStore((s) => s.analyticsError);
+
+  // Movies segment (Phase 74/Group H) — deliberately its own lazy fetch,
+  // not part of the useFocusEffect batch below (already 6 unconditional
+  // requests on a 4-thread Render box). Fires once, the first time the
+  // user switches to the Movies segment.
+  const [segment, setSegment] = useState<'shows' | 'movies'>('shows');
+  const movieAnalytics = useWatchStore((s) => s.movieAnalytics);
+  const isLoadingMovieAnalytics = useWatchStore((s) => s.isLoadingMovieAnalytics);
+  const fetchMovieAnalytics = useWatchStore((s) => s.fetchMovieAnalytics);
+
+  useEffect(() => {
+    if (segment === 'movies' && !movieAnalytics) {
+      fetchMovieAnalytics();
+    }
+  }, [segment, movieAnalytics, fetchMovieAnalytics]);
 
   // This screen's stack lives inside the Profile tab and is frozen (not
   // unmounted) when the user switches tabs — a mount-only fetch left every
@@ -132,12 +150,83 @@ export default function AnalyticsScreen() {
           {isLoading && <ActivityIndicator color={c.accentInk} size="small" />}
         </View>
 
-        {/* A failed fetch left `dashboard` null while every stat below reads
+        <View style={styles.segmentWrap}>
+          <SegmentedControl
+            segments={[
+              { value: 'shows', label: 'Shows' },
+              { value: 'movies', label: 'Movies' },
+            ]}
+            selectedValue={segment}
+            onValueChange={(v) => setSegment(v as 'shows' | 'movies')}
+          />
+        </View>
+
+        {segment === 'movies' ? (
+          isLoadingMovieAnalytics && !movieAnalytics ? (
+            <View style={styles.moviesLoading}>
+              <ActivityIndicator color={c.accentInk} size="large" />
+            </View>
+          ) : analyticsError && !movieAnalytics ? (
+            <ErrorState message={analyticsError} onRetry={fetchMovieAnalytics} />
+          ) : movieAnalytics ? (
+            <>
+              <TimeWatchedCard
+                days={Math.floor(movieAnalytics.total_runtime_minutes / 1440)}
+                hours={Math.floor((movieAnalytics.total_runtime_minutes % 1440) / 60)}
+                minutes={movieAnalytics.total_runtime_minutes % 60}
+              />
+
+              <View style={styles.statsRow}>
+                <StatsCard label="Watched" value={movieAnalytics.movies_watched} Icon={Clapperboard} />
+                <StatsCard label="Tracked" value={movieAnalytics.movies_tracked} Icon={Clapperboard} />
+                <StatsCard label="This Year" value={movieAnalytics.watched_this_year} Icon={Clapperboard} />
+              </View>
+
+              {movieAnalytics.longest_movie && (
+                <GlassSurface radius={14} style={styles.longestMovieRow}>
+                  <Text style={[styles.longestMovieLabel, { color: c.textSecondary }]}>Longest movie watched</Text>
+                  <Text style={[styles.longestMovieValue, { color: c.textPrimary }]} numberOfLines={1}>
+                    {movieAnalytics.longest_movie.title} · {movieAnalytics.longest_movie.runtime_minutes}m
+                  </Text>
+                </GlassSurface>
+              )}
+
+              {movieAnalytics.top_genres.length > 0 && <GenreChart data={movieAnalytics.top_genres} />}
+
+              {movieAnalytics.by_decade.length > 0 && (
+                <GlassSurface radius={16} style={styles.decadeCard}>
+                  <Text style={[styles.decadeTitle, { color: c.textPrimary }]}>By Decade</Text>
+                  {movieAnalytics.by_decade.map((d) => (
+                    <View key={d.decade} style={styles.decadeRow}>
+                      <Text style={[styles.decadeLabel, { color: c.textSecondary }]}>{d.decade}</Text>
+                      <Text style={[styles.decadeCount, { color: c.accentInk }]}>{d.count}</Text>
+                    </View>
+                  ))}
+                </GlassSurface>
+              )}
+
+              {movieAnalytics.recent_movies.length > 0 && (
+                <HorizontalMediaList
+                  title="Recent Movies"
+                  items={movieAnalytics.recent_movies.map(
+                    (m): MediaItem => ({
+                      tmdb_id: m.tmdb_id,
+                      media_type: 'movie',
+                      title: m.title,
+                      poster_path: m.poster_path,
+                      vote_average: 0,
+                    })
+                  )}
+                />
+              )}
+            </>
+          ) : null
+        ) : /* A failed fetch left `dashboard` null while every stat below reads
             `dashboard?.x ?? 0` — rendering a confident-looking all-zero
             dashboard with no indication anything went wrong. Same silent-
             failure class fixed on achievements.tsx/statistics.tsx; show a
-            real retry card instead of a fabricated "0 episodes, 0 shows". */}
-        {analyticsError && !dashboard && !isLoading ? (
+            real retry card instead of a fabricated "0 episodes, 0 shows". */
+        analyticsError && !dashboard && !isLoading ? (
           <ErrorState
             message={analyticsError}
             onRetry={() => {
@@ -214,7 +303,7 @@ export default function AnalyticsScreen() {
                 episodePct={completion.episode_completion_pct}
                 seasonPct={completion.season_completion_pct}
                 showPct={completion.show_completion_pct}
-                moviePct={0}
+                moviePct={completion.movie_completion_pct}
               />
             )}
 
@@ -262,6 +351,46 @@ const styles = StyleSheet.create({
   headerSub: {
     fontSize: 13,
     marginTop: 2,
+  },
+  segmentWrap: {
+    marginTop: 4,
+  },
+  moviesLoading: {
+    paddingVertical: 60,
+    alignItems: 'center',
+  },
+  longestMovieRow: {
+    padding: 16,
+    gap: 4,
+  },
+  longestMovieLabel: {
+    fontSize: 11,
+    fontWeight: '600',
+  },
+  longestMovieValue: {
+    fontSize: 14,
+    fontWeight: '700',
+  },
+  decadeCard: {
+    padding: 16,
+    gap: 10,
+  },
+  decadeTitle: {
+    fontSize: 14,
+    fontWeight: '700',
+  },
+  decadeRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  decadeLabel: {
+    fontSize: 13,
+    fontWeight: '600',
+  },
+  decadeCount: {
+    fontSize: 13,
+    fontWeight: '800',
   },
   heroCard: {
     borderWidth: StyleSheet.hairlineWidth,
