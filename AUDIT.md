@@ -1,3 +1,42 @@
+## 🟡 INVESTIGATED — "everything blank" post-update report: no code regression found, cold-start hardening + first error boundary shipped (2026-08-03, Phase 76)
+
+Full narrative in `PROJECT_STATUS.md`'s Phase 76 section and `context.md`'s Phase 76 entry.
+
+Trigger: right after this session's Phase 75 EAS update + Render redeploy, the user reported Discover (confirmed via screen recording — blank for the full ~13s clip, no spinner motion, no error card, while Shows/Movies Hub rendered real cached data correctly) plus Profile and "most things" broken.
+
+### Investigation performed (all clean — no bug found)
+
+| Check | Result |
+|---|---|
+| `git diff` of `discover.tsx`/`discoverStore.ts`/`DiscoverFilterSheet.tsx` against the Phase 75 commit | Untouched this phase — last changed in Phase 74's selector-conversion, re-verified field-for-field correct |
+| `tsc --noEmit` | Clean, zero errors |
+| `eas channel:list` / `eas update:view` | Phase 75 update published correctly to the `preview` channel, `runtimeVersion` 1.0.0 matches (no native changes this phase, no channel/runtime mismatch possible) |
+| Live production backend — fresh test account | Every Phase 75 endpoint (discover feed/genres/for-you, watchlist, movies watchlist, lists, profile, analytics dashboard/statistics/monthly-summary, comments feed, activity feed, rewatch detail, public profile, users search/followers) — all 200, correct shapes |
+| Live production backend — populated test account | Added a show, bulk-marked 62/62 episodes watched, started + toggled a rewatch round, added + rewatched a movie, posted a show review and movie review, re-checked every endpoint above — all 200, correct data (`active_rewatch`, `rewatch_count`, `is_self` all populate correctly), zero 500s |
+| `profile.tsx` / `profile/anime.tsx` (full read, not just diff) | Logically sound; `isAnimeByGenresAndLanguage()`'s `genres` access confirmed safe (required field, present on live responses); reused `ShowGridCard`/`ShowListRow`/`MovieGridCard`/`MovieListRow` exports are self-contained, no screen-specific dependency |
+
+### Most plausible root cause (not a code bug)
+
+Render's free-tier dyno restarts — and goes cold, 20-50s to wake — on every backend redeploy, which this session triggered to ship Phase 75's backend changes. `app/_layout.tsx`'s boot path for an *already-authenticated returning user* (token already in SecureStore) proceeds straight into the tabs the instant the local token read resolves — it never runs the cold-start-aware `waitForBackend()` wait/message loop that `app/loading.tsx` already has for the login/register path. Shows/Movies Hub paint instantly from AsyncStorage-persisted watchlist data regardless of network state; Discover and Community's Discussions/Activity tabs are non-persisted, in-memory stores with nothing to show until a live fetch resolves — and `lib/api.ts`'s transient-retry logic can legitimately hold a spinner up for close to 47 seconds before the error card appears, well past the 13-second clip.
+
+### Fixes shipped (real gaps, valuable regardless of exact trigger)
+
+| # | Gap | Fix | Files |
+|---|---|---|---|
+| 1 | Discover/Community's non-persisted screens showed a bare, unexplained spinner for however long a cold Render dyno took to wake — no signal distinguishing "slow" from "broken" | New `useColdStartHint()` hook (`lib/warmup.ts`), reusing the existing `waitForBackend()` the login path already relies on — one-shot, non-blocking, flips true a few seconds into a still-loading fetch if the backend is waking. Wired into Discover's feed-loading branch and Community's Discussions/Activity tabs to show "Waking up the server — this can take up to a minute." | `client-mobile/lib/warmup.ts`, `client-mobile/app/(tabs)/discover.tsx`, `client-mobile/app/community.tsx` |
+| 2 | Zero error boundaries existed anywhere in the app (confirmed via grep — `componentDidCatch`/`getDerivedStateFromError` absent) — any uncaught render crash unmounted silently with no signal, the exact failure mode this report describes regardless of cause | New `components/ErrorBoundary.tsx` (class component + theme-aware functional fallback), wired around the root `<Stack>` in `app/_layout.tsx` | `client-mobile/components/ErrorBoundary.tsx` (new), `client-mobile/app/_layout.tsx` |
+
+### Investigated, not changed
+
+- Rerouting the returning-user boot path through `/loading`'s full wait-and-splash gate — would add a wait to every cold app open, not just the post-redeploy window this report actually hit; a bigger behavior change than the evidence justified.
+
+### Verification log
+
+- `tsc --noEmit` — clean, zero errors (re-run after the fix).
+- `jest` — 12/12 passing.
+- `docker compose exec backend python manage.py check` — clean (no backend files changed this session).
+- Not verifiable this session: no physical device — whether this was genuinely a cold-start coincidence versus something device-specific; every data-layer path involved was independently verified against the real production backend instead.
+
 ## 🔴 REAL BUGS FOUND & FIXED — 9-phase plan: air-time truth, Shows/Anime split, rewatch, community reviews, performance, plus an auto-logout bug report (2026-08-03, Phase 75)
 
 Full narrative in `PROJECT_STATUS.md`'s Phase 75 section and `context.md`'s Phase 75 entry. This entry is the resolution table + verification log.

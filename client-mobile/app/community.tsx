@@ -24,6 +24,7 @@ import UserRow from '../components/UserRow';
 import { api } from '../lib/api';
 import { extractErrorMessage } from '../lib/errors';
 import { useAppTheme } from '../lib/theme';
+import { useColdStartHint } from '../lib/warmup';
 import { useSocialStore } from '../store/socialStore';
 
 interface PaginatedComments {
@@ -63,10 +64,21 @@ function DiscussionsTab() {
     setIsRefreshing(false);
   };
 
+  // Community has no persisted fallback — same reasoning as Discover's own
+  // useColdStartHint call (lib/warmup.ts), a fresh Render redeploy leaves
+  // this tab's first-ever fetch with nothing to show but a bare spinner
+  // for however long the free-tier dyno takes to wake.
+  const isWakingBackend = useColdStartHint(isLoading);
+
   if (isLoading) {
     return (
       <View style={styles.centered}>
         <ActivityIndicator color={c.accentInk} size="large" />
+        {isWakingBackend && (
+          <Text style={[styles.wakingText, { color: c.textTertiary }]}>
+            Waking up the server — this can take up to a minute.
+          </Text>
+        )}
       </View>
     );
   }
@@ -121,10 +133,17 @@ function ActivityTab() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  const isWakingBackend = useColdStartHint(isLoadingFeed && activityFeed.length === 0);
+
   if (isLoadingFeed && activityFeed.length === 0) {
     return (
       <View style={styles.centered}>
         <ActivityIndicator color={c.accentInk} size="large" />
+        {isWakingBackend && (
+          <Text style={[styles.wakingText, { color: c.textTertiary }]}>
+            Waking up the server — this can take up to a minute.
+          </Text>
+        )}
       </View>
     );
   }
@@ -318,6 +337,12 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     paddingVertical: 60,
     paddingHorizontal: 32,
+    gap: 12,
+  },
+  wakingText: {
+    fontSize: 13,
+    fontWeight: '500',
+    textAlign: 'center',
   },
   list: {
     paddingHorizontal: 16,

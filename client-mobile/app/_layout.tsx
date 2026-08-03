@@ -13,6 +13,7 @@ import { SafeAreaProvider } from 'react-native-safe-area-context';
 
 import { BadgeUnlockModal } from '../components/BadgeUnlockModal';
 import CompletionCelebration from '../components/CompletionCelebration';
+import ErrorBoundary from '../components/ErrorBoundary';
 import { ACCESS_TOKEN_KEY, api, setSessionExpiredHandler } from '../lib/api';
 import { BADGE_META } from '../lib/badges';
 import { registerForPushNotificationsAsync } from '../lib/notifications';
@@ -218,6 +219,7 @@ function RootLayoutInner() {
               <ActivityIndicator color={theme.colors.accentInk} size="large" />
             </View>
           ) : (
+            <ErrorBoundary>
             <Stack
               screenOptions={{
                 headerShown: false,
@@ -305,6 +307,7 @@ function RootLayoutInner() {
                 options={{ headerShown: false, animation: 'slide_from_right' }}
               />
             </Stack>
+            </ErrorBoundary>
           )}
           <BadgeUnlockModal
             visible={unlockedBadges.length > 0}

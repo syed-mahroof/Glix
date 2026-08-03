@@ -47,6 +47,7 @@ import HeroCarousel from '../../components/HeroCarousel';
 import HorizontalMediaList from '../../components/HorizontalMediaList';
 import PressableScale from '../../components/PressableScale';
 import { useAppTheme } from '../../lib/theme';
+import { useColdStartHint } from '../../lib/warmup';
 import { DiscoverMediaItem, useDiscoverStore } from '../../store/discoverStore';
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
@@ -345,6 +346,13 @@ export default function DiscoverScreen() {
   const { theme } = useAppTheme();
   const c = theme.colors;
 
+  // Discover has no persisted fallback (discoverStore.ts is in-memory only)
+  // — unlike Shows/Movies Hub, which paint real content from AsyncStorage
+  // regardless of the network, this screen has nothing to show until the
+  // initial feed fetch below actually resolves. See lib/warmup.ts's
+  // useColdStartHint for why that matters after a fresh Render redeploy.
+  const isWakingBackend = useColdStartHint(isLoadingFeed && !feedData[activeSegment]);
+
   const inputRef = useRef<TextInput>(null);
   const [isSearchActive, setIsSearchActive] = useState(false);
   const [isRefreshing, setIsRefreshing] = useState(false);
@@ -589,6 +597,11 @@ export default function DiscoverScreen() {
         isLoadingFeed && !currentFeed ? (
           <View style={styles.loadingContainer}>
             <ActivityIndicator color={c.accentInk} size="large" />
+            {isWakingBackend && (
+              <Text style={[styles.wakingText, { color: c.textTertiary }]}>
+                Waking up the server — this can take up to a minute.
+              </Text>
+            )}
           </View>
         ) : feedError && !currentFeed ? (
           <View style={styles.errorContainer}>
@@ -667,6 +680,13 @@ const styles = StyleSheet.create({
     flex: 1,
     alignItems: 'center',
     justifyContent: 'center',
+    gap: 12,
+  },
+  wakingText: {
+    fontSize: 13,
+    fontWeight: '500',
+    textAlign: 'center',
+    paddingHorizontal: 40,
   },
 
   // Header
