@@ -286,6 +286,16 @@ function RootLayoutInner() {
                 name="profile/reviews"
                 options={{ headerShown: false, animation: 'slide_from_right' }}
               />
+              {/* Phase 75.2 added the route file but never registered it here,
+                  so it fell back to the Stack's default `animation: 'fade'`
+                  while every sibling profile destination slides. Cosmetic
+                  only — expo-router registers the route from the filesystem
+                  regardless — but it made My Anime feel like a different
+                  kind of navigation than My Shows / My Movies. */}
+              <Stack.Screen
+                name="profile/anime"
+                options={{ headerShown: false, animation: 'slide_from_right' }}
+              />
               <Stack.Screen
                 name="movie/[id]"
                 options={{ headerShown: false, animation: 'slide_from_right' }}

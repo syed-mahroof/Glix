@@ -1,10 +1,26 @@
-## 🟡 INVESTIGATED — "everything blank" post-update report: no code regression found, cold-start hardening + first error boundary shipped (2026-08-03, Phase 76)
+## 🔴 FIXED — app freeze/crash: self-triggering focus-refetch loop in `(tabs)/profile.tsx` (2026-08-03, Phase 76)
 
 Full narrative in `PROJECT_STATUS.md`'s Phase 76 section and `context.md`'s Phase 76 entry.
 
+**Severity: fatal.** The Profile tab could not be opened without the app becoming unresponsive and being killed by the OS, and the request storm it generated also hung unrelated screens indefinitely.
+
+**Introduced in:** Phase 75.8, by the staleness guard added to reduce redundant focus refetches.
+
+**Mechanism.** `fetchProfile()` (`store/watchStore.ts:764`) sets `analyticsDirtyAt: Date.now()` synchronously as its first statement — deliberate, it is the funnel point every watch mutation passes through. But `analyticsDirtyAt` was *also* a `useCallback` dependency of the `useFocusEffect` that calls `fetchProfile()`. Result: focus → fetch → bump → new callback identity → effect re-runs → `hasNewActivity` true again (`lastSeen` had been recorded from the pre-bump value) → fetch → bump → forever. The existing `lastProfileFetchedAtRef` staleness check could not stop it, because `hasNewActivity` is OR'd past it by design. Four HTTP requests per turn, iterating as fast as a render-heavy screen re-renders — always slower than 1ms, so the `Date.now()` values never collide and the loop never self-terminates.
+
+**Blast radius beyond Profile.** (a) The DRF throttle (120/min) trips within a second, 429-ing everything else. (b) `lib/api.ts`'s request interceptor `await`s `SecureStore.getItemAsync()` on every request; with thousands queued, a new request sits in the interceptor *before* being dispatched, i.e. before axios's 15s `timeout` clock starts — so other screens' fetches hang with no timeout and no error. This is why Discover showed a spinner that never resolved and never errored, and why the reporter's symptoms looked like several unrelated features breaking at once.
+
+**Fix.** `analyticsDirtyAt` is no longer a reactive dependency — read via `useWatchStore.getState()` inside the effect (a focus effect only needs one read at focus time), and `lastSeen` is recorded *after* `fetchProfile()`'s own bump. Plus a hard 2s minimum-refetch floor as an independent backstop. `app/analytics.tsx` has the identical guard shape and was hardened the same way — it was not looping today (none of its six fetchers bump the flag) but is one `fetchProfile()` call away from it. Every `useFocusEffect` in the repo was grepped; these two are the only ones, so the class is fully swept.
+
+---
+
+## 🟡 SUPERSEDED — first-pass investigation of the same report: concluded "no code regression" (2026-08-03, Phase 76)
+
+Retained deliberately rather than deleted. The checks below were all valid and all still hold — the files the bug report actually named really are clean, and the backend really is healthy. The conclusion drawn *from* them was wrong: the regression was in `(tabs)/profile.tsx`, a file the report never mentioned. Recorded lesson: clearing the files a report points at is not the same as clearing the report.
+
 Trigger: right after this session's Phase 75 EAS update + Render redeploy, the user reported Discover (confirmed via screen recording — blank for the full ~13s clip, no spinner motion, no error card, while Shows/Movies Hub rendered real cached data correctly) plus Profile and "most things" broken.
 
-### Investigation performed (all clean — no bug found)
+### Investigation performed (all clean — but the bug was elsewhere)
 
 | Check | Result |
 |---|---|
@@ -15,7 +31,7 @@ Trigger: right after this session's Phase 75 EAS update + Render redeploy, the u
 | Live production backend — populated test account | Added a show, bulk-marked 62/62 episodes watched, started + toggled a rewatch round, added + rewatched a movie, posted a show review and movie review, re-checked every endpoint above — all 200, correct data (`active_rewatch`, `rewatch_count`, `is_self` all populate correctly), zero 500s |
 | `profile.tsx` / `profile/anime.tsx` (full read, not just diff) | Logically sound; `isAnimeByGenresAndLanguage()`'s `genres` access confirmed safe (required field, present on live responses); reused `ShowGridCard`/`ShowListRow`/`MovieGridCard`/`MovieListRow` exports are self-contained, no screen-specific dependency |
 
-### Most plausible root cause (not a code bug)
+### First-pass working theory (a real gap, but not the root cause — see the entry above)
 
 Render's free-tier dyno restarts — and goes cold, 20-50s to wake — on every backend redeploy, which this session triggered to ship Phase 75's backend changes. `app/_layout.tsx`'s boot path for an *already-authenticated returning user* (token already in SecureStore) proceeds straight into the tabs the instant the local token read resolves — it never runs the cold-start-aware `waitForBackend()` wait/message loop that `app/loading.tsx` already has for the login/register path. Shows/Movies Hub paint instantly from AsyncStorage-persisted watchlist data regardless of network state; Discover and Community's Discussions/Activity tabs are non-persisted, in-memory stores with nothing to show until a live fetch resolves — and `lib/api.ts`'s transient-retry logic can legitimately hold a spinner up for close to 47 seconds before the error card appears, well past the 13-second clip.
 
@@ -25,6 +41,7 @@ Render's free-tier dyno restarts — and goes cold, 20-50s to wake — on every 
 |---|---|---|---|
 | 1 | Discover/Community's non-persisted screens showed a bare, unexplained spinner for however long a cold Render dyno took to wake — no signal distinguishing "slow" from "broken" | New `useColdStartHint()` hook (`lib/warmup.ts`), reusing the existing `waitForBackend()` the login path already relies on — one-shot, non-blocking, flips true a few seconds into a still-loading fetch if the backend is waking. Wired into Discover's feed-loading branch and Community's Discussions/Activity tabs to show "Waking up the server — this can take up to a minute." | `client-mobile/lib/warmup.ts`, `client-mobile/app/(tabs)/discover.tsx`, `client-mobile/app/community.tsx` |
 | 2 | Zero error boundaries existed anywhere in the app (confirmed via grep — `componentDidCatch`/`getDerivedStateFromError` absent) — any uncaught render crash unmounted silently with no signal, the exact failure mode this report describes regardless of cause | New `components/ErrorBoundary.tsx` (class component + theme-aware functional fallback), wired around the root `<Stack>` in `app/_layout.tsx` | `client-mobile/components/ErrorBoundary.tsx` (new), `client-mobile/app/_layout.tsx` |
+| 3 | `profile/anime` (new in Phase 75.2) was never registered as a `<Stack.Screen>`, so it fell back to the Stack's default `animation: 'fade'` while every sibling profile destination slides. Cosmetic only — expo-router registers routes from the filesystem regardless | Registered alongside `profile/shows`/`profile/movies`/`profile/reviews` with the same `slide_from_right` options | `client-mobile/app/_layout.tsx` |
 
 ### Investigated, not changed
 
@@ -32,10 +49,11 @@ Render's free-tier dyno restarts — and goes cold, 20-50s to wake — on every 
 
 ### Verification log
 
-- `tsc --noEmit` — clean, zero errors (re-run after the fix).
-- `jest` — 12/12 passing.
-- `docker compose exec backend python manage.py check` — clean (no backend files changed this session).
-- Not verifiable this session: no physical device — whether this was genuinely a cold-start coincidence versus something device-specific; every data-layer path involved was independently verified against the real production backend instead.
+- `tsc --noEmit` — clean, zero errors (re-run after the loop fix).
+- `jest` — 12/12 passing, unchanged from baseline.
+- No backend files changed this session; the live production backend was exercised end to end instead (see the table above).
+- Not covered by a unit test: the loop is a `useFocusEffect` + navigation-focus interaction, which the repo's current jest setup (no `@testing-library/react-native`, no navigation harness) cannot exercise. Verified by code inspection — `fetchProfile()`'s synchronous `set` and the dependency array are both unambiguous, and there is no path by which the effect can settle.
+- Not verifiable this session: no physical device — that the loop is the *whole* of what the user experienced cannot be confirmed without an on-device repro.
 
 ## 🔴 REAL BUGS FOUND & FIXED — 9-phase plan: air-time truth, Shows/Anime split, rewatch, community reviews, performance, plus an auto-logout bug report (2026-08-03, Phase 75)
 

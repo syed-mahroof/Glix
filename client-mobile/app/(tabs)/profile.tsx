@@ -129,27 +129,56 @@ export default function ProfileScreen() {
   // nothing had changed. Skipped now unless either >60s has passed since
   // the last fetch, or analyticsDirtyAt (bumped by fetchProfile — see its
   // own comment) has moved since this effect last actually ran, i.e. a real
-  // watch mutation happened somewhere in the meantime (this tab's own
-  // fetchProfile call below counts too, which is what keeps the first-ever
-  // focus and any watch-elsewhere-then-return case both still fetching).
+  // watch mutation happened somewhere in the meantime.
+  //
+  // CRASH FIX (2026-08-03, "profile won't open, app freezes then closes"):
+  // as shipped, that guard fed itself. `analyticsDirtyAt` was a dependency
+  // of this useCallback, and fetchProfile() *synchronously* bumps
+  // analyticsDirtyAt as its very first statement (watchStore.ts) — so:
+  // focus -> fetch -> bump -> new callback identity -> useFocusEffect
+  // re-runs -> hasNewActivity is true again (lastSeen was recorded from the
+  // pre-bump value) -> fetch -> bump -> ... with nothing to terminate it.
+  // lastProfileFetchedAtRef couldn't stop it because hasNewActivity is
+  // OR'd past the staleness check. Each turn of the loop fired 4 requests
+  // and the loop only iterated as fast as this (render-heavy) screen could
+  // re-render, so it saturated the JS thread and the network queue, tripped
+  // the backend's 120/min throttle, and starved every other screen's
+  // in-flight request — which is why Discover sat on a spinner forever too,
+  // and why the OS eventually killed the app.
+  //
+  // Two independent changes, either of which alone breaks the cycle:
+  //  1. analyticsDirtyAt is no longer a reactive dependency. It never needed
+  //     to be — this is a *focus* effect, and the only question it asks is
+  //     "did anything change while I was away", which is answered by reading
+  //     the store once at focus time. lastSeen is then recorded *after*
+  //     fetchProfile() has already bumped it, so this screen's own refresh
+  //     can never be mistaken for someone else's watch mutation.
+  //  2. A hard minimum interval below, which caps re-entry from any future
+  //     source regardless of how the dirty flag is reasoned about.
   const lastProfileFetchedAtRef = useRef(0);
   const lastSeenProfileDirtyAtRef = useRef(analyticsDirtyAt);
   const PROFILE_STALE_AFTER_MS = 60_000;
+  const PROFILE_MIN_REFETCH_MS = 2_000;
 
   useFocusEffect(
     useCallback(() => {
       const now = Date.now();
+      if (now - lastProfileFetchedAtRef.current < PROFILE_MIN_REFETCH_MS) return;
+
+      const dirtyAt = useWatchStore.getState().analyticsDirtyAt;
       const isStale = now - lastProfileFetchedAtRef.current > PROFILE_STALE_AFTER_MS;
-      const hasNewActivity = analyticsDirtyAt !== lastSeenProfileDirtyAtRef.current;
+      const hasNewActivity = dirtyAt !== lastSeenProfileDirtyAtRef.current;
       if (!isStale && !hasNewActivity) return;
 
       lastProfileFetchedAtRef.current = now;
-      lastSeenProfileDirtyAtRef.current = analyticsDirtyAt;
       fetchProfile();
       fetchWatchlist();
       fetchMovieWatchlist();
       fetchLists();
-    }, [analyticsDirtyAt, fetchProfile, fetchWatchlist, fetchMovieWatchlist, fetchLists])
+      // Read back *after* fetchProfile()'s own synchronous bump, so the next
+      // focus compares against a value this screen already accounted for.
+      lastSeenProfileDirtyAtRef.current = useWatchStore.getState().analyticsDirtyAt;
+    }, [fetchProfile, fetchWatchlist, fetchMovieWatchlist, fetchLists])
   );
 
   const initials = useMemo(() => {

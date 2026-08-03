@@ -110,19 +110,34 @@ export default function AnalyticsScreen() {
   // analyticsDirtyAt (bumped by fetchProfile — see its own comment) has
   // moved since the last time this effect actually ran, i.e. a real watch
   // mutation happened somewhere in the meantime.
+  //
+  // CRASH FIX (2026-08-03): the identical guard on (tabs)/profile.tsx melted
+  // the app — see the long comment there. That screen calls fetchProfile(),
+  // which synchronously bumps analyticsDirtyAt, so with analyticsDirtyAt as
+  // a useCallback dependency the effect re-triggered itself forever. This
+  // screen fetches none of the endpoints that bump the flag, so it was not
+  // looping in practice, but the shape is one added fetchProfile() call away
+  // from the same fatal behaviour. Hardened identically: the flag is read
+  // from the store at focus time instead of being a reactive dependency
+  // (a focus effect only ever needs to ask "did anything change while I was
+  // away"), plus a hard minimum interval as a backstop.
   const lastFetchedAtRef = useRef(0);
   const lastSeenDirtyAtRef = useRef(analyticsDirtyAt);
   const STALE_AFTER_MS = 60_000;
+  const MIN_REFETCH_MS = 2_000;
 
   useFocusEffect(
     useCallback(() => {
       const now = Date.now();
+      if (now - lastFetchedAtRef.current < MIN_REFETCH_MS) return;
+
+      const dirtyAt = useWatchStore.getState().analyticsDirtyAt;
       const isStale = now - lastFetchedAtRef.current > STALE_AFTER_MS;
-      const hasNewActivity = analyticsDirtyAt !== lastSeenDirtyAtRef.current;
+      const hasNewActivity = dirtyAt !== lastSeenDirtyAtRef.current;
       if (!isStale && !hasNewActivity) return;
 
       lastFetchedAtRef.current = now;
-      lastSeenDirtyAtRef.current = analyticsDirtyAt;
+      lastSeenDirtyAtRef.current = dirtyAt;
       fetchDashboard();
       fetchGenres();
       fetchHeatmap();
@@ -130,7 +145,6 @@ export default function AnalyticsScreen() {
       fetchCompletion();
       fetchMonthlyRecap();
     }, [
-      analyticsDirtyAt,
       fetchDashboard,
       fetchGenres,
       fetchHeatmap,
