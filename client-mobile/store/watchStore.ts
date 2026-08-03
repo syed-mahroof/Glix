@@ -39,6 +39,11 @@ if (Platform.OS === 'ios') {
   }
 }
 
+export type LayoutMode = 'list' | 'grid';
+/** One entry per screen that owns its own list/grid choice — see
+ *  defaultLayout/layoutOverrides on WatchStoreState. */
+export type LayoutScope = 'shows' | 'movies' | 'myShows' | 'myMovies' | 'myAnime';
+
 export interface Episode {
   tmdb_id: number;
   show: number;
@@ -55,6 +60,13 @@ export interface Episode {
    *  EpisodeRow.tsx / app/episode/[id].tsx actually render it from. */
   overview?: string;
   air_date: string | null;
+  /** Exact UTC instant this episode airs, from TVmaze's per-episode
+   *  `airstamp` (backend: CachedEpisode.air_datetime, core/airtime.py) —
+   *  present even for streaming originals with no fixed weekly slot,
+   *  unlike Show.airs_time/airs_timezone. Null until a background sync has
+   *  matched it. Resolve with lib/dateFormat.ts's resolveAirInstant, which
+   *  falls back to the show's slot, then to local midnight. */
+  air_datetime?: string | null;
   runtime_minutes: number;
   /** Same lean-shape caveat as `overview` above. */
   still_path?: string | null;
@@ -80,6 +92,10 @@ export interface Show {
    *  individual episodes are otherwise cached (a freshly-announced season
    *  with only a premiere date confirmed). Null once nothing is scheduled. */
   next_episode_air_date: string | null;
+  /** Exact UTC instant for next_episode_air_date, from TVmaze's per-episode
+   *  airstamp — same source/caveats as Episode.air_datetime. Null whenever
+   *  TVmaze doesn't know this specific episode yet. */
+  next_episode_air_datetime?: string | null;
   next_episode_season_number: number | null;
   next_episode_number: number | null;
   next_episode_name: string | null;
@@ -101,6 +117,27 @@ export interface Show {
   trailer_key?: string | null;
 }
 
+/** Phase 75.7 — an in-progress rewatch round for this show. Null unless
+ *  the user has an active round (see store's startShowRewatch);
+ *  watched_episode_count/aired_episode_count are scoped to THIS round,
+ *  not the original watch-through (watched_episode_count/
+ *  aired_episode_count on WatchlistEntry itself). */
+export interface ActiveRewatch {
+  round_number: number;
+  watched_episode_count: number;
+  aired_episode_count: number;
+}
+
+/** GET /rewatch/shows/<tmdb_id>/'s shape — the per-episode detail
+ *  show/[id].tsx needs to render rewatch-aware checkmarks, distinct from
+ *  ActiveRewatch's list-view summary above (no per-episode ids there). */
+export interface ShowRewatchDetail {
+  round_number: number;
+  watched_episode_ids: number[];
+  aired_episode_count: number;
+  completed: boolean;
+}
+
 export interface WatchlistEntry {
   id: number;
   show: Show;
@@ -113,6 +150,7 @@ export interface WatchlistEntry {
   /** ISO timestamp of the most recent episode watch for this show, or null
    *  if nothing watched yet. Drives recency-aware Shows Hub pill sorting. */
   last_watched_at: string | null;
+  active_rewatch: ActiveRewatch | null;
   added_at: string;
   updated_at: string;
 }
@@ -262,6 +300,10 @@ export interface MovieWatchlistItem {
    *  distinct from updated_at, which bumps on any change to the tracking
    *  row. Powers the Movies Hub's "Last Watched" pill sort. */
   watched_at: string | null;
+  /** How many times this movie has been rewatched (Phase 75.7) — 0 unless
+   *  the user has tapped "Watch again" at least once. Independent of
+   *  watched_at/is_watched, which only ever reflect the original watch. */
+  rewatch_count: number;
 }
 
 export interface MovieWatchlistBuckets {
@@ -488,13 +530,27 @@ interface WatchStoreState extends AnalyticsSlice {
   isLoadingHistory: boolean;
   isLoadingProfile: boolean;
   isResyncingStats: boolean;
+  /** Timestamp of the most recent watch-affecting mutation (bumped inside
+   *  fetchProfile — see its own comment). Screens with an expensive
+   *  focus-triggered refetch (analytics.tsx, profile.tsx) compare this
+   *  against what they last saw to skip a redundant refetch when nothing
+   *  has actually changed, without needing a signal threaded through every
+   *  individual toggle/bulk-toggle/rewatch action. */
+  analyticsDirtyAt: number;
   error: string | null;
 
-  /** List vs. large poster grid — shared across every primary media list
-   *  (Shows Hub, Movies Hub, Profile > My Shows/My Movies). Persisted so the
-   *  choice sticks across app restarts. */
-  preferredLayout: 'list' | 'grid';
-  toggleLayout: () => void;
+  /** App-wide default (Settings > Appearance), plus a per-screen override
+   *  map — Shows Hub, Movies Hub, Profile > My Shows/My Movies/My Anime can
+   *  each pick their own layout without disturbing the others or the
+   *  default. Read via useLayoutFor(scope) rather than these fields
+   *  directly. Both persisted so the choice sticks across app restarts. */
+  defaultLayout: LayoutMode;
+  layoutOverrides: Partial<Record<LayoutScope, LayoutMode>>;
+  /** Sets the app-wide default AND clears every per-screen override, so
+   *  a Settings change is felt everywhere immediately rather than being
+   *  masked by whatever overrides happen to already exist. */
+  setDefaultLayout: (mode: LayoutMode) => void;
+  setLayoutForScope: (scope: LayoutScope, mode: LayoutMode) => void;
 
   /** Original-language filter (ISO 639-1 code, e.g. "ko"), shared across
    *  Profile > My Shows and My Movies. Null means "All languages". Filtering
@@ -538,12 +594,28 @@ interface WatchStoreState extends AnalyticsSlice {
   removeShowFromWatchlist: (showId: number) => Promise<RemovedShowSnapshot | null>;
   undoRemoveShow: (snapshot: RemovedShowSnapshot) => Promise<void>;
 
+  // Rewatch (Phase 75.7) — a parallel system to WatchState, never touches
+  // it. showRewatchDetail is keyed by show tmdb_id and holds the one show's
+  // full per-episode ticked state (show/[id].tsx's own concern); the
+  // lighter `active_rewatch` summary on WatchlistEntry (round_number +
+  // counts, no per-episode list) is what list views read instead.
+  showRewatchDetail: Record<number, ShowRewatchDetail | null>;
+  fetchShowRewatchDetail: (showId: number) => Promise<void>;
+  /** Returns null on success, or a human-readable error — e.g. "watch
+   *  every aired episode first." Shown inline by the caller rather than a
+   *  generic Snackbar, same convention as updateUsername. */
+  startShowRewatch: (showId: number) => Promise<string | null>;
+  cancelShowRewatch: (showId: number) => Promise<boolean>;
+  toggleRewatchEpisode: (episodeId: number, showId: number) => Promise<boolean>;
+
   // Movie actions
   fetchMovieWatchlist: () => Promise<void>;
   toggleMovieWatchState: (movieId: number) => Promise<boolean>;
   addMovieToWatchlist: (movieId: number) => Promise<boolean>;
   removeMovieFromWatchlist: (movieId: number) => Promise<RemovedMovieSnapshot | null>;
   undoRemoveMovie: (snapshot: RemovedMovieSnapshot) => Promise<void>;
+  addMovieRewatch: (movieId: number) => Promise<boolean>;
+  removeMovieRewatch: (movieId: number) => Promise<boolean>;
 
   // Analytics methods
   fetchDashboard: () => Promise<void>;
@@ -605,6 +677,7 @@ export const useWatchStore = create<WatchStoreState>()(
     (set, get) => ({
       watchlist: { to_watch: EMPTY_PAGE, up_to_date: EMPTY_PAGE, archived: EMPTY_PAGE },
       movieWatchlist: { watch_next: [], watched: [] },
+      showRewatchDetail: {},
       history: EMPTY_HISTORY_PAGE,
   profile: null,
   isLoadingWatchlist: false,
@@ -612,11 +685,14 @@ export const useWatchStore = create<WatchStoreState>()(
   isLoadingHistory: false,
   isLoadingProfile: false,
   isResyncingStats: false,
+  analyticsDirtyAt: Date.now(),
   error: null,
 
-  preferredLayout: 'list',
-  toggleLayout: () =>
-    set((state) => ({ preferredLayout: state.preferredLayout === 'list' ? 'grid' : 'list' })),
+  defaultLayout: 'list',
+  layoutOverrides: {},
+  setDefaultLayout: (mode) => set({ defaultLayout: mode, layoutOverrides: {} }),
+  setLayoutForScope: (scope, mode) =>
+    set((state) => ({ layoutOverrides: { ...state.layoutOverrides, [scope]: mode } })),
 
   selectedLanguage: null,
   setLanguageFilter: (language) => set({ selectedLanguage: language }),
@@ -678,6 +754,14 @@ export const useWatchStore = create<WatchStoreState>()(
   },
 
   fetchProfile: async () => {
+    // Phase 75.8: every watch-affecting mutation in this store (episode/
+    // movie/rewatch toggles, bulk toggles) already calls fetchProfile() to
+    // refresh total_time_watched — bumping this timestamp here, in the one
+    // place all of them funnel through, is what lets analytics.tsx's/
+    // profile.tsx's own focus-refetch guards tell "something changed since
+    // I last fetched" apart from "nothing changed, skip the refetch" without
+    // threading a new signal through every individual call site.
+    set({ analyticsDirtyAt: Date.now() });
     set({ isLoadingProfile: true, error: null });
     try {
       const response = await api.get<UserProfile>('/profile/');
@@ -1058,6 +1142,28 @@ export const useWatchStore = create<WatchStoreState>()(
     }
   },
 
+  addMovieRewatch: async (movieId: number) => {
+    try {
+      await api.post(`/rewatch/movies/${movieId}/`);
+      await Promise.all([get().fetchMovieWatchlist(), get().fetchProfile()]);
+      return true;
+    } catch (error) {
+      set({ error: extractErrorMessage(error) });
+      return false;
+    }
+  },
+
+  removeMovieRewatch: async (movieId: number) => {
+    try {
+      await api.delete(`/rewatch/movies/${movieId}/`);
+      await Promise.all([get().fetchMovieWatchlist(), get().fetchProfile()]);
+      return true;
+    } catch (error) {
+      set({ error: extractErrorMessage(error) });
+      return false;
+    }
+  },
+
   addShowToWatchlist: async (showId: number) => {
     try {
       const response = await api.post<WatchlistEntry>('/watchlist/add/', { show_id: showId });
@@ -1178,6 +1284,59 @@ export const useWatchStore = create<WatchStoreState>()(
     } finally {
       get().fetchWatchlist();
       get().fetchProfile();
+    }
+  },
+
+  fetchShowRewatchDetail: async (showId: number) => {
+    try {
+      const response = await api.get<{ active_rewatch: ShowRewatchDetail | null }>(
+        `/rewatch/shows/${showId}/`
+      );
+      set((state) => ({
+        showRewatchDetail: { ...state.showRewatchDetail, [showId]: response.data.active_rewatch },
+      }));
+    } catch (error) {
+      set({ error: extractErrorMessage(error) });
+    }
+  },
+
+  startShowRewatch: async (showId: number) => {
+    try {
+      await api.post(`/rewatch/shows/${showId}/start/`);
+      await Promise.all([get().fetchShowRewatchDetail(showId), get().fetchWatchlist()]);
+      return null;
+    } catch (error) {
+      const message = extractErrorMessage(error);
+      set({ error: message });
+      return message;
+    }
+  },
+
+  cancelShowRewatch: async (showId: number) => {
+    try {
+      await api.delete(`/rewatch/shows/${showId}/`);
+      set((state) => ({ showRewatchDetail: { ...state.showRewatchDetail, [showId]: null } }));
+      await Promise.all([get().fetchWatchlist(), get().fetchProfile()]);
+      return true;
+    } catch (error) {
+      set({ error: extractErrorMessage(error) });
+      return false;
+    }
+  },
+
+  toggleRewatchEpisode: async (episodeId: number, showId: number) => {
+    try {
+      await api.post(`/rewatch/episodes/${episodeId}/toggle/`);
+      // The toggle response doesn't carry the full per-episode list back
+      // (see RewatchEpisodeToggleView) — refetch the one show's detail
+      // rather than hand-patching watched_episode_ids optimistically,
+      // which would drift the moment a round completes (completed_at
+      // changes what "the active round" even means server-side).
+      await Promise.all([get().fetchShowRewatchDetail(showId), get().fetchWatchlist(), get().fetchProfile()]);
+      return true;
+    } catch (error) {
+      set({ error: extractErrorMessage(error) });
+      return false;
     }
   },
 
@@ -1577,6 +1736,23 @@ export const useWatchStore = create<WatchStoreState>()(
     {
       name: 'watchtracker-store',
       storage: createJSONStorage(() => AsyncStorage),
+      version: 1,
+      // v0 -> v1: preferredLayout/toggleLayout (one global list/grid choice)
+      // replaced by defaultLayout + per-scope layoutOverrides (Phase 75.5) —
+      // seed the new default from whatever was already persisted so an
+      // existing user's choice isn't silently reset to 'list'.
+      migrate: (persistedState: unknown, version: number) => {
+        const state = (persistedState ?? {}) as Record<string, unknown>;
+        if (version < 1) {
+          const { preferredLayout, ...rest } = state;
+          return {
+            ...rest,
+            defaultLayout: preferredLayout === 'grid' ? 'grid' : 'list',
+            layoutOverrides: {},
+          };
+        }
+        return state;
+      },
       partialize: (state) => ({
         watchlist: state.watchlist,
         // Without this, movieWatchlist never survived an app restart (unlike
@@ -1587,7 +1763,8 @@ export const useWatchStore = create<WatchStoreState>()(
         // that already includes those same movies' minutes.
         movieWatchlist: state.movieWatchlist,
         profile: state.profile,
-        preferredLayout: state.preferredLayout,
+        defaultLayout: state.defaultLayout,
+        layoutOverrides: state.layoutOverrides,
         selectedLanguage: state.selectedLanguage,
         dashboard: state.dashboard,
         statistics: state.statistics,
@@ -1602,3 +1779,13 @@ export const useWatchStore = create<WatchStoreState>()(
     }
   )
 );
+
+/** The effective layout for one screen — its own override if it's set one,
+ *  else the app-wide default (Settings > Appearance). Two separate scoped
+ *  selectors rather than one combined one, so a screen only re-renders when
+ *  the piece of state it actually depends on changes. */
+export function useLayoutFor(scope: LayoutScope): LayoutMode {
+  const defaultLayout = useWatchStore((s) => s.defaultLayout);
+  const override = useWatchStore((s) => s.layoutOverrides[scope]);
+  return override ?? defaultLayout;
+}

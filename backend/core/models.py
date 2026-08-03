@@ -39,6 +39,15 @@ class UserProfile(models.Model):
         default=0,
         help_text="Cumulative minutes watched, derived from summed episode runtimes.",
     )
+    # Phase 75.7: a rewatch (ShowRewatch/RewatchEpisodeState/MovieRewatch)
+    # increments BOTH this field and total_time_watched above — totals grow
+    # to reflect genuine re-viewing time, while this field keeps the
+    # rewatch-only breakdown recoverable for the Analytics "Rewatched" tile
+    # without a second full aggregation query over the rewatch tables.
+    total_rewatch_time_watched = models.PositiveIntegerField(
+        default=0,
+        help_text="Cumulative minutes watched via a rewatch — a subset already included in total_time_watched.",
+    )
     earned_badges = ArrayField(
         base_field=models.CharField(max_length=64),
         default=list,
@@ -174,10 +183,20 @@ class CachedShow(models.Model):
     # sweep would re-ask TVmaze about every show forever, and shows with no
     # air time would be retried hardest. See AIRTIME_RECHECK_AFTER.
     airtime_checked_at = models.DateTimeField(null=True, blank=True)
+    # TVmaze's own id for this show, cached from the /lookup/shows call
+    # fetch_air_time() already makes, so fetch_episode_airstamps() can hit
+    # /shows/{id}/episodes directly instead of repeating the lookup.
+    tvmaze_id = models.PositiveIntegerField(null=True, blank=True)
     next_episode_air_date = models.DateField(null=True, blank=True)
     next_episode_season_number = models.PositiveIntegerField(null=True, blank=True)
     next_episode_number = models.PositiveIntegerField(null=True, blank=True)
     next_episode_name = models.CharField(max_length=255, null=True, blank=True)
+    # Exact UTC instant for next_episode_*, from TVmaze's per-episode
+    # `airstamp` (see core/airtime.py). The synthetic "next episode to air"
+    # item has no CachedEpisode row of its own, so it needs its own instant
+    # field rather than reusing CachedEpisode.air_datetime. Null whenever
+    # TVmaze doesn't know this episode yet.
+    next_episode_air_datetime = models.DateTimeField(null=True, blank=True)
     last_synced_at = models.DateTimeField(auto_now=True)
 
     class Meta:
@@ -209,6 +228,15 @@ class CachedEpisode(models.Model):
     title = models.CharField(max_length=255)
     overview = models.TextField(blank=True)
     air_date = models.DateField(null=True, blank=True, db_index=True)
+    # Exact UTC instant this episode airs, from TVmaze's per-episode
+    # `airstamp` (core/airtime.py's fetch_episode_airstamps) — present even
+    # for streaming originals with no fixed weekly slot, unlike
+    # CachedShow.airs_time/airs_timezone which only covers a network's
+    # broadcast slot. Null until a sync has matched this episode by
+    # (season_number, episode_number) against TVmaze; the client falls back
+    # to the slot pair, then to local midnight (lib/dateFormat.ts's
+    # resolveAirInstant).
+    air_datetime = models.DateTimeField(null=True, blank=True, db_index=True)
     runtime_minutes = models.PositiveIntegerField(
         default=0,
         help_text="Used to increment/decrement UserProfile.total_time_watched on toggle.",
@@ -759,6 +787,120 @@ class MovieWatchState(models.Model):
 
     def __str__(self) -> str:
         return f"{self.user.username} watched {self.movie.title}"
+
+
+class ShowRewatch(models.Model):
+    """
+    A rewatch "round" for one (user, show) — Phase 75.7. round_number
+    starts at 2 (the first watch-through is WatchState itself, never a
+    round here), so "Round N" in the UI always means the Nth time through.
+
+    Kept as its own table rather than relaxing WatchState's
+    UNIQUE(user, episode) — that constraint is load-bearing across several
+    other call sites (badges, analytics counts, history, the catch-up
+    check) that all mean "has this ever been watched"; a rewatch is
+    deliberately invisible to every one of them, which a parallel table
+    guarantees and a relaxed constraint would not.
+    """
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="show_rewatches",
+    )
+    show = models.ForeignKey(
+        CachedShow,
+        on_delete=models.CASCADE,
+        related_name="rewatches",
+    )
+    round_number = models.PositiveIntegerField()
+    started_at = models.DateTimeField(default=timezone.now)
+    # Null while the round is in progress; stamped once every aired episode
+    # has a RewatchEpisodeState row (RewatchEpisodeToggleView).
+    completed_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        db_table = "show_rewatch"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["user", "show", "round_number"], name="unique_user_show_round"
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["user", "show", "completed_at"], name="idx_rewatch_user_show_done"),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.user.username} rewatching {self.show.title} (round {self.round_number})"
+
+
+class RewatchEpisodeState(models.Model):
+    """
+    Presence-based per-episode tick within one ShowRewatch round (Phase
+    75.7) — the same "row exists = watched" convention WatchState uses,
+    scoped to the round instead of directly to the user so concurrent/past
+    rounds never collide with each other.
+    """
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    rewatch = models.ForeignKey(
+        ShowRewatch,
+        on_delete=models.CASCADE,
+        related_name="episode_states",
+    )
+    episode = models.ForeignKey(
+        CachedEpisode,
+        on_delete=models.CASCADE,
+        related_name="rewatch_states",
+    )
+    watched_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        db_table = "rewatch_episode_state"
+        constraints = [
+            models.UniqueConstraint(fields=["rewatch", "episode"], name="unique_rewatch_episode"),
+        ]
+        indexes = [
+            models.Index(fields=["rewatch", "episode"], name="idx_rewatch_state_rewatch_ep"),
+        ]
+
+    def __str__(self) -> str:
+        return f"Rewatch<{self.rewatch_id}> watched {self.episode_id}"
+
+
+class MovieRewatch(models.Model):
+    """
+    Append-only rewatch counter for a movie (Phase 75.7) — not a toggle:
+    "watched again" is a real repeatable event with no natural single
+    "current" state to flip, unlike MovieWatchState (presence-based
+    because a movie is simply watched or not). Deleting the most recent
+    row is how the UI undoes an accidental "Watch again" tap — see
+    MovieRewatchCreateView.
+    """
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="movie_rewatches",
+    )
+    movie = models.ForeignKey(
+        MovieCache,
+        on_delete=models.CASCADE,
+        related_name="rewatches",
+    )
+    watched_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        db_table = "movie_rewatch"
+        indexes = [
+            models.Index(fields=["user", "movie"], name="idx_movierewatch_user_movie"),
+            models.Index(fields=["user", "watched_at"], name="idx_movierewatch_user_time"),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.user.username} rewatched {self.movie.title}"
 
 
 class MovieWatchlist(models.Model):

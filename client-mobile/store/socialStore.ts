@@ -14,6 +14,14 @@ export interface PublicUser {
   username: string;
   profile_picture: string | null;
   is_following: boolean;
+  /** True on the viewer's own row in a followers/following list (Phase
+   *  75.6) — lets the row hide its Follow button instead of rendering one
+   *  that always 400s (Follow's own DB constraint forbids a self-follow
+   *  row, so is_following is always false for your own entry). Only ever
+   *  populated on FollowEdge rows (followers/following lists); absent
+   *  (undefined) on plain search results, which never include your own
+   *  account either way. */
+  is_self?: boolean;
 }
 
 export interface FollowEdge extends PublicUser {
@@ -62,28 +70,23 @@ export interface PublicProfile {
   follows_you: boolean;
 }
 
-export type ActivityCard =
-  | {
-      type: 'episodes';
-      user_id: number;
-      username: string;
-      profile_picture: string | null;
-      show_id: number;
-      show_title: string;
-      poster_path: string | null;
-      episode_count: number;
-      watched_at: string;
-    }
-  | {
-      type: 'movie';
-      user_id: number;
-      username: string;
-      profile_picture: string | null;
-      movie_id: number;
-      movie_title: string;
-      poster_path: string | null;
-      watched_at: string;
-    };
+// Phase 75.6: was raw watch activity (every episode/movie a followee
+// watched — the 'episodes'/'movie' card types this replaced). The feed now
+// shows their reviews instead, which is an opinion worth surfacing, not a
+// checkbox tick.
+export interface ActivityCard {
+  type: 'review';
+  media_type: 'tv' | 'movie';
+  user_id: number;
+  username: string;
+  profile_picture: string | null;
+  tmdb_id: number;
+  title: string;
+  poster_path: string | null;
+  rating: number;
+  note: string;
+  updated_at: string;
+}
 
 interface PaginatedResponse<T> {
   count: number;

@@ -2,7 +2,14 @@
 // Shared "upcoming episode" item shape + builder, used by the Shows Hub's
 // Upcoming tab (List + Calendar views).
 
-import { PAST_WINDOW_DAYS, formatUpcomingHeaderLabel, isPastUpcomingLabel, todayLocalIso } from './dateFormat';
+import {
+  PAST_WINDOW_DAYS,
+  formatUpcomingHeaderLabel,
+  isPastUpcomingLabel,
+  resolveAirInstant,
+  resolveDisplayDateIso,
+  todayLocalIso,
+} from './dateFormat';
 import type { Episode, WatchlistEntry } from '../store/watchStore';
 
 /** Same "next episode" rule the Shows Hub row uses: earliest aired-unwatched,
@@ -32,6 +39,11 @@ export interface UpcomingItem {
   seasonNumber: number;
   episodeNumber: number;
   airDate: string;
+  /** Exact UTC instant, from CachedEpisode.air_datetime (or
+   *  Show.next_episode_air_datetime for the synthetic item below) — the
+   *  most precise source resolveAirInstant() can use. Null until a
+   *  background sync has matched TVmaze's per-episode airstamp for it. */
+  airDateTime: string | null;
   tmdbShowId: number;
   /** Real CachedEpisode tmdb_id for deep-linking straight to the episode
    *  (widget tap-through). Null for the synthetic `next_episode_to_air`
@@ -73,7 +85,9 @@ export function buildUpcomingItems(entries: WatchlistEntry[]): UpcomingItem[] {
           ep.air_date &&
           ep.air_date < todayIso &&
           !ep.is_watched &&
-          nowMs - new Date(`${ep.air_date}T00:00:00`).getTime() <= PAST_WINDOW_MS
+          nowMs -
+            resolveAirInstant(ep.air_date, ep.air_datetime, show.airs_time, show.airs_timezone).getTime() <=
+            PAST_WINDOW_MS
       )
       .sort((a, b) => {
         if (a.air_date! !== b.air_date!) return a.air_date! < b.air_date! ? -1 : 1;
@@ -90,6 +104,7 @@ export function buildUpcomingItems(entries: WatchlistEntry[]): UpcomingItem[] {
         seasonNumber: missed.season_number,
         episodeNumber: missed.episode_number,
         airDate: missed.air_date!,
+        airDateTime: missed.air_datetime ?? null,
         tmdbShowId: show.tmdb_id,
         episodeId: missed.tmdb_id,
         airsTime: show.airs_time ?? null,
@@ -108,6 +123,7 @@ export function buildUpcomingItems(entries: WatchlistEntry[]): UpcomingItem[] {
         seasonNumber: episode.season_number,
         episodeNumber: episode.episode_number,
         airDate: episode.air_date,
+        airDateTime: episode.air_datetime ?? null,
         tmdbShowId: show.tmdb_id,
         episodeId: episode.tmdb_id,
         airsTime: show.airs_time ?? null,
@@ -137,6 +153,7 @@ export function buildUpcomingItems(entries: WatchlistEntry[]): UpcomingItem[] {
         seasonNumber: show.next_episode_season_number,
         episodeNumber: show.next_episode_number,
         airDate: show.next_episode_air_date,
+        airDateTime: show.next_episode_air_datetime ?? null,
         tmdbShowId: show.tmdb_id,
         episodeId: null,
         airsTime: show.airs_time ?? null,
@@ -144,7 +161,14 @@ export function buildUpcomingItems(entries: WatchlistEntry[]): UpcomingItem[] {
       });
     }
   }
-  return items.sort((a, b) => a.airDate.localeCompare(b.airDate));
+  // Sorted by resolved air instant rather than the raw airDate string, so an
+  // exact airDateTime (or a broadcast slot) can correctly order two items
+  // that share a calendar date but not a time — the raw string alone can't.
+  return items.sort(
+    (a, b) =>
+      resolveAirInstant(a.airDate, a.airDateTime, a.airsTime, a.airsTimezone).getTime() -
+      resolveAirInstant(b.airDate, b.airDateTime, b.airsTime, b.airsTimezone).getTime()
+  );
 }
 
 /** Discriminated union feeding the UPCOMING tab's List/Grid FlashList
@@ -176,7 +200,8 @@ export function groupUpcomingItemsByDate(items: UpcomingItem[], now: Date): Upco
   let currentHeader: Extract<UpcomingListEntry, { type: 'header' }> | null = null;
 
   for (const item of items) {
-    const label = formatUpcomingHeaderLabel(item.airDate, now);
+    const displayDateIso = resolveDisplayDateIso(item.airDate, item.airDateTime, item.airsTime, item.airsTimezone);
+    const label = formatUpcomingHeaderLabel(displayDateIso, now);
     if (label !== currentLabel || !currentHeader) {
       currentHeader = {
         type: 'header',

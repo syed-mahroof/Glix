@@ -1,11 +1,10 @@
 import React from 'react';
 import { FlexWidget, TextWidget, ImageWidget, ListWidget } from 'react-native-android-widget';
 import {
-  airDateTimeInstant,
-  formatCountdown,
   formatDayBadge,
   formatLocalAirTime,
   formatUpcomingHeaderLabel,
+  resolveDisplayDateIso,
 } from '../../lib/dateFormat';
 import type { WidgetPayload, WidgetUpcomingItem } from '../../lib/widgetPayload';
 
@@ -55,38 +54,22 @@ function DayHeader({ label, count }: { label: string; count: number }) {
   );
 }
 
-/**
- * The countdown + clock time for one row, both computed against `now` at
- * render rather than read from the snapshot — the widget redraws on
- * Android's own updatePeriodMillis schedule, routinely while the app isn't
- * running, so anything precomputed at sync time would be stale by exactly
- * however long ago the last sync was.
- *
- * The countdown targets the real air instant when the show has a known
- * broadcast slot, and local midnight otherwise (the old behaviour, and the
- * reason every slot-less countdown still ends in "00m").
- */
-function rowTiming(show: WidgetUpcomingItem, now: Date) {
-  const instant = airDateTimeInstant(show.air_date, show.airs_time, show.airs_timezone);
-  const { formatted, dayOfWeek } = formatCountdown(
-    instant ?? new Date(`${show.air_date}T00:00:00`),
-    now
-  );
-  return {
-    countdown: `${formatted} (${dayOfWeek})`,
-    airTime: formatLocalAirTime(show.air_date, show.airs_time, show.airs_timezone),
-  };
-}
-
 // Flat row on the widget's own black ground (no nested card fill/margins),
 // which is what removes the boxed-in look and the dead gap along the right
 // edge the per-row card treatment produced. The day count stays as the big
 // right-aligned number, with the air time stacked beneath it.
+//
+// No countdown text here anymore — a home-screen widget redraws on its own
+// schedule and can't tick live, so a static countdown was stale the moment
+// it rendered (and, before the exact per-episode airstamp existed, wrong by
+// up to a day for any slot-less show besides). The day badge plus the
+// resolved local air time are the whole release-time line now.
 function UpcomingRow({ show }: { show: WidgetUpcomingItem }) {
   const uri = widgetUri(show);
   const now = new Date();
-  const dayBadge = formatDayBadge(show.air_date, now);
-  const { countdown, airTime } = rowTiming(show, now);
+  const displayDateIso = resolveDisplayDateIso(show.air_date, show.air_datetime, show.airs_time, show.airs_timezone);
+  const dayBadge = formatDayBadge(displayDateIso, now);
+  const airTime = formatLocalAirTime(show.air_date, show.air_datetime, show.airs_time, show.airs_timezone);
   return (
     <FlexWidget
       clickAction={uri ? 'OPEN_URI' : 'OPEN_APP'}
@@ -117,7 +100,7 @@ function UpcomingRow({ show }: { show: WidgetUpcomingItem }) {
           maxLines={1}
         />
         <TextWidget
-          text={`${show.next_episode} • ${countdown}`}
+          text={show.next_episode}
           style={{ fontSize: 11, color: SUBTLE, marginTop: 2 }}
           maxLines={1}
         />
@@ -187,14 +170,25 @@ export function UpcomingWidget({ data }: { data: WidgetPayload | null }) {
   // away everything past the first screenful before the list ever got a
   // chance to scroll to it.
   const now = new Date();
+  // One pass to resolve each row's label and tally counts, instead of
+  // re-scanning the whole (capped-at-50, but still O(n²)) array once per
+  // distinct label boundary — labels are computed once per item either way.
+  const labels = items.map((show) =>
+    formatUpcomingHeaderLabel(
+      resolveDisplayDateIso(show.air_date, show.air_datetime, show.airs_time, show.airs_timezone),
+      now
+    )
+  );
+  const labelCounts = new Map<string, number>();
+  for (const label of labels) labelCounts.set(label, (labelCounts.get(label) ?? 0) + 1);
+
   const children: React.JSX.Element[] = [];
   let lastLabel: string | null = null;
   items.forEach((show, idx) => {
-    const label = formatUpcomingHeaderLabel(show.air_date, now);
+    const label = labels[idx];
     if (label !== lastLabel) {
-      const count = items.filter((s) => formatUpcomingHeaderLabel(s.air_date, now) === label).length;
       if (lastLabel !== null) children.push(<Divider key={`div-${label}`} />);
-      children.push(<DayHeader key={`head-${label}`} label={label} count={count} />);
+      children.push(<DayHeader key={`head-${label}`} label={label} count={labelCounts.get(label)!} />);
       lastLabel = label;
     }
     children.push(<UpcomingRow key={`${show.id}-${show.air_date}-${idx}`} show={show} />);

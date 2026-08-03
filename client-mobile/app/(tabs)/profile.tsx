@@ -24,6 +24,7 @@ import {
   ListChecks,
   NotebookPen,
   Settings,
+  Sparkles,
   Star,
   Trophy,
   Tv2,
@@ -34,7 +35,7 @@ import {
   AlertTriangle,
   RefreshCw,
 } from 'lucide-react-native';
-import React, { useCallback, useMemo, useState } from 'react';
+import React, { useCallback, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
@@ -52,6 +53,7 @@ import GlassSurface from '../../components/GlassSurface';
 import PressableScale from '../../components/PressableScale';
 import { ProgressRing } from '../../components/ProgressRing';
 import Snackbar from '../../components/Snackbar';
+import { isAnimeByGenresAndLanguage, isAnimeByGenreStringAndLanguage } from '../../lib/anime';
 import { BADGE_META } from '../../lib/badges';
 import {
   exportGlixData,
@@ -61,6 +63,7 @@ import {
 } from '../../lib/migration';
 import { useAppTheme } from '../../lib/theme';
 import { monoLabelStyle, monoValueStyle } from '../../lib/typography';
+import { useListsStore } from '../../store/listsStore';
 import { useWatchStore } from '../../store/watchStore';
 
 export default function ProfileScreen() {
@@ -78,6 +81,9 @@ export default function ProfileScreen() {
   const isResyncingStats = useWatchStore((state) => state.isResyncingStats);
   const watchlist = useWatchStore((state) => state.watchlist);
   const movieWatchlist = useWatchStore((state) => state.movieWatchlist);
+  const analyticsDirtyAt = useWatchStore((state) => state.analyticsDirtyAt);
+  const lists = useListsStore((state) => state.lists);
+  const fetchLists = useListsStore((state) => state.fetchLists);
 
   const [isImporting, setIsImporting] = useState(false);
   const [isExporting, setIsExporting] = useState(false);
@@ -118,12 +124,32 @@ export default function ProfileScreen() {
   // same underlying data — toggling a show's watch state on another tab and
   // tabbing back here previously could show two different counts for what
   // should be identical totals.
+  // Phase 75.8: that refetch fired unconditionally on every single focus —
+  // switching tabs back and forth re-ran all 4 requests each time even when
+  // nothing had changed. Skipped now unless either >60s has passed since
+  // the last fetch, or analyticsDirtyAt (bumped by fetchProfile — see its
+  // own comment) has moved since this effect last actually ran, i.e. a real
+  // watch mutation happened somewhere in the meantime (this tab's own
+  // fetchProfile call below counts too, which is what keeps the first-ever
+  // focus and any watch-elsewhere-then-return case both still fetching).
+  const lastProfileFetchedAtRef = useRef(0);
+  const lastSeenProfileDirtyAtRef = useRef(analyticsDirtyAt);
+  const PROFILE_STALE_AFTER_MS = 60_000;
+
   useFocusEffect(
     useCallback(() => {
+      const now = Date.now();
+      const isStale = now - lastProfileFetchedAtRef.current > PROFILE_STALE_AFTER_MS;
+      const hasNewActivity = analyticsDirtyAt !== lastSeenProfileDirtyAtRef.current;
+      if (!isStale && !hasNewActivity) return;
+
+      lastProfileFetchedAtRef.current = now;
+      lastSeenProfileDirtyAtRef.current = analyticsDirtyAt;
       fetchProfile();
       fetchWatchlist();
       fetchMovieWatchlist();
-    }, [fetchProfile, fetchWatchlist, fetchMovieWatchlist])
+      fetchLists();
+    }, [analyticsDirtyAt, fetchProfile, fetchWatchlist, fetchMovieWatchlist, fetchLists])
   );
 
   const initials = useMemo(() => {
@@ -131,14 +157,31 @@ export default function ProfileScreen() {
     return profile.username.slice(0, 2).toUpperCase();
   }, [profile?.username]);
 
-  // Computed watch stats
-  const totalShows = useMemo(() => {
-    return (
-      watchlist.to_watch.results.length +
-      watchlist.up_to_date.results.length +
-      watchlist.archived.results.length
-    );
-  }, [watchlist]);
+  // Computed watch stats. Anime shows/movies (Phase 75.2) now have their
+  // own My Anime section below and are excluded from both these counts and
+  // from My Shows/My Movies themselves — must stay in sync with the same
+  // exclusion in profile/shows.tsx and profile/movies.tsx or the badges on
+  // this screen would disagree with what those screens actually list.
+  const allShowEntries = useMemo(
+    () => [
+      ...watchlist.to_watch.results,
+      ...watchlist.up_to_date.results,
+      ...watchlist.archived.results,
+    ],
+    [watchlist]
+  );
+  const allMovieItems = useMemo(
+    () => [...movieWatchlist.watch_next, ...movieWatchlist.watched],
+    [movieWatchlist]
+  );
+
+  const totalShows = useMemo(
+    () =>
+      allShowEntries.filter(
+        (e) => !isAnimeByGenresAndLanguage(e.show.genres, e.show.original_language)
+      ).length,
+    [allShowEntries]
+  );
 
   // Total tracked movies — must match the "My Movies" row's count badge
   // below (watch_next + watched). A prior version of this stat counted only
@@ -146,9 +189,23 @@ export default function ProfileScreen() {
   // same screen (e.g. "1" here vs "4" on "My Movies") — the same
   // inconsistency `totalShows` avoids by counting every tracked show, not
   // just finished ones.
-  const totalMovies = useMemo(() => {
-    return movieWatchlist.watch_next.length + movieWatchlist.watched.length;
-  }, [movieWatchlist]);
+  const totalMovies = useMemo(
+    () =>
+      allMovieItems.filter(
+        (item) => !isAnimeByGenreStringAndLanguage(item.movie.genres_string, item.movie.original_language)
+      ).length,
+    [allMovieItems]
+  );
+
+  const totalAnime = useMemo(() => {
+    const animeShows = allShowEntries.filter((e) =>
+      isAnimeByGenresAndLanguage(e.show.genres, e.show.original_language)
+    ).length;
+    const animeMovies = allMovieItems.filter((item) =>
+      isAnimeByGenreStringAndLanguage(item.movie.genres_string, item.movie.original_language)
+    ).length;
+    return animeShows + animeMovies;
+  }, [allShowEntries, allMovieItems]);
 
   // Time display — derived client-side straight from total_time_watched
   // (Phase 65 root-cause fix), not from the separate watched_days/
@@ -412,12 +469,31 @@ export default function ProfileScreen() {
           </GlassSurface>
         </PressableScale>
 
+        {/* ── Anime Section ─────────────────────────────────────────────────── */}
+        <Text style={[styles.sectionTitle, { color: c.textPrimary }]}>Anime</Text>
+        <PressableScale onPress={() => router.push('/profile/anime' as any)}>
+          <GlassSurface radius={14} style={styles.settingsRow}>
+            <View style={styles.rowLeft}>
+              <Sparkles color={c.accentInk} size={18} strokeWidth={1.75} />
+              <Text style={[styles.settingsRowText, { color: c.textPrimary }]}>My Anime</Text>
+              <View style={[styles.countBadge, { backgroundColor: c.accentDim, borderColor: c.accentDim }]}>
+                <Text style={[styles.countBadgeText, monoValueStyle, { color: c.accentInk }]}>{totalAnime}</Text>
+              </View>
+            </View>
+            <ChevronRight color={c.textTertiary} size={18} />
+          </GlassSurface>
+        </PressableScale>
+
         {/* ── Lists ─────────────────────────────────────────────────────────── */}
+        <Text style={[styles.sectionTitle, { color: c.textPrimary }]}>Lists</Text>
         <PressableScale onPress={() => router.push('/lists' as any)}>
           <GlassSurface radius={14} style={styles.settingsRow}>
             <View style={styles.rowLeft}>
               <ListChecks color={c.accentInk} size={18} strokeWidth={1.75} />
               <Text style={[styles.settingsRowText, { color: c.textPrimary }]}>My Lists</Text>
+              <View style={[styles.countBadge, { backgroundColor: c.accentDim, borderColor: c.accentDim }]}>
+                <Text style={[styles.countBadgeText, monoValueStyle, { color: c.accentInk }]}>{lists.length}</Text>
+              </View>
             </View>
             <ChevronRight color={c.textTertiary} size={18} />
           </GlassSurface>

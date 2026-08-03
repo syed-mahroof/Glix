@@ -1,5 +1,29 @@
 # Glix — Complete Project Context
-# Last Updated: 2026-08-01 (Phase 74 — a single large user-issued 14-item bundle, executed in one continuous pass with performance deliberately last per the user's own sequencing: unreleased-content gating extended to movies (TV side was already correct), half-star ratings, a full social layer (follow graph/search/public profiles/activity feed), Watch Activity full-history heatmap, a Movies analytics segment, avatar picker expansion, a backend/client performance pass, and a final security/audit pass — plus a mid-session ad hoc follow-up ("buttons feel laggy... everything should be snappy") that added a scoped React re-render/perf pass on top. Full detail below.
+# Last Updated: 2026-08-03 (Phase 75 — a 9-phase user-approved plan executed in one continuous pass, plus a mid-session auto-logout bug report: real per-episode air times sourced from TVmaze `airstamp` (was show-level-slot-only, missing for most streaming originals) with the countdown removed from the widget in favor of a kept release time; a first-class Shows/Anime split (Shows Hub heading toggle + new "My Anime" profile screen); reviews gated on having watched; a default-layout preference system (global default + per-screen override); Community's Activity feed switched from watch history to real reviews (+ a self-follow-button 400 fix + Discussions 8-requests-to-1 collapse); a rewatch system (show-level rounds with per-episode ticks, movie "watch again" counter) on a parallel presence-based table set; a Celery/Redis infra cost pass plus 5 cartesian-join query fixes and 2 N+1 fixes; and a closing sweep. Two independent auto-logout root causes fixed in the token-refresh/auth-boot path, outside the plan's scope. Backend suite 148→192 (+44), `tsc --noEmit` clean, `jest` 12/12. Full detail below.)
+
+**(1) Air-time truth — the Upcoming pipeline lied about time.** `CachedEpisode` stored a bare `air_date` with no clock; the in-app Upcoming tab counted down to local midnight, so every countdown ended in `00m` and was wrong by up to a day, and only shows with a fixed TVmaze broadcast slot (`CachedShow.airs_time`/`airs_timezone`, Phase 73) ever got a real time at all — most streaming originals have no such slot. TVmaze's per-show `/lookup/shows` (Phase 73) returns nothing for a slot-less show; its `/shows/{id}/episodes` endpoint carries a per-episode `airstamp` (full ISO instant) that exists even for those shows — the actual missing source. New `fetch_episode_airstamps()` (`core/airtime.py`) parses it via `django.utils.dateparse.parse_datetime`; new `CachedEpisode.air_datetime`, `CachedShow.tvmaze_id`/`next_episode_air_datetime` (migration `0017_air_time_truth`). `sync_show_air_time()` bulk-updates `air_datetime` for a show's episodes bounded to `air_date >= today - 7 days` (not a full-catalogue rewrite) on the existing self-throttled monthly `airtime_checked_at` gate, and separately populates `next_episode_air_datetime` by matching `next_episode_season_number`/`next_episode_number`. Fixed a real coverage bug in `sync_active_shows()`: it only queued `Status.RETURNING` shows, so an ENDED-but-still-airing show with a dated next episode never got an air-time check — widened to include any show with a future `next_episode_air_date` or a recent `CachedEpisode.air_date`. New shared `lib/dateFormat.ts::resolveAirInstant(airDate, airDateTime?, airsTime?, airsTimezone?)` resolves in order: exact per-episode instant → show broadcast slot → local-midnight fallback — every countdown/air-time/grouping call site now routes through it, fixing a real cross-midnight bug along the way: an episode airing 9pm US-Eastern is already the next calendar day in IST, so date-bucketed UI (day badges, calendar grouping, the widget) previously showed it a day early for users east of the source timezone; `lib/upcoming.ts`, `components/CalendarGrid.tsx`, and both countdown call sites in `app/(tabs)/index.tsx` now derive their display date from the resolved instant instead of the raw `air_date` string. Widget: both `widgets/android/UpcomingWidget.tsx` and `widgets/ios/UpcomingWidget.tsx` drop the countdown text entirely per the user's explicit ask, keeping the day badge and the resolved local air-time line; fixed an O(n²) header-label recomputation inside the Android widget's render loop (precomputed once instead of per-row) and deleted a stale comment in `dateFormat.ts` that no longer matched `widgetPayload.ts`'s actual (nothing-precomputed) behavior. Files: `backend/core/models.py`, `backend/core/migrations/0017_air_time_truth.py` (new), `backend/core/airtime.py`, `backend/core/tasks.py`, `backend/core/serializers.py`, `client-mobile/lib/dateFormat.ts`, `client-mobile/lib/upcoming.ts`, `client-mobile/lib/widgetPayload.ts`, `client-mobile/store/watchStore.ts`, `client-mobile/app/(tabs)/index.tsx`, `client-mobile/components/CalendarGrid.tsx`, `client-mobile/widgets/android/UpcomingWidget.tsx`, `client-mobile/widgets/ios/UpcomingWidget.tsx`, `client-mobile/__tests__/dateFormat.test.ts`.
+
+**(2) Shows/Anime split — anime was a runtime heuristic buried in a filter chip, not a first-class surface.** New `components/HubHeadingSwitch.tsx` (two large Shows/Anime words, matching the header's existing title size, active/inactive via `c.textPrimary`/`c.textTertiary`) replaces the Shows Hub's static `<Text>Shows</Text>` title; filters WATCH LIST rows through the existing `lib/anime.ts::isAnimeByGenresAndLanguage()` heuristic (Animation genre + `original_language === 'ja'`) before bucketing, so the pill counts stay honest — UPCOMING is deliberately **not** filtered (explicit user decision, commented in-code so it doesn't read as an oversight later). New `app/profile/anime.tsx` ("My Anime") — a `SegmentedControl` Shows|Movies over the existing `watchlist`/`movieWatchlist` data, reusing `ShowRow`/`MovieRow` and the exported row/card components from `profile/shows.tsx`/`profile/movies.tsx`. Anime fully **removed** (not just hidden) from `profile/shows.tsx`/`profile/movies.tsx` — the `animeOnly` tag toggle and its filter-pipeline branch deleted from both, since the point of the split is a real separation, not a duplicate view; Profile's `totalShows`/`totalMovies` counts now exclude anime, with a new `totalAnime` covering both. Layout toggle repositioned below the filter-pill row on both `(tabs)/index.tsx` and `(tabs)/movies.tsx` (matching a supplied reference screenshot), leaving only the `ListChecks` list/grid button in the header's top-right slot; `profile/shows.tsx`/`profile/movies.tsx` keep their header-position toggle unchanged (no list button there, so no uniformity problem to solve). New Profile "Anime" section + "My Anime" row with a count badge, between Movies and Lists. Explicitly out of scope, stated rather than silently skipped: the Movies Hub tab (`(tabs)/movies.tsx`) still shows everything including anime movies — only the Shows Hub and My Movies were asked to split. Files: `client-mobile/components/HubHeadingSwitch.tsx` (new), `client-mobile/app/profile/anime.tsx` (new), `client-mobile/app/(tabs)/index.tsx`, `client-mobile/app/(tabs)/movies.tsx`, `client-mobile/app/profile/shows.tsx`, `client-mobile/app/profile/movies.tsx`, `client-mobile/app/(tabs)/profile.tsx`.
+
+**(3) Reviews gated on watched — a show/movie could be reviewed before ever being watched.** `ShowReviewView.post`/`MovieReviewView.post` now 403 unless `WatchState.objects.filter(user=, episode__show_id=).exists()` (≥1 episode — requiring 100% would be hostile to mid-season rating) or the movie itself is watched; DELETE stays ungated, since removing a review must always be possible. `RatingReviewCard.tsx` gained a `canReview: boolean` prop — false renders dimmed non-interactive stars, hides the note input, and shows a single "Mark as watched to rate" line, as one branch inside the existing card rather than a new component. Files: `backend/core/review_views.py`, `client-mobile/components/RatingReviewCard.tsx`, `client-mobile/app/show/[id].tsx`, `client-mobile/app/movie/[id].tsx`.
+
+**(4) Lists: context-aware default + Profile section.** `app/lists/index.tsx` now reads `?media=tv|movie` from `useLocalSearchParams()` to seed its media filter instead of hard-coding "All"; the Shows Hub and Movies Hub's list-button entry points now link in pre-filtered to their own media type. Added a "Lists" section heading with a count badge on Profile — the My Lists row previously dangled under the Movies heading with no heading of its own. Files: `client-mobile/app/lists/index.tsx`, `client-mobile/app/(tabs)/index.tsx`, `client-mobile/app/(tabs)/movies.tsx`, `client-mobile/app/(tabs)/profile.tsx`.
+
+**(5) Default layout preference — a single persisted global with only a blind toggle.** Replaced `preferredLayout`/`toggleLayout()` with `defaultLayout` (persisted, Settings-owned) + `layoutOverrides: Partial<Record<LayoutScope, LayoutMode>>` (persisted, per-screen: shows/movies/myShows/myMovies/myAnime) + a `useLayoutFor(scope)` selector; `setDefaultLayout()` also clears every override, matching the design intent that changing the default shouldn't leave stale per-screen overrides fighting it. Persist store `version` bumped with a `migrate` step seeding `defaultLayout` from any existing `preferredLayout`, so no one's current choice silently resets. All five consumers migrated in the same pass: `(tabs)/index.tsx` (including the Upcoming 3-way List/Grid/Calendar toggle), `(tabs)/movies.tsx`, `profile/shows.tsx`, `profile/movies.tsx`, the new `profile/anime.tsx`. New Settings "Default layout" row (List/Grid `SegmentedControl` + hint) inside the existing Appearance card. Files: `client-mobile/store/watchStore.ts`, `client-mobile/components/LayoutToggle.tsx`, `client-mobile/app/(tabs)/index.tsx`, `client-mobile/app/(tabs)/movies.tsx`, `client-mobile/app/profile/shows.tsx`, `client-mobile/app/profile/movies.tsx`, `client-mobile/app/profile/anime.tsx`, `client-mobile/app/settings.tsx`.
+
+**(6) Community: reviews feed, self-follow fix, performance.** `FriendsActivityView` rewritten from a `WatchState`/`MovieWatchState` union to real `ShowReview`/`MovieReview` rows from followees (same `MAX_FOLLOWEES`/`RAW_ROW_CAP`/window bounds, private accounts still excluded) — Activity now shows what someone thought, not just that they watched something; retired the old `episodes`/`movie` card types. Fixed a confirmed live bug while rebuilding it: `friends_feed_cache_key(user_id)` had no `page` component, so every page of the feed served back page 1's cached payload for the full 120s TTL — added `page` to the key, busted on review save/delete via `signals.py`. Fixed the reported bug: your own row in a Followers/Following list rendered a tappable "Follow" button that 400s (the DB's self-follow `CheckConstraint` guarantees `is_following` is always false for yourself) — `FollowEdgeSerializer` had no `is_self`, and `components/UserRow.tsx` already had an `isSelf` prop built for exactly this that neither `app/user/[username]/connections.tsx` nor `app/community.tsx` was passing; added `is_self` to the serializer (viewer id via context) and wired both call sites. Performance: Community's Discussions tab fired 8 parallel per-show `GET /comments/?show_id=` requests on every mount and pull-to-refresh; replaced with one new paginated `GET /api/comments/feed/` (`CommentFeedView`, built on the existing `CommentQuerysetMixin.annotated_queryset`) — 8 requests → 1. All three Community tabs plus `connections.tsx` converted `FlatList` → `FlashList` (repo standard; FlashList 2.0.2 needs no `estimatedItemSize`). `_build_public_profile_blob`/`FollowToggleView`'s separate `.count()` calls collapsed into one `annotate(Count(...))`. Files: `backend/core/social_views.py`, `backend/core/social_serializers.py`, `backend/core/cache_keys.py`, `backend/core/signals.py`, `backend/core/comment_views.py` (new `CommentFeedView`), `backend/core/comment_urls.py`, `client-mobile/store/socialStore.ts`, `client-mobile/components/ActivityRow.tsx`, `client-mobile/app/community.tsx`, `client-mobile/app/user/[username]/connections.tsx`.
+
+**(7) Rewatch — nothing tracked a second viewing.** New parallel presence-based tables (migration `0018_rewatch`), deliberately not a change to `WatchState`'s own `UNIQUE(user, episode)` — load-bearing across the "already watched" check, badge counts, and every `Count()` in analytics, so relaxing it would silently corrupt all of those: `ShowRewatch` (a "round" — `user`, `show`, `round_number`, `started_at`, `completed_at`, `UniqueConstraint(user, show, round_number)`), `RewatchEpisodeState` (presence-based per-episode tick scoped to one round, `UniqueConstraint(rewatch, episode)`), `MovieRewatch` (append-only, no unique constraint — a rewatch is a real repeatable event, undone by deleting the most recent row). `UserProfile.total_rewatch_time_watched` tracks the breakdown while a rewatch still also adds to `total_time_watched` (both move, by design). New `core/rewatch_views.py`/`rewatch_urls.py`: `ShowRewatchDetailView` (GET active round + DELETE to cancel), `ShowRewatchStartView` (400 unless every aired episode is already in `WatchState` and no round is already active; `round_number = max(existing) + 1`, starting at 2), `RewatchEpisodeToggleView` (presence toggle within the active round, `±runtime_minutes` on both time-watched counters mirroring `WatchStateToggleView`'s F()-expression clamp-to-0 pattern, stamps `completed_at` when the round covers every aired episode), `MovieRewatchCreateView` (POST +1 row / DELETE removes the most recent). Found and fixed a real design bug before it shipped: filtering the "active round" lookup by `completed_at__isnull=True` made a just-completed round immediately un-toggleable (untick the last episode → 400 on the very next tap) — the toggle view and detail GET now resolve the *latest* round regardless of completion state, while `ShowRewatchStartView`'s "one already active" check correctly keeps the `completed_at__isnull=True` filter. `WatchlistSerializer.active_rewatch`/`MovieWatchlistSerializer.rewatch_count` added (two-repo change, TS mirrors updated same pass). `app/show/[id].tsx` gained a "Rewatch"/"Rewatching · Round N" card when `progress_percentage === 100`, with episode checkmarks writing rewatch state instead of `WatchState` while a round is active; `app/movie/[id].tsx` gained "Watch again" (subtitle: "Watched N×"). Every mark-watched entry point honors rewatch mode: `components/EpisodeRow.tsx`, `app/show/[id]/season/[season].tsx`, `app/episode/[id].tsx` — traced (not assumed) that the Shows Hub row and Upcoming row checkmarks specifically need no extra branching, since a fully-watched show (rewatch's own precondition) can never produce an unwatched-episode row on either surface. `lib/useCatchupCascade.ts` no longer fires while a rewatch round is active. Rewatch minutes added to `AnalyticsDashboardView` as a distinct "Rewatched" tile; `RewatchEpisodeState.watched_at`/`MovieRewatch.watched_at` unioned into the heatmap and `AnalyticsStatisticsView`'s daily/weekly/monthly buckets. Files: `backend/core/models.py`, `backend/core/migrations/0018_rewatch.py` (new), `backend/core/rewatch_views.py` (new), `backend/core/rewatch_urls.py` (new), `backend/core/urls.py`, `backend/core/serializers.py`, `backend/core/analytics_views.py`, `backend/core/analytics_serializers.py`, `client-mobile/store/watchStore.ts`, `client-mobile/app/show/[id].tsx`, `client-mobile/app/movie/[id].tsx`, `client-mobile/app/show/[id]/season/[season].tsx`, `client-mobile/app/episode/[id].tsx`, `client-mobile/components/EpisodeRow.tsx`, `client-mobile/components/SeasonCard.tsx`, `client-mobile/lib/useCatchupCascade.ts`.
+
+**(8) Performance — the free tier was burning most of its Redis budget on infra chatter, not real traffic.** Infra (inert until the next Render redeploy, not yet triggered): `render-start.sh` disables Celery gossip/mingle/heartbeat and drops both worker/beat to `-l WARNING`; `CELERY_BROKER_TRANSPORT_OPTIONS = {"visibility_timeout": 900, "polling_interval": 5.0}` widens the ~1s default BRPOP polling (the single largest confirmed Upstash command source); `CELERY_TASK_IGNORE_RESULT=True` (confirmed safe — nothing in `core/` uses `AsyncResult`/`.get(timeout=...)`), `CELERY_WORKER_ENABLE_REMOTE_CONTROL=False`, `CELERY_WORKER_SEND_TASK_EVENTS=False`; `resume_stalled_imports` crontab widened `*/5`→`*/15`. DRF throttling moved off the Redis-backed default cache: new `CACHES["throttling"]` `LocMemCache` alias + `core/throttling.py` (`LocalAnonRateThrottle`/`LocalUserRateThrottle`) — 2 Redis round trips per throttle class per request, eliminated; safe specifically because `render-start.sh` runs a single gunicorn worker, so per-process counters are still a real limit (`--max-requests 500` recycles the process periodically, resetting counters — an accepted tradeoff for abuse protection, not routine correctness). Backend queries: found and fixed 5 occurrences (the plan named 2) of the same cartesian-join anti-pattern — annotating one queryset with two `Count(..., distinct=True)` aggregates over two different relations off the same base row explodes into a join-then-dedupe row count — across `analytics_views.py` (Dashboard/Completion/YearReview) and `views.py` (`WatchlistView`, `ContinueWatchingView`), each replaced with two flat `.values(...).annotate(Count(...))` queries merged in Python (the codebase's own established convention, e.g. `episodes_by_show`, chosen over the plan's literally-worded `Prefetch` suggestion). Self-caught via new tests before reaching real usage: 5 of these grouped queries raised `FieldError` — `CachedEpisode`'s primary key is `tmdb_id`, not `id`, so `Count("id")` doesn't exist on that queryset; fixed to `Count("pk")`. `lists_views.py`'s `CustomListsView.get()` collapsed from 3 full `CustomListItem` table scans to one `select_related` query grouped in Python. `BulkWatchStateToggleView`'s per-loop `CachedShow.objects.get()` replaced with `in_bulk(show_ids)`. Caching added to `AnalyticsDashboardView`/`AnalyticsStatisticsView` (300s)/`AnalyticsMonthlySummaryView` (900s), busted by the existing watch-mutation signal hooks plus the new rewatch models. Frontend: `analytics.tsx`/`profile.tsx`'s focus-effect fetch batches gained a `analyticsDirtyAt` staleness guard (bumped in `fetchProfile`) instead of refetching unconditionally on every focus. `(tabs)/index.tsx`'s Upcoming clock now ticks at 1s only when the soonest item is under an hour out, else 60s — simplified from an initial design that used a redundant bridge state + extra `useEffect` to work around a perceived circular dependency, replaced with a plain unmemoized per-render computation once the extra render was recognized as self-defeating for a performance fix. Files: `backend/render-start.sh`, `backend/config/settings/base.py`, `backend/core/throttling.py` (new), `backend/core/analytics_views.py`, `backend/core/views.py`, `backend/core/lists_views.py`, `backend/core/tests/test_watchlist_counts.py` (new), `client-mobile/store/watchStore.ts`, `client-mobile/app/(tabs)/index.tsx`, `client-mobile/app/(tabs)/profile.tsx`, `client-mobile/app/analytics.tsx`.
+
+**(9) Sweep.** Extracted the byte-duplicated `FilterPill` (`(tabs)/index.tsx` and `(tabs)/movies.tsx`, differing only by 2px of padding) into `components/FilterPill.tsx`. Removed now-dead code: widget `formatCountdown` imports, `animeOnly` state on the two profile screens, retired activity-card types, a stale `dateFormat.ts` comment. Design-system compliance re-checked on every new/edited surface (colors from `useAppTheme().theme.colors` only, `PressableScale` for taps, `GlassSurface` for cards). Re-verified the `tsc` baseline fresh rather than carrying it forward, per this repo's own recorded history of a "pre-existing" TS error once turning out to be a live crash — confirmed zero, nothing carried. Files: `client-mobile/components/FilterPill.tsx` (new), `client-mobile/app/(tabs)/index.tsx`, `client-mobile/app/(tabs)/movies.tsx`, `client-mobile/widgets/android/UpcomingWidget.tsx`, `client-mobile/widgets/ios/UpcomingWidget.tsx`, `client-mobile/lib/dateFormat.ts`.
+
+**(10) Auto-logout bug report (user-reported mid-session, not part of the 9-phase plan) — two independent, compounding root causes.** `lib/api.ts`'s `performRefresh()` treated any failure during a token refresh — including a genuinely transient network blip — identically to "session expired," wiping otherwise-valid tokens; rewritten around a discriminated `RefreshOutcome` (`success`/`expired`/`transient_failure`) so tokens are only cleared on an actual 401/403 from the refresh endpoint. Separately, `app/_layout.tsx`'s boot-time auth check set `isAuthenticated(false)` on a SecureStore-read timeout (a 2s race), forcing an incorrect redirect to `/login` despite valid stored tokens — changed to optimistically assume authenticated on that specific timeout path; a genuinely logged-out user still gets correctly bounced one round-trip later via the normal 401→refresh→expired flow, so the fix carries no downside for that case. Files: `client-mobile/lib/api.ts`, `client-mobile/app/_layout.tsx`.
+
+**Batch-wide verification:** `manage.py check` clean, `makemigrations --check --dry-run` clean after applying both `0017` and `0018`, `pytest` 192/192 inside the `watchtracker_backend` container (up from 148 — 44 new: `test_rewatch.py` (17, new file), `test_rewatch_analytics.py` (4, new file), `test_comment_feed.py` (3, new file), `test_watchlist_counts.py` (7, new file), rest split across expansions to `test_reviews.py`, `test_social_views.py`, `test_airtime.py`), `tsc --noEmit` (`node --stack-size=8000`) zero errors, `jest` 12/12 (up from 7 — 5 new `resolveAirInstant`/`resolveDisplayDateIso` cases in `__tests__/dateFormat.test.ts`). **Deliberately not done this session:** the plan's own suggested live Django-shell check against real TVmaze (a network show + a slot-less streaming show) — covered instead by `test_airtime.py`'s TVmaze-response-branch tests, not a live external call; the Render redeploy needed for (8)'s infra savings to actually take effect. **Not verifiable this session: no physical device or emulator** — the countdown-removed widget layout, the Shows/Anime heading toggle and repositioned layout controls, every rewatch UI surface, and the resolved-local-air-time line all need a real device pass; verified instead via the full backend test suite, `tsc`, `jest`, and direct code-path tracing.
+
+# Last Updated (prior): 2026-08-01 (Phase 74 — a single large user-issued 14-item bundle, executed in one continuous pass with performance deliberately last per the user's own sequencing: unreleased-content gating extended to movies (TV side was already correct), half-star ratings, a full social layer (follow graph/search/public profiles/activity feed), Watch Activity full-history heatmap, a Movies analytics segment, avatar picker expansion, a backend/client performance pass, and a final security/audit pass — plus a mid-session ad hoc follow-up ("buttons feel laggy... everything should be snappy") that added a scoped React re-render/perf pass on top. Full detail below.
 
 **(1) Unreleased-content gating extended to movies — TV episodes were already correctly blocked from being marked watched before airing; movies had no equivalent check at all.** `MovieWatchStateToggleView` had zero release-date validation on its create branch, and `MovieRow`/`MoviePosterCard` had no `disabled` concept whatsoever (unlike `ShowRow`/`ShowPosterCard`, which already dim and disable the checkmark for a future episode). New shared helpers — `backend/core/dates.py::has_released()` (null date = not released, for user-initiated toggle gates) and `client-mobile/lib/dateFormat.ts::hasAired()` — replace what was previously 9+ hand-inlined `x.air_date && x.air_date <= today` checks scattered across the client. Gated `MovieWatchStateToggleView`'s create branch (mirrors `WatchStateToggleView` exactly, including "null date counts as not-yet-released") and `tasks.py`'s `_import_one_movie` (matching how `_import_one_show` was already gated). Wired `isReleased`/`disabled` into all four movie toggle entry points: the list row, its animation-flush path, the grid checkmark, and `movie/[id].tsx`'s `handlePrimaryAction` (which serves both the header icon and the big action button). Fixed two related silent-correctness bugs uncovered while building this: `BulkWatchStateToggleView` was already filtering unaired episodes out of what it actually created, but its response echoed back *every* requested id regardless — so a client's optimistic state could silently diverge from the server with no error surfaced at all; fixed by returning `applied_episode_ids`/`skipped_unaired_ids` and having `watchStore.bulkToggleWatchState` reconcile against them. `CatchupCheckView` counted previous-unwatched episodes with no air-date filter, so the Catch-Up modal could promise a count that a subsequent `bulk-toggle` call would then partially refuse — added the same `air_date__lte=today` filter the toggle views already use. Exposed and fixed one more latent bug along the way: `TMDBService.get_show_details()`/`get_movie_details()` passed raw TMDB JSON date strings into `update_or_create(defaults={...})`, which Django does not auto-coerce on plain attribute assignment (only a DB round-trip parses it) — so a fresh cache-miss object's date fields were still strings in memory, crashing the new `has_released()` date comparison. Root-caused and fixed with a new `_parse_tmdb_date()` helper applied at all 3 call sites, not worked around in the gating logic. Files: `backend/core/dates.py` (new), `backend/core/views.py`, `backend/core/tasks.py`, `backend/core/services.py`, `client-mobile/lib/dateFormat.ts`, `client-mobile/components/MovieRow.tsx`, `client-mobile/components/MoviePosterCard.tsx`, `client-mobile/store/watchStore.ts`, `client-mobile/app/movie/[id].tsx`, `client-mobile/app/(tabs)/movies.tsx`.
 
@@ -134,31 +158,41 @@ watchtracker/                           ← project root
 │   │   ├── celery.py                   ← Celery app instance
 │   │   └── wsgi.py / asgi.py
 │   └── core/
-│       ├── models.py                   ← ALL database models
-│       ├── serializers.py              ← ALL DRF serializers
+│       ├── models.py                   ← ALL database models (24 model classes)
+│       ├── serializers.py              ← core DRF ModelSerializers (Watchlist, WatchState, CustomList, etc.)
 │       ├── services.py                 ← TMDBService (TMDB proxy + cache layer)
-│       ├── views.py                    ← watchlist, episodes, movies, discover feed
+│       ├── views.py                    ← watchlist, watch-state toggle, catch-up, movies, discover feed, health check
 │       ├── search_views.py             ← search + show/movie detail endpoints
-│       ├── auth_views.py               ← register / login / logout
-│       ├── profile_views.py            ← profile read + update
-│       ├── comment_views.py            ← community comments + replies
-│       ├── analytics_views.py          ← 11 analytics endpoints
+│       ├── auth_views.py               ← register / login / logout / Google+Apple / password-reset OTP
+│       ├── profile_views.py            ← profile read + update, avatar options, stats resync
+│       ├── dates.py                    ← has_released() (backend counterpart of lib/dateFormat.ts::hasAired()) ← NEW (Phase 74)
+│       ├── airtime.py                  ← TVmaze show-slot + per-episode airstamp fetch (TMDB has no time-of-day) ← NEW (Phase 73, extended Phase 75)
+│       ├── comment_views.py            ← community comments + replies + feed (Phase 75)
 │       ├── comment_serializers.py
 │       ├── comment_permissions.py
-│       ├── tasks.py                    ← Celery badge safety-net tasks + show resync + push notification triggers (Phase 31)
+│       ├── comment_urls.py
+│       ├── review_views.py / review_serializers.py / review_urls.py  ← ShowReview/MovieReview, watched-gate (Phase 75) ← NEW (Phase L / 52)
+│       ├── social_views.py / social_serializers.py / social_urls.py  ← follow graph, search, public profiles, activity feed ← NEW (Phase 74)
+│       ├── lists_views.py / lists_urls.py  ← user-created lists ("Movies2026") ← NEW (Phase 70)
+│       ├── rewatch_views.py / rewatch_urls.py  ← show rounds + per-episode ticks, movie rewatch counter ← NEW (Phase 75.7)
+│       ├── recommendations_views.py / recommendations_urls.py  ← cross-library "For You" ← NEW (Phase 71)
+│       ├── analytics_views.py          ← 12 analytics endpoints (incl. AnalyticsMoviesView, Phase 74)
+│       ├── analytics_serializers.py
+│       ├── analytics_urls.py
+│       ├── throttling.py               ← LocMemCache-backed Anon/User throttles, off the Redis default cache ← NEW (Phase 75.8)
+│       ├── tasks.py                    ← Celery badge safety-net + show resync + push triggers + TV Time import + stalled-import self-heal
 │       ├── push_notifications.py       ← Expo push send + dead-token cleanup (Phase 31)
-│       ├── signals.py                  ← auto UserProfile + badge evaluation
+│       ├── password_reset.py           ← OTP forgot-password flow (Phase 28)
+│       ├── signals.py                  ← auto UserProfile, badge/streak evaluation, cache-bust receivers
 │       ├── badge_constants.py          ← badge slug ↔ threshold mapping
 │       ├── social_auth.py              ← Google/Apple ID-token verification + get-or-create (Phase 27)
+│       ├── cache_keys.py               ← centralized cache-key builders (watchlist, analytics, friends-feed, etc.)
 │       ├── pagination.py               ← StandardResultsPagination
+│       ├── permissions.py              ← placeholder — per-object checks are still ad hoc `get_object_or_404(..., user=)`
 │       ├── exceptions.py               ← global DRF exception handler
-│       ├── admin.py                    ← django-unfold ModelAdmin for all 16 models + custom User/Group (Phase 26)
-│       ├── urls.py                     ← ALL URL routes (see API table below)
-│       ├── comment_urls.py
-│       ├── analytics_urls.py
-│       └── tests/
-│           ├── test_models.py
-│           └── test_views.py           ← 6 tests, all passing
+│       ├── admin.py                    ← django-unfold ModelAdmin for all models + custom User/Group (Phase 26)
+│       ├── urls.py                     ← root URL conf, includes all *_urls.py modules (see API table below)
+│       └── tests/                      ← 192 tests passing (Phase 75) — one file per view/feature module
 │
 └── client-mobile/
     ├── app.json                        ← Expo config (plugins, App Group entitlement)
@@ -174,19 +208,28 @@ watchtracker/                           ← project root
     │   │   ├── discover.tsx            ← Discover Hub ← RECENTLY BUGFIXED
     │   │   └── profile.tsx             ← Profile Hub
     │   ├── movie/
-    │   │   └── [id].tsx                ← FULL Movie Details Screen ← NEW (Phase 8)
+    │   │   └── [id].tsx                ← FULL Movie Details Screen — Watch Again rewatch card (Phase 75.7)
     │   ├── show/
-    │   │   ├── [id].tsx                ← Show Details ← RECENTLY BUGFIXED
+    │   │   ├── [id].tsx                ← Show Details — Rewatch card, canReview gating (Phase 75)
     │   │   ├── [id]/comments.tsx
-    │   │   └── [id]/season/[season].tsx
+    │   │   └── [id]/season/[season].tsx ← full rewatch-mode wiring (Phase 75.7)
     │   ├── episode/[id].tsx
     │   ├── profile/
-    │   │   ├── shows.tsx
-    │   │   └── movies.tsx
+    │   │   ├── shows.tsx               ← anime excluded (Phase 75.2)
+    │   │   ├── movies.tsx              ← anime movies excluded (Phase 75.2)
+    │   │   ├── anime.tsx               ← "My Anime", Shows|Movies segmented ← NEW (Phase 75.2)
+    │   │   └── reviews.tsx             ← "My Reviews" ← NEW (Phase 74)
+    │   ├── lists/
+    │   │   ├── index.tsx               ← "My Lists" hub, `?media=` seeding (Phase 75.4) ← NEW (Phase 70)
+    │   │   └── [id].tsx                ← single list's contents ← NEW (Phase 70)
+    │   ├── user/
+    │   │   ├── [username].tsx          ← public profile ← NEW (Phase 74)
+    │   │   └── [username]/connections.tsx ← followers/following ← NEW (Phase 74)
     │   ├── login.tsx / register.tsx / onboarding.tsx / loading.tsx ← animated splash sequence ← NEW (Phase 32)
+    │   ├── forgot-password.tsx         ← OTP request/verify/confirm ← NEW (Phase 28)
     │   ├── search.tsx
-    │   ├── settings.tsx
-    │   ├── community.tsx
+    │   ├── settings.tsx                ← Default Layout row (Phase 75.5), Private Account toggle (Phase 74)
+    │   ├── community.tsx               ← Discussions/Activity/People segments (Phase 74), Activity = reviews (Phase 75.6)
     │   ├── analytics.tsx / statistics.tsx / achievements.tsx / year-review.tsx
     │   └── show/[id]/comments.tsx
     ├── components/
@@ -215,23 +258,42 @@ watchtracker/                           ← project root
     │   ├── AmbientGlow.tsx             ← SVG radial glow behind hero metrics ← NEW (Phase 12)
     │   ├── TrendChip.tsx               ← ▲/▼/— verdict chip ← NEW (Phase 12)
     │   ├── AnimatedSplash.tsx          ← Reanimated/SVG logo-draw-on splash sequence, loading.tsx overlay ← NEW (Phase 32)
-    │   └── [Analytics components: StatsCard (theme-aware), WatchHeatmap, GenreChart, etc.]
+    │   ├── HubHeadingSwitch.tsx        ← Shows Hub header: Shows|Anime word-toggle ← NEW (Phase 75.2)
+    │   ├── FilterPill.tsx              ← shared filter pill, extracted from 2 byte-duplicated copies ← NEW (Phase 75.9)
+    │   ├── StarRatingDisplay.tsx       ← read-only half-star display ← NEW (Phase 74)
+    │   ├── UserRow.tsx / FollowButton.tsx / ActivityRow.tsx  ← social layer (search/followers/activity feed) ← NEW (Phase 74)
+    │   ├── EditProfileSheet.tsx        ← username rename + change photo ← NEW (Phase 74)
+    │   ├── ErrorState.tsx              ← shared retry-card for failed single-fetch screens ← NEW (Phase 71)
+    │   ├── AddToListSheet.tsx          ← add item to a custom list ← NEW (Phase 70)
+    │   ├── FloatingFilterButton.tsx / WatchlistFilterSheet.tsx / LanguageFilterModal.tsx  ← My Shows/My Movies filter sheet
+    │   ├── TrailerButton.tsx           ← YouTube trailer button (show/movie detail) ← NEW (Phase 69)
+    │   ├── LogoutConfirmModal.tsx      ← styled logout confirmation (replaces native Alert)
+    │   ├── CompletionCelebration.tsx   ← confetti/banner on show completion ← NEW (Phase 67)
+    │   ├── TimeWatchedCard.tsx         ← animated "days watched" counter
+    │   └── [Analytics components: StatsCard (theme-aware), WatchHeatmap (year-chip full-history mode, Phase 74), GenreChart, ActorChart, etc.]
     ├── store/
-    │   ├── watchStore.ts               ← persisted Zustand (watchlist, profile, badges)
+    │   ├── watchStore.ts               ← persisted Zustand (watchlist, profile, badges, rewatch, layout prefs — ~1300+ lines)
     │   ├── themeStore.ts               ← persisted Zustand: Appearance preference (System/Light/Dark) ← NEW (Phase 12)
-    │   └── discoverStore.ts            ← in-memory Zustand (discover feed + search)
+    │   ├── discoverStore.ts            ← in-memory Zustand (discover feed + search)
+    │   ├── listsStore.ts               ← in-memory Zustand (user-created custom lists) ← NEW (Phase 70)
+    │   └── socialStore.ts              ← in-memory Zustand (follow graph, search, public profiles, activity feed) ← NEW (Phase 74)
     ├── lib/
-    │   ├── api.ts                      ← Axios instance + 401 refresh interceptor
+    │   ├── api.ts                      ← Axios instance + 401 refresh interceptor (RefreshOutcome discriminated union, Phase 75 auto-logout fix)
     │   ├── theme.ts                    ← ADAPTIVE THEME SYSTEM: tokens, AppThemeProvider, useAppTheme() ← NEW (Phase 12)
     │   ├── typography.ts               ← monoLabelStyle (caption) + monoValueStyle (numeric values, Phase 20) precision-layer styles ← NEW (Phase 12)
     │   ├── motion.ts                   ← staggerEntering() + usePrefersReducedMotion() ← NEW (Phase 12)
     │   ├── errors.ts                   ← extractErrorMessage() utility
-    │   ├── dateFormat.ts               ← date/countdown helpers
+    │   ├── dateFormat.ts               ← date/countdown helpers + resolveAirInstant()/resolveDisplayDateIso() (Phase 75.1)
     │   ├── upcoming.ts                 ← UpcomingItem type + buildUpcomingItems() + groupUpcomingItemsByDate() (Phase 18)
-    │   ├── useCatchupCascade.ts        ← shared Catch-Up Modal state machine (Phase 11)
+    │   ├── useCatchupCascade.ts        ← shared Catch-Up Modal state machine (Phase 11) — skips while a rewatch round is active (Phase 75.7)
     │   ├── genres.ts                   ← canonical TV_GENRES/MOVIE_GENRES (id/name/color) ← NEW
+    │   ├── anime.ts                    ← isAnimeByGenresAndLanguage() heuristic (Animation genre + `ja`)
     │   ├── badges.ts                   ← badge metadata constants
     │   ├── notifications.ts            ← expo push token fetcher
+    │   ├── socialAuth.ts               ← Google/Apple native sign-in → backend token exchange ← NEW (Phase 27)
+    │   ├── warmup.ts                   ← waitForBackend() — Render free-tier cold-start poll ← NEW (Phase 69)
+    │   ├── navigation.ts               ← goBack() helper with Home-tab fallback
+    │   ├── widgetPayload.ts            ← buildWidgetPayload() — single definition of home-screen widget data
     │   └── migration.ts               ← TV Time import (enqueue + poll) + Glix export
     └── widgets/
         ├── android/
@@ -293,6 +355,7 @@ watchtracker/                           ← project root
 | GET | `/api/shows/<id>/watch-providers/` | WatchProvidersView | |
 | GET | `/api/shows/<id>/recommendations/` | ShowRecommendationsView | |
 | GET/POST | `/api/comments/` | CommentListCreateView | |
+| **NEW (Phase 75.6)** GET | `/api/comments/feed/` | CommentFeedView | One paginated feed of recent comments across the viewer's tracked shows — replaced Discussions' old 8-parallel-request client-side fan-out |
 | GET/POST | `/api/comments/<id>/replies/` | CommentReplyListCreateView | |
 | GET/PATCH/DELETE | `/api/comments/<id>/` | CommentDetailView | |
 | POST | `/api/comments/<id>/like/` | CommentLikeToggleView | |
@@ -317,6 +380,21 @@ watchtracker/                           ← project root
 | **NEW (Phase 70)** POST | `/api/lists/items/toggle/` | CustomListItemToggleView | Presence-based add/remove of a `{media_type, tmdb_id}` item to/from a list, same pattern as WatchStateToggleView |
 | **NEW (Phase 70)** GET | `/api/lists/membership/?media_type=&tmdb_id=` | CustomListMembershipView | Which of the user's lists already contain this item — powers AddToListSheet's checkmarks |
 | **NEW (Phase 71)** GET | `/api/recommendations/for-you/` | ForYouRecommendationsView | Cross-library personalized recs — seeds from the user's own top-watched shows/movies, merges TMDB's per-title `/recommendations` across seeds, ranks by cross-seed frequency. Excludes already-tracked titles. Cached 6h per user (no signal invalidation — staleness has no correctness cost here, unlike the watchlist cache) |
+| **NEW (Phase L/52)** GET | `/api/reviews/shows/` / `/api/reviews/movies/` | ShowReviewListView / MovieReviewListView | Paginated list of the caller's own reviews |
+| **NEW (Phase L/52)** GET/POST/DELETE | `/api/reviews/shows/<tmdb_id>/` / `/api/reviews/movies/<tmdb_id>/` | ShowReviewView / MovieReviewView | POST upserts (`update_or_create`); half-star `Decimal` rating (Phase 74). **Phase 75:** POST 403s unless ≥1 episode (or the movie) is marked watched — DELETE stays ungated |
+| **NEW (Phase 70)** GET/POST | `/api/lists/` | CustomListsView | User-created lists ("Movies2026", etc — distinct from Watchlist/MovieWatchlist). GET returns item_count + up to 4 cover posters per list in O(1) queries; POST quick-creates by name |
+| **NEW (Phase 70)** GET/PATCH/DELETE | `/api/lists/<id>/` | CustomListDetailView | List metadata + full items (GET), rename/description/privacy (PATCH), delete (DELETE) |
+| **NEW (Phase 70)** POST | `/api/lists/items/toggle/` | CustomListItemToggleView | Presence-based add/remove of a `{media_type, tmdb_id}` item to/from a list |
+| **NEW (Phase 70)** GET | `/api/lists/membership/?media_type=&tmdb_id=` | CustomListMembershipView | Which of the user's lists already contain this item |
+| **NEW (Phase 74)** GET | `/api/users/search/` | UserSearchView | Ranked user search — `is_following` annotation, private accounts excluded |
+| **NEW (Phase 74)** POST | `/api/users/<username>/follow/` | FollowToggleView | Single presence-toggle endpoint (no separate follow/unfollow); self-follow → 400; nonexistent-or-private target → 404 (deliberately indistinguishable). **Phase 75:** `is_self` added to the response edge shape, fixing a confirmed 400 when your own row rendered a tappable "Follow" button |
+| **NEW (Phase 74)** GET | `/api/users/<username>/followers/` / `/api/users/<username>/following/` | FollowerListView / FollowingListView | |
+| **NEW (Phase 74)** GET | `/api/users/<username>/` | UserProfileDetailView | Public profile blob, cached 300s; viewer-relative `is_self`/`is_following`/`follows_you` always computed fresh |
+| **NEW (Phase 74)** GET | `/api/feed/activity/` | FriendsActivityView | 14-day read-time fan-in over followees' activity. **Phase 75:** rewritten from a `WatchState`/`MovieWatchState` union to real `ShowReview`/`MovieReview` rows (Activity now shows what someone thought, not just that they watched something); fixed a confirmed cache-key bug where every page returned page 1's payload for the full TTL |
+| **NEW (Phase 75.7)** GET/DELETE | `/api/rewatch/shows/<tmdb_id>/` | ShowRewatchDetailView | GET the active round + its watched episode ids; DELETE cancels the round |
+| **NEW (Phase 75.7)** POST | `/api/rewatch/shows/<tmdb_id>/start/` | ShowRewatchStartView | 400 unless every aired episode is already watched and no round is already active; `round_number = max(existing) + 1`, starting at 2 |
+| **NEW (Phase 75.7)** POST | `/api/rewatch/episodes/<episode_tmdb_id>/toggle/` | RewatchEpisodeToggleView | Presence toggle within the active round; `±runtime_minutes` on both time-watched counters; stamps `completed_at` when the round covers every aired episode |
+| **NEW (Phase 75.7)** POST/DELETE | `/api/rewatch/movies/<tmdb_id>/` | MovieRewatchCreateView | +1 row / removes the most recent row |
 
 ---
 
@@ -324,24 +402,29 @@ watchtracker/                           ← project root
 
 | Model | Key Fields | Notes |
 |-------|-----------|-------|
-| `UserProfile` | user (1:1), profile_picture, total_time_watched, earned_badges[] | Auto-created by signal |
+| `UserProfile` | user (1:1), profile_picture, total_time_watched, earned_badges[], **`is_private`** (NEW Phase 74), **`total_rewatch_time_watched`** (NEW Phase 75) | Auto-created by signal. `is_private`: "ghost mode" — excludes from search/activity/public profile. `total_rewatch_time_watched` is a subset already counted in `total_time_watched` |
 | `SocialAccount` (NEW) | user (FK), provider (google/apple), provider_user_id, email, created_at | Links a User to a verified Google/Apple identity (Phase 27). Unique on (provider, provider_user_id) — the stable `sub` claim, never the email |
-| `CachedShow` | tmdb_id (PK), title, poster_path, backdrop_path, status, vote_average, total_seasons, genres[], `next_episode_air_date`/`next_episode_season_number`/`next_episode_number`/`next_episode_name` (Phase 15), **`original_language`** (NEW Phase 29) | 12h staleness TTL. `next_episode_*` from TMDB's `next_episode_to_air`, populated even before that season's individual episodes are cached. `original_language`: ISO 639-1 from TMDB, blank on rows cached before Phase 29 until next refresh |
-| `CachedEpisode` | tmdb_id (PK), show (FK), season_number, episode_number, air_date, runtime_minutes | |
+| `CachedShow` | tmdb_id (PK), title, poster_path, backdrop_path, status, vote_average, total_seasons, genres[], `next_episode_air_date`/`next_episode_season_number`/`next_episode_number`/`next_episode_name` (Phase 15), `original_language` (Phase 29), `airs_time`/`airs_timezone`/`airtime_checked_at` (Phase 73), **`tvmaze_id`/`next_episode_air_datetime`** (NEW Phase 75) | 12h staleness TTL. `airs_time`/`airs_timezone`: TVmaze-sourced broadcast slot (TMDB has no time-of-day). `tvmaze_id` caches the show-level lookup so the per-episode airstamp fetch doesn't repeat it |
+| `CachedEpisode` | tmdb_id (PK), show (FK), season_number, episode_number, air_date, runtime_minutes, `notified_at` (Phase 73), **`air_datetime`** (NEW Phase 75) | `air_datetime`: exact UTC instant from TVmaze's per-episode `airstamp` — fixes missing release times on slot-less streaming shows |
 | `Watchlist` | user, show, progress_percentage, watched_episode_count, **ignore_catchup** (NEW) | `ignore_catchup`: "Never for this show" Catch-Up modal preference |
 | `WatchState` | user, episode, watched_at | Presence-based; toggle creates/deletes. `watched_at` is `default=timezone.now` (NOT `auto_now_add`) so a TV Time import can backfill the real historical date; serializer pins it read-only |
 | `EpisodeInteraction` | user, episode, emotion_emoji, mvp_character_id, mvp_character_name | |
 | `Comment` | user, show, episode, body, spoiler_tag, soft-deleted | |
 | `CommentLike` | user, comment | |
 | `CommentReport` | reporter, comment, reason, status | |
+| `ShowReview` / `MovieReview` (NEW Phase L/52) | user, show/movie, `rating` (Decimal, half-star 0.5–5.0, `CheckConstraint`, Phase 74), note | Private-by-default. `UniqueConstraint(user, show)`/`(user, movie)`, POST upserts. **Phase 75:** POST gated on having watched (≥1 episode / the movie) |
+| `Follow` (NEW Phase 74) | follower (FK), following (FK) | Presence-based follow edge (mirrors `CommentLike`/`WatchState`) — deliberately no `status`/request-approve flow. `UniqueConstraint(follower, following)` + a self-follow `CheckConstraint` |
 | `WatchStreak` | user (1:1), current_streak, longest_streak, total_streak_days | |
 | `NotificationPreference` | user (1:1), push_token, notify_new_episode, notify_weekly_digest | |
 | `MovieCache` | tmdb_id (PK), title, poster_path, backdrop_path, release_date, runtime_minutes, genres_string, vote_average, **`original_language`** (NEW Phase 29) | `original_language`: ISO 639-1 from TMDB, blank on rows cached before Phase 29 until next refresh |
 | `MovieWatchState` | user, movie, watched_at | Presence-based; `watched_at` is `default=timezone.now`, same reason as `WatchState` |
 | `MovieWatchlist` | user, movie, added_at | |
-| `ImportJob` (NEW) | user, status, payload, total, processed, shows_imported/skipped, movies_imported/skipped, episodes_marked, errors, detail, finished_at | One TV Time import run. `payload` stages the normalised export (cleared on finish) — a full export is ~3MB, too big for a Celery arg. Polled by `ImportJobStatusView` |
+| `ImportJob` (NEW) | user, status, payload, `payload_fingerprint` (sha256, Phase 72), total, processed, shows_imported/skipped, movies_imported/skipped, episodes_marked, errors, detail, finished_at | One TV Time import run. `payload` stages the normalised export (cleared on finish) — a full export is ~3MB, too big for a Celery arg. Polled by `ImportJobStatusView` |
 | `CustomList` (NEW Phase 70) | user, name, description, is_private, created_at, updated_at | User-created list, e.g. "Movies2026" — distinct from Watchlist/MovieWatchlist's built-in "want to watch" trackers |
 | `CustomListItem` (NEW Phase 70) | list (FK), media_type (tv/movie), tmdb_id, added_at | Stores tmdb_id directly, not a DB FK to CachedShow/MovieCache — no contenttypes/GenericForeignKey precedent in this codebase; safe because those cache rows are only ever `update_or_create`'d, never deleted, and the only entry point (a detail screen) already forces the row to exist. `unique_together(list, media_type, tmdb_id)` |
+| `ShowRewatch` (NEW Phase 75.7) | user, show, round_number, started_at, completed_at (nullable) | A rewatch "round," parallel to `WatchState` by design (not a change to its `UNIQUE(user, episode)`, which is load-bearing across badges/analytics/the "already watched" check). `round_number` starts at 2 (round 1 = the original watch-through). `UniqueConstraint(user, show, round_number)` |
+| `RewatchEpisodeState` (NEW Phase 75.7) | rewatch (FK), episode, watched_at | Presence-based per-episode tick scoped to one round. `UniqueConstraint(rewatch, episode)` |
+| `MovieRewatch` (NEW Phase 75.7) | user, movie, watched_at | Append-only (no unique constraint) — a rewatch is a real repeatable event, undone by deleting the most recent row |
 
 ---
 
@@ -420,9 +503,13 @@ vote quality:
 - `addMovieToWatchlist(movieId)` — **CHANGED**, now returns `Promise<boolean>` (was `void`) for the same route-on-success reason.
 - `hasPreviousUnwatched`/`hasPreviousUnwatchedForSeason` — **REMOVED (Phase 17)**. Replaced by a server call (`POST /watch-state/catchup-check/`) made directly from `lib/useCatchupCascade.ts` — see the Phase 17 section below.
 - `setCatchupPreference(showId, ignoreCatchup)` — **NEW**, calls `/watchlist/catchup-preference/`, optimistic across all 3 buckets.
-- `preferredLayout: 'list' | 'grid'` — **NEW (Phase 13)**, persisted. Drives the global List/Grid toggle across all 4 primary media lists (Shows Hub, Movies Hub, Profile > My Shows/My Movies).
-- `toggleLayout()` — **NEW (Phase 13)** — flips `preferredLayout` between `'list'` and `'grid'`.
+- `preferredLayout`/`toggleLayout()` — **REMOVED/REPLACED (Phase 75.5)** — see `defaultLayout`/`layoutOverrides`/`useLayoutFor()` below.
+- `defaultLayout: 'list' | 'grid'` — **NEW (Phase 75.5)**, persisted, Settings-owned. `layoutOverrides: Partial<Record<'shows'|'movies'|'myShows'|'myMovies'|'myAnime', 'list'|'grid'>>` — persisted, per-screen. `setDefaultLayout(mode)` sets the default **and clears every override**; `setLayoutForScope(scope, mode)` sets one screen's override. `useLayoutFor(scope)` selector returns `layoutOverrides[scope] ?? defaultLayout`. Persist `version` bumped with a `migrate` step seeding `defaultLayout` from any pre-existing `preferredLayout`.
 - `updateProfilePicture(url)` — **NEW (Phase 14)** — optimistic PATCH `/profile/` with `{profile_picture: url}`; reverts `profile` on failure. Backs the new Profile avatar picker.
+- `activeRewatch` on `WatchlistEntry` / `rewatch_count` on `MovieWatchlistItem` — **NEW (Phase 75.7)** — mirror the serializer additions of the same name.
+- `showRewatchDetail` + `fetchShowRewatchDetail()`/`startShowRewatch()`/`cancelShowRewatch()`/`toggleRewatchEpisode()`/`addMovieRewatch()`/`removeMovieRewatch()` — **NEW (Phase 75.7)** — wrap the `/api/rewatch/*` endpoints; episode toggle mirrors `toggleWatchState`'s optimistic-then-reconcile pattern but writes `RewatchEpisodeState` instead of `WatchState` while a round is active.
+- `analyticsDirtyAt` — **NEW (Phase 75.8)** — bumped in `fetchProfile()`; `analytics.tsx`/`profile.tsx` gate their focus-effect refetch batches on this instead of refetching unconditionally on every focus.
+- `Episode.air_datetime` / `Show.next_episode_air_datetime` — **NEW (Phase 75.1)** — mirror the new `CachedEpisode`/`CachedShow` serializer fields, feeding `resolveAirInstant()`.
 
 ### discoverStore.ts (in-memory, NOT persisted)
 - `activeSegment: 'tv' | 'movie'`
@@ -448,6 +535,14 @@ Mirrors `discoverStore.ts`'s "kept separate to avoid polluting the persisted sli
 - `toggleListItem(listId, mediaType, tmdbId)` — optimistic add/remove, same snapshot-then-rollback-on-error convention as `watchStore.ts`
 
 Also new on `watchStore.ts` (Phase 70): `resyncStats()` / `isResyncingStats` — calls `POST /profile/resync-stats/`, updates `profile.total_time_watched` from the verified recomputed value. Backs the Profile Hub's tap-to-sync stat cards.
+
+### socialStore.ts (in-memory, NOT persisted) — NEW (Phase 74)
+Mirrors `discoverStore.ts`'s/`listsStore.ts`'s "nothing here is worth surviving an app restart offline" precedent.
+- `searchResults[]` / `isSearching` — `GET /users/search/`
+- `activityFeed[]` / `isLoadingActivity` / `hasMoreActivity` — paginated friends activity feed (`GET /feed/activity/`); **Phase 75:** cards are now review shapes (`{type:'review', media_type, tmdb_id, title, poster_path, rating, note, user, updated_at}`), not watch-history shapes
+- `viewedProfile` / `isLoadingProfile` — a public profile blob + its followers/following lists, backing `user/[username].tsx`/`connections.tsx`
+- `toggleFollow(username)` — presence toggle against `POST /users/<username>/follow/`, optimistic
+- `PublicUser`/`FollowEdge` types gained `is_self?: boolean` (Phase 75) — fixes a confirmed bug where your own row in a followers/following list rendered a tappable "Follow" button that 400s
 
 ---
 

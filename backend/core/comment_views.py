@@ -19,7 +19,7 @@ from rest_framework.views import APIView
 
 from core.comment_permissions import IsCommentOwnerOrReadOnly, IsStaffUser
 from core.comment_serializers import CommentReportSerializer, CommentSerializer
-from core.models import Comment, CommentLike, CommentReport
+from core.models import Comment, CommentLike, CommentReport, Watchlist
 from core.pagination import StandardResultsPagination
 
 
@@ -72,6 +72,29 @@ class CommentListCreateView(CommentQuerysetMixin, generics.ListCreateAPIView):
 
     def perform_create(self, serializer):
         serializer.save(user=self.request.user, parent=None)
+
+
+class CommentFeedView(CommentQuerysetMixin, generics.ListAPIView):
+    """
+    GET /api/comments/feed/ — top-level comments across every show the
+    requesting user tracks, most recent first.
+
+    Replaces community.tsx's Discussions tab fan-out (Phase 74: up to 8
+    parallel GET /comments/?show_id=<id> requests, one per tracked show,
+    merged client-side) with one paginated query here — a bounded IN()
+    subquery over the user's own Watchlist rows, same annotated_queryset
+    every other comment list already uses, so this costs one query instead
+    of eight separate round trips (and eight separate throttle checks).
+    """
+
+    serializer_class = CommentSerializer
+    permission_classes = [IsAuthenticated]
+    pagination_class = StandardResultsPagination
+
+    def get_queryset(self):
+        show_ids = Watchlist.objects.filter(user=self.request.user).values("show_id")
+        queryset = Comment.objects.filter(parent__isnull=True, show_id__in=show_ids)
+        return self.annotated_queryset(queryset).order_by("-created_at")
 
 
 class CommentReplyListCreateView(CommentQuerysetMixin, generics.ListCreateAPIView):

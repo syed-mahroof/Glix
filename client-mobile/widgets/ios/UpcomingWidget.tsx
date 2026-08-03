@@ -5,24 +5,28 @@ import type { WidgetEnvironment } from 'expo-widgets';
 import { VStack, HStack, Text, Image, Spacer } from '@expo/ui/swift-ui';
 import { background, font, foregroundColor, lineLimit, padding } from '@expo/ui/swift-ui/modifiers';
 import {
-  airDateTimeInstant,
-  formatCountdown,
   formatDayBadge,
   formatLocalAirTime,
   formatUpcomingHeaderLabel,
+  resolveDisplayDateIso,
 } from '../../lib/dateFormat';
 
 export interface UpcomingWidgetShow {
   title: string;
   next_episode: string;
   air_date: string;
+  /** Exact UTC instant, from CachedEpisode.air_datetime /
+   *  CachedShow.next_episode_air_datetime — preferred over airs_time/
+   *  airs_timezone below when present. Absent for episodes TVmaze hasn't
+   *  matched yet and on pre-existing cached snapshots. */
+  air_datetime?: string | null;
   poster_path: string | null;
   /** The show's broadcast slot — wall clock ("21:30") and its IANA zone,
    *  from TVmaze via the backend. Raw rather than a formatted string on
-   *  purpose: the countdown and clock time are resolved at render against
-   *  the live clock (see rowTiming), so a WidgetKit timeline entry
-   *  generated long after the last app sync is still correct. Absent for
-   *  shows with no fixed slot and on pre-existing cached snapshots. */
+   *  purpose: the clock time is resolved at render against the live clock,
+   *  so a WidgetKit timeline entry generated long after the last app sync
+   *  is still correct. Absent for shows with no fixed slot and on
+   *  pre-existing cached snapshots. */
   airs_time?: string | null;
   airs_timezone?: string | null;
 }
@@ -52,32 +56,20 @@ const NullState = ({ upcoming, loggedOut }: UpcomingWidgetProps) => {
   );
 };
 
-/** Countdown + clock time for one row, resolved against `now` at render
- *  rather than at sync time — a WidgetKit timeline entry can be rendered
- *  well after the app last ran, so a baked-in duration would be stale.
- *  Mirrors the Android widget's rowTiming exactly. The countdown targets
- *  the real air instant when the show has a known slot, local midnight
- *  otherwise. */
-function rowTiming(show: UpcomingWidgetShow, now: Date) {
-  const instant = airDateTimeInstant(show.air_date, show.airs_time, show.airs_timezone);
-  const { formatted, dayOfWeek } = formatCountdown(
-    instant ?? new Date(`${show.air_date}T00:00:00`),
-    now
-  );
-  return {
-    countdown: `${formatted} (${dayOfWeek})`,
-    airTime: formatLocalAirTime(show.air_date, show.airs_time, show.airs_timezone),
-  };
-}
-
 // Flat rows on the widget's own black ground — no nested card fill, border
 // or inset margins, which is what produced the boxed-in look and the dead
 // gap along the right edge. The day count stays as the big right-aligned
 // number, matching the Android widget exactly.
+//
+// No countdown text here anymore — a WidgetKit timeline entry is rendered
+// well after the app last ran and never re-renders live, so a static
+// countdown was stale the instant it appeared. The day badge plus the
+// resolved local air time are the whole release-time line now.
 function UpcomingRowView({ show, compact }: { show: UpcomingWidgetShow; compact?: boolean }) {
   const now = new Date();
-  const dayBadge = formatDayBadge(show.air_date, now);
-  const { countdown, airTime } = rowTiming(show, now);
+  const displayDateIso = resolveDisplayDateIso(show.air_date, show.air_datetime, show.airs_time, show.airs_timezone);
+  const dayBadge = formatDayBadge(displayDateIso, now);
+  const airTime = formatLocalAirTime(show.air_date, show.air_datetime, show.airs_time, show.airs_timezone);
   return (
     <HStack alignment="center" spacing={10} modifiers={[padding({ vertical: compact ? 4 : 6 })]}>
       {/* @expo/ui's SwiftUI `Image` bridge (installed ~0.2.0-beta.9) only
@@ -100,7 +92,7 @@ function UpcomingRowView({ show, compact }: { show: UpcomingWidgetShow; compact?
         <Text
           modifiers={[foregroundColor('rgba(255, 255, 255, 0.55)'), font({ size: compact ? 11 : 12 }), lineLimit(1)]}
         >
-          {compact ? show.next_episode : `${show.next_episode} • ${countdown}`}
+          {show.next_episode}
         </Text>
       </VStack>
       <Spacer />
@@ -170,15 +162,25 @@ function Layout(props: UpcomingWidgetProps, environment: WidgetEnvironment) {
   const visible = shows.slice(0, maxRows);
 
   // Group by day so two shows releasing on the same date sit under one
-  // label instead of each repeating its own countdown.
+  // label instead of each repeating its own countdown. Labels are computed
+  // once per visible row (visible is already capped to maxRows, but there's
+  // no reason to re-scan it once per label boundary either).
   const now = new Date();
+  const labels = visible.map((show) =>
+    formatUpcomingHeaderLabel(
+      resolveDisplayDateIso(show.air_date, show.air_datetime, show.airs_time, show.airs_timezone),
+      now
+    )
+  );
+  const labelCounts = new Map<string, number>();
+  for (const label of labels) labelCounts.set(label, (labelCounts.get(label) ?? 0) + 1);
+
   const rows: React.ReactNode[] = [];
   let lastLabel: string | null = null;
   visible.forEach((show, idx) => {
-    const label = formatUpcomingHeaderLabel(show.air_date, now);
+    const label = labels[idx];
     if (label !== lastLabel) {
-      const count = visible.filter((s) => formatUpcomingHeaderLabel(s.air_date, now) === label).length;
-      rows.push(<DayLabel key={`head-${label}`} label={label} count={count} />);
+      rows.push(<DayLabel key={`head-${label}`} label={label} count={labelCounts.get(label)!} />);
       lastLabel = label;
     }
     rows.push(<UpcomingRowView key={`${show.title}-${show.air_date}-${idx}`} show={show} compact={compact} />);

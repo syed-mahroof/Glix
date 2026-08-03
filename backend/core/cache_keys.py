@@ -55,8 +55,16 @@ def public_profile_cache_key(user_id) -> str:
 PUBLIC_PROFILE_CACHE_TTL_SECONDS = 300
 
 
-def friends_feed_cache_key(user_id) -> str:
-    return f"friends_feed:{user_id}"
+def friends_feed_cache_key(user_id, page=1) -> str:
+    """
+    `page` is part of the key — it used to not be, which meant every page
+    of FriendsActivityView's paginated response shared one cache slot:
+    whichever page warmed the cache first (always page 1, since that's the
+    first request any client makes) was then served back for every
+    subsequent page too, so infinite scroll just repeated page 1 forever
+    for the rest of the TTL. Each page now gets its own entry.
+    """
+    return f"friends_feed:{user_id}:{page}"
 
 
 # Short — "recent activity from people you follow" being briefly stale is
@@ -86,3 +94,39 @@ def analytics_movies_cache_key(user_id) -> str:
 # is a defense-in-depth backstop, not the primary invalidation mechanism —
 # short is still fine to keep, matching CACHE_TTL_SECONDS's own reasoning.
 ANALYTICS_MOVIES_CACHE_TTL_SECONDS = 300
+
+
+def analytics_dashboard_cache_key(user_id) -> str:
+    return f"analytics_dashboard:{user_id}"
+
+
+# Phase 75.8 — AnalyticsDashboardView was previously uncached despite doing
+# several grouped aggregate queries on every Profile Hub / Analytics tab
+# focus. Invalidated by signals.py's WatchState/MovieWatchState/rewatch
+# receivers; this TTL is the same defense-in-depth backstop as
+# ANALYTICS_MOVIES_CACHE_TTL_SECONDS above.
+ANALYTICS_DASHBOARD_CACHE_TTL_SECONDS = 300
+
+
+def analytics_statistics_cache_key(user_id) -> str:
+    return f"analytics_statistics:{user_id}"
+
+
+# Same reasoning as ANALYTICS_DASHBOARD_CACHE_TTL_SECONDS — this endpoint's
+# daily/weekly/monthly/yearly buckets are the most query-heavy analytics
+# view in the app.
+ANALYTICS_STATISTICS_CACHE_TTL_SECONDS = 300
+
+
+def analytics_monthly_summary_cache_key(user_id, year) -> str:
+    return f"analytics_monthly_summary:{user_id}:{year}"
+
+
+# Longer than the two above — a past year's summary essentially never
+# changes once that year is over, and even the current year's cached copy
+# only needs to catch up eventually, not immediately, the way a live
+# dashboard total does. Only the current year's key is signal-busted (see
+# signals.py) — a backfilled watch dated into a past year (e.g. a TV Time
+# import) leaves that past year's cache to this TTL instead, which is fine:
+# nobody is staring at last year's recap waiting for a single import to land.
+ANALYTICS_MONTHLY_SUMMARY_CACHE_TTL_SECONDS = 900

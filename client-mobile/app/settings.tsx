@@ -6,7 +6,7 @@
 import axios from 'axios';
 import { useRouter } from 'expo-router';
 import * as SecureStore from 'expo-secure-store';
-import { ArrowLeft, ChevronRight, LogOut, Monitor, Moon, Sun } from 'lucide-react-native';
+import { ArrowLeft, ChevronRight, LayoutGrid, LogOut, Monitor, Moon, Sun } from 'lucide-react-native';
 import React, { useEffect, useMemo, useState } from 'react';
 import { Alert, ScrollView, StyleSheet, Switch, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -19,7 +19,7 @@ import { SegmentedControl } from '../components/SegmentedControl';
 import { api, API_BASE_URL } from '../lib/api';
 import { useAppTheme } from '../lib/theme';
 import type { ThemePreference } from '../store/themeStore';
-import { useWatchStore } from '../store/watchStore';
+import { LayoutMode, useWatchStore } from '../store/watchStore';
 
 function SwitchRow({
   label,
@@ -52,6 +52,11 @@ const APPEARANCE_OPTIONS: { value: ThemePreference; label: string }[] = [
   { value: 'dark', label: 'Dark' },
 ];
 
+const LAYOUT_OPTIONS: { value: LayoutMode; label: string }[] = [
+  { value: 'list', label: 'List' },
+  { value: 'grid', label: 'Grid' },
+];
+
 export default function SettingsScreen() {
   const router = useRouter();
   const { theme, name, preference, setPreference } = useAppTheme();
@@ -60,6 +65,8 @@ export default function SettingsScreen() {
   const updateProfilePicture = useWatchStore((state) => state.updateProfilePicture);
   const updateUsername = useWatchStore((state) => state.updateUsername);
   const updateIsPrivate = useWatchStore((state) => state.updateIsPrivate);
+  const defaultLayout = useWatchStore((state) => state.defaultLayout);
+  const setDefaultLayout = useWatchStore((state) => state.setDefaultLayout);
   const [notifyNewEpisode, setNotifyNewEpisode] = useState(true);
   const [notifyWeeklyDigest, setNotifyWeeklyDigest] = useState(false);
   const [isLoggingOut, setIsLoggingOut] = useState(false);
@@ -161,6 +168,20 @@ export default function SettingsScreen() {
           />
           <Text style={[styles.appearanceHint, { color: c.textTertiary }]}>
             System follows your phone's appearance and updates live if it changes.
+          </Text>
+
+          <View style={[styles.appearanceLabelRow, styles.defaultLayoutLabelRow]}>
+            <LayoutGrid color={c.accentInk} size={16} />
+            <Text style={[styles.rowLabel, { color: c.textPrimary }]}>Default layout</Text>
+          </View>
+          <SegmentedControl
+            segments={LAYOUT_OPTIONS}
+            selectedValue={defaultLayout}
+            onValueChange={setDefaultLayout}
+          />
+          <Text style={[styles.appearanceHint, { color: c.textTertiary }]}>
+            Applies to Shows, Movies, and every My Shows/My Movies/My Anime list. A screen you've
+            switched manually keeps its own choice until you change this again.
           </Text>
         </View>
 
@@ -315,6 +336,9 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: 8,
+  },
+  defaultLayoutLabelRow: {
+    marginTop: 4,
   },
   appearanceHint: {
     fontSize: 12,

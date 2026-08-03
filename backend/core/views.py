@@ -28,6 +28,8 @@ from core.models import (
     MovieCache,
     MovieWatchlist,
     MovieWatchState,
+    RewatchEpisodeState,
+    ShowRewatch,
     UserProfile,
     Watchlist,
     WatchState,
@@ -422,33 +424,11 @@ class WatchlistView(APIView):
 
         today = timezone.now().date()
 
-        entries = (
+        entries = list(
             Watchlist.objects.filter(user=request.user)
             .select_related("show")
-            .annotate(
-                aired_count=Count(
-                    "show__episodes",
-                    filter=Q(show__episodes__air_date__lte=today),
-                    distinct=True,
-                ),
-                watched_count=Count(
-                    "show__episodes__watch_states",
-                    filter=Q(show__episodes__watch_states__user=request.user),
-                    distinct=True,
-                ),
-                # Most recent watch across this show's episodes for THIS user.
-                # Drives the recency-aware sort of the Shows Hub pills:
-                # "Haven't Watched For A While" = behind + oldest last-watch
-                # first; "Watch History" = most recent first.
-                last_watched_at=Max(
-                    "show__episodes__watch_states__watched_at",
-                    filter=Q(show__episodes__watch_states__user=request.user),
-                ),
-            )
             .order_by("-updated_at")
         )
-
-        entries = list(entries)
 
         # Episodes for the whole response in two flat queries, as plain
         # dicts — never as model instances.
@@ -467,6 +447,43 @@ class WatchlistView(APIView):
         # queries and a dict-building loop are O(episodes) with a tiny
         # constant instead.
         show_ids = [entry.show_id for entry in entries]
+
+        # aired_count/watched_count/last_watched_at (Phase 75.8): two flat
+        # grouped queries attached onto each entry in Python, not one
+        # queryset annotated with Count(..., distinct=True) over two
+        # different relations (show__episodes vs
+        # show__episodes__watch_states) off the same Watchlist row — that
+        # shape joins both relations before Postgres can dedupe, exploding
+        # into aired-count × watched-count intermediate rows per show
+        # before the DISTINCT collapses it back down. watched_count and
+        # last_watched_at share the same WatchState join, so one grouped
+        # query gives both together.
+        aired_counts: dict[int, int] = {}
+        watched_counts: dict[int, int] = {}
+        last_watched_map: dict[int, object] = {}
+        if show_ids:
+            aired_counts = dict(
+                CachedEpisode.objects.filter(show_id__in=show_ids, air_date__lte=today)
+                .values("show_id")
+                # CachedEpisode's primary key is `tmdb_id`, not `id` —
+                # Count("id") raises FieldError on this model. Count("pk")
+                # is PK-name-agnostic.
+                .annotate(c=Count("pk"))
+                .values_list("show_id", "c")
+            )
+            for row in (
+                WatchState.objects.filter(user=request.user, episode__show_id__in=show_ids)
+                .values("episode__show_id")
+                .annotate(c=Count("id"), last=Max("watched_at"))
+            ):
+                watched_counts[row["episode__show_id"]] = row["c"]
+                last_watched_map[row["episode__show_id"]] = row["last"]
+
+        for entry in entries:
+            entry.aired_count = aired_counts.get(entry.show_id, 0)
+            entry.watched_count = watched_counts.get(entry.show_id, 0)
+            entry.last_watched_at = last_watched_map.get(entry.show_id)
+
         episodes_by_show: dict[int, list] = {show_id: [] for show_id in show_ids}
         if show_ids:
             watched_episode_ids = set(
@@ -486,6 +503,7 @@ class WatchlistView(APIView):
                 episode_number,
                 title,
                 air_date,
+                air_datetime,
                 runtime_minutes,
             ) in episode_rows.iterator(chunk_size=2000):
                 episodes_by_show[show_id].append(
@@ -496,12 +514,42 @@ class WatchlistView(APIView):
                         "episode_number": episode_number,
                         "title": title,
                         "air_date": air_date.isoformat() if air_date else None,
+                        "air_datetime": air_datetime.isoformat() if air_datetime else None,
                         "runtime_minutes": runtime_minutes,
                         "is_watched": tmdb_id in watched_episode_ids,
                     }
                 )
 
-        serializer_context = {"request": request, "episodes_by_show": episodes_by_show}
+        # Active rewatch round per show, two flat queries — same technique
+        # as episodes_by_show above, not a per-row query or a Prefetch (a
+        # Prefetch here would instantiate a ShowRewatch + N RewatchEpisodeState
+        # model objects per tracked show just to read two integers back out).
+        active_rewatch_by_show: dict[int, dict] = {}
+        if show_ids:
+            active_rewatches = list(
+                ShowRewatch.objects.filter(
+                    user=request.user, show_id__in=show_ids, completed_at__isnull=True
+                ).values("id", "show_id", "round_number")
+            )
+            if active_rewatches:
+                rewatch_ids = [r["id"] for r in active_rewatches]
+                watched_counts = dict(
+                    RewatchEpisodeState.objects.filter(rewatch_id__in=rewatch_ids)
+                    .values("rewatch_id")
+                    .annotate(c=Count("id"))
+                    .values_list("rewatch_id", "c")
+                )
+                for r in active_rewatches:
+                    active_rewatch_by_show[r["show_id"]] = {
+                        "round_number": r["round_number"],
+                        "watched_episode_count": watched_counts.get(r["id"], 0),
+                    }
+
+        serializer_context = {
+            "request": request,
+            "episodes_by_show": episodes_by_show,
+            "active_rewatch_by_show": active_rewatch_by_show,
+        }
 
         buckets = {"to_watch": [], "up_to_date": [], "archived": []}
 
@@ -738,10 +786,15 @@ class BulkWatchStateToggleView(APIView):
                     UserProfile.objects.filter(pk=profile.pk).update(
                         total_time_watched=F("total_time_watched") + runtime_delta
                     )
-                    # Auto-add to watchlist if not already tracked
+                    # Auto-add to watchlist if not already tracked. One
+                    # query for every show in the batch (in_bulk), not one
+                    # CachedShow.objects.get() per distinct show — a Cascade
+                    # Catch-Up spanning many shows turned this into an N+1
+                    # (Phase 75.8).
                     show_ids = set(ep.show_id for ep in to_create)
+                    shows_by_id = CachedShow.objects.in_bulk(show_ids)
                     for show_id in show_ids:
-                        show = CachedShow.objects.get(pk=show_id)
+                        show = shows_by_id[show_id]
                         Watchlist.objects.get_or_create(
                             user=request.user,
                             show=show,
@@ -1221,6 +1274,52 @@ class ContinueWatchingView(APIView):
     def get(self, request):
         today = timezone.now().date()
 
+        # Which shows qualify ("started but not finished") and how they
+        # rank, via two flat grouped queries (Phase 75.8) — not one
+        # queryset annotated with two Count(..., distinct=True) over
+        # different relations (show__episodes vs
+        # show__episodes__watch_states) off the same Watchlist row; see
+        # WatchlistView's identical fix for the full cartesian-join
+        # reasoning. Cheap even across the user's whole active library:
+        # this is show-level aggregation, not per-episode.
+        show_ids = list(
+            Watchlist.objects.filter(user=request.user)
+            .exclude(status=Watchlist.Status.ARCHIVED)
+            .values_list("show_id", flat=True)
+        )
+
+        aired_counts: dict[int, int] = {}
+        watched_counts: dict[int, int] = {}
+        last_watched_map: dict[int, object] = {}
+        if show_ids:
+            aired_counts = dict(
+                CachedEpisode.objects.filter(show_id__in=show_ids, air_date__lte=today)
+                .values("show_id")
+                # CachedEpisode's primary key is `tmdb_id`, not `id` —
+                # Count("id") raises FieldError on this model. Count("pk")
+                # is PK-name-agnostic.
+                .annotate(c=Count("pk"))
+                .values_list("show_id", "c")
+            )
+            for row in (
+                WatchState.objects.filter(user=request.user, episode__show_id__in=show_ids)
+                .values("episode__show_id")
+                .annotate(c=Count("id"), last=Max("watched_at"))
+            ):
+                watched_counts[row["episode__show_id"]] = row["c"]
+                last_watched_map[row["episode__show_id"]] = row["last"]
+
+        qualifying = [
+            show_id
+            for show_id in show_ids
+            if watched_counts.get(show_id, 0) > 0
+            and aired_counts.get(show_id, 0) > watched_counts.get(show_id, 0)
+        ]
+        qualifying.sort(key=lambda show_id: last_watched_map[show_id], reverse=True)
+        top_show_ids = qualifying[: self.RESULT_LIMIT]
+
+        # Episode/watch-state prefetch only runs for the (at most 10) shows
+        # that actually made the cut, not the user's whole active library.
         watch_state_prefetch = Prefetch(
             "watch_states",
             queryset=WatchState.objects.filter(user=request.user),
@@ -1232,34 +1331,19 @@ class ContinueWatchingView(APIView):
                 "season_number", "episode_number"
             ),
         )
-
-        entries = (
-            Watchlist.objects.filter(user=request.user)
-            .exclude(status=Watchlist.Status.ARCHIVED)
-            .select_related("show")
-            .prefetch_related(episode_prefetch)
-            .annotate(
-                aired_count=Count(
-                    "show__episodes",
-                    filter=Q(show__episodes__air_date__lte=today),
-                    distinct=True,
-                ),
-                watched_count=Count(
-                    "show__episodes__watch_states",
-                    filter=Q(show__episodes__watch_states__user=request.user),
-                    distinct=True,
-                ),
-                last_watched_at=Max(
-                    "show__episodes__watch_states__watched_at",
-                    filter=Q(show__episodes__watch_states__user=request.user),
-                ),
-            )
-            .filter(watched_count__gt=0, aired_count__gt=F("watched_count"))
-            .order_by("-last_watched_at")[: self.RESULT_LIMIT]
-        )
+        entries_by_show = {
+            entry.show_id: entry
+            for entry in Watchlist.objects.filter(
+                user=request.user, show_id__in=top_show_ids
+            ).select_related("show").prefetch_related(episode_prefetch)
+        }
 
         payload = []
-        for entry in entries:
+        for show_id in top_show_ids:
+            entry = entries_by_show.get(show_id)
+            if entry is None:
+                continue
+
             next_episode = None
             for episode in entry.show.episodes.all():
                 if not episode.air_date or episode.air_date > today:
@@ -1268,19 +1352,17 @@ class ContinueWatchingView(APIView):
                     next_episode = episode
                     break
 
-            progress = (
-                round((entry.watched_count / entry.aired_count) * 100, 1)
-                if entry.aired_count
-                else 0.0
-            )
+            aired = aired_counts.get(show_id, 0)
+            watched = watched_counts.get(show_id, 0)
+            progress = round((watched / aired) * 100, 1) if aired else 0.0
             payload.append(
                 {
                     "show": entry.show,
                     "next_episode": next_episode,
-                    "watched_episode_count": entry.watched_count,
-                    "aired_episode_count": entry.aired_count,
+                    "watched_episode_count": watched,
+                    "aired_episode_count": aired,
                     "progress_percentage": progress,
-                    "last_watched_at": entry.last_watched_at,
+                    "last_watched_at": last_watched_map.get(show_id),
                 }
             )
 
@@ -1360,7 +1442,12 @@ class MovieWatchlistView(APIView):
         entries = (
             MovieWatchlist.objects.filter(user=request.user)
             .select_related("movie")
-            .annotate(watch_state_watched_at=Subquery(watched_at_subq))
+            .annotate(
+                watch_state_watched_at=Subquery(watched_at_subq),
+                rewatch_count_annotated=Count(
+                    "movie__rewatches", filter=Q(movie__rewatches__user=request.user), distinct=True
+                ),
+            )
             .order_by("-updated_at")
         )
 

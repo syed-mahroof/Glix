@@ -116,8 +116,20 @@ function RootLayoutInner() {
           });
         }
       } catch (error) {
+        // Bug fix (user-reported "sometimes automatically logged out"): this
+        // catch fires on a genuine SecureStore error OR simply when the
+        // 2-second timeout above wins the race — the comment on that race
+        // already documents that SecureStore can be slow to hang on
+        // Android/Expo Go, and a slow read is not proof the user is logged
+        // out. Forcing isAuthenticated=false here redirected a genuinely
+        // logged-in user straight to /login despite their tokens sitting
+        // untouched in SecureStore. Optimistically staying "authenticated"
+        // is safe either way: if there really is no token, the very first
+        // API call 401s and lib/api.ts's own refresh flow finds no refresh
+        // token either, which correctly bounces to /login one round-trip
+        // later instead of on a false positive here.
         console.error('Error during auth check:', error);
-        if (isMounted) setIsAuthenticated(false);
+        if (isMounted) setIsAuthenticated(true);
       } finally {
         if (isMounted) setIsAuthChecked(true);
       }

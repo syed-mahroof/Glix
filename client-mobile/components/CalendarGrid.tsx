@@ -5,7 +5,7 @@ import { ChevronLeft, ChevronRight } from 'lucide-react-native';
 import React, { useMemo, useState } from 'react';
 import { StyleSheet, Text, View } from 'react-native';
 
-import { buildMonthGrid, pad, todayLocalIso } from '../lib/dateFormat';
+import { buildMonthGrid, pad, resolveDisplayDateIso, todayLocalIso } from '../lib/dateFormat';
 import { useAppTheme } from '../lib/theme';
 import type { UpcomingItem } from '../lib/upcoming';
 import PressableScale from './PressableScale';
@@ -41,14 +41,19 @@ export default function CalendarGrid({ items }: CalendarGridProps) {
 
   const monthGrid = useMemo(() => buildMonthGrid(year, month), [year, month]);
 
-  // Group items by their airDate (YYYY-MM-DD)
+  // Grouped by resolved display date, not the raw airDate string — an
+  // episode's true air instant can cross local midnight relative to its
+  // show's own timezone (e.g. a 9 PM America/New_York release is already
+  // the next calendar day in IST), which would otherwise place it under
+  // the wrong day on this grid.
   const itemsByDate = useMemo(() => {
     const map = new Map<string, UpcomingItem[]>();
     for (const item of items) {
-      if (!map.has(item.airDate)) {
-        map.set(item.airDate, []);
+      const isoDate = resolveDisplayDateIso(item.airDate, item.airDateTime, item.airsTime, item.airsTimezone);
+      if (!map.has(isoDate)) {
+        map.set(isoDate, []);
       }
-      map.get(item.airDate)!.push(item);
+      map.get(isoDate)!.push(item);
     }
     return map;
   }, [items]);

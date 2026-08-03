@@ -4,7 +4,8 @@ backend/core/tasks.py
 Celery background jobs. Keep the local TMDB cache warm and consistent
 without blocking any request/response cycle:
 - refresh_show_cache: re-syncs one show + its currently-cached seasons.
-- sync_active_shows: periodic sweep of all RETURNING shows.
+- sync_active_shows: periodic sweep of RETURNING shows plus any other show
+  with a dated future episode still to air.
 - recalculate_user_badges: idempotent badge re-check, a safety net
   alongside the real-time signal in signals.py.
 - recalculate_watch_streak: idempotent streak re-calculation from the
@@ -282,14 +283,33 @@ def send_weekly_digest():
 @shared_task
 def sync_active_shows():
     """
-    Periodic sweep (wire up via Celery beat) that keeps RETURNING
-    shows fresh so upcoming-episode countdowns stay accurate without
-    every user's app triggering a live TMDB call on open.
+    Periodic sweep (wire up via Celery beat) that keeps upcoming-episode
+    data fresh so countdowns stay accurate without every user's app
+    triggering a live TMDB call on open.
+
+    Covers RETURNING shows (the obvious case) plus anything else with a
+    dated future episode still to air: an ENDED or otherwise non-RETURNING
+    show can still have an unaired next_episode_air_date or a CachedEpisode
+    row dated today or later (e.g. a miniseries mid-run, or a status TMDB
+    hasn't updated yet). Those were previously skipped entirely, so their
+    air time was never checked against TVmaze — a real coverage gap, not
+    just a RETURNING-only optimization.
     """
-    active_ids = list(
+    today = timezone.now().date()
+    active_ids = set(
         CachedShow.objects.filter(status=CachedShow.Status.RETURNING).values_list(
             "tmdb_id", flat=True
         )
+    )
+    active_ids.update(
+        CachedShow.objects.filter(next_episode_air_date__gte=today).values_list(
+            "tmdb_id", flat=True
+        )
+    )
+    active_ids.update(
+        CachedEpisode.objects.filter(air_date__gte=today)
+        .values_list("show_id", flat=True)
+        .distinct()
     )
     for tmdb_id in active_ids:
         refresh_show_cache.delay(tmdb_id)

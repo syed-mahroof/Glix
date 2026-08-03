@@ -31,6 +31,11 @@ class DashboardSerializer(serializers.Serializer):
     shows_completed = serializers.IntegerField()
     shows_archived = serializers.IntegerField()
     watch_time = WatchTimeSummarySerializer()
+    # Phase 75.7 — the "Rewatched" tile. A subset already counted inside
+    # total_minutes_watched above, not additional time on top of it; see
+    # UserProfile.total_rewatch_time_watched's own help_text.
+    total_rewatch_minutes_watched = serializers.IntegerField()
+    total_rewatch_hours_watched = serializers.FloatField()
 
 
 class PeriodStatSerializer(serializers.Serializer):

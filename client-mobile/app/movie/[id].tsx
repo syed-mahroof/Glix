@@ -13,6 +13,7 @@ import {
   Clock,
   ListPlus,
   MessageCircle,
+  RotateCcw,
   Share2,
   Star,
   Trash2,
@@ -160,6 +161,9 @@ export default function MovieDetailScreen() {
   const addMovieToWatchlist = useWatchStore((state) => state.addMovieToWatchlist);
   const removeMovieFromWatchlist = useWatchStore((state) => state.removeMovieFromWatchlist);
   const undoRemoveMovie = useWatchStore((state) => state.undoRemoveMovie);
+  const addMovieRewatch = useWatchStore((state) => state.addMovieRewatch);
+  const removeMovieRewatch = useWatchStore((state) => state.removeMovieRewatch);
+  const [isTogglingRewatch, setIsTogglingRewatch] = useState(false);
 
   // The watchlist row for this movie (if tracked) lives in the Zustand
   // store — mirrors show/[id].tsx's watchlistEntry derivation so this
@@ -329,6 +333,25 @@ export default function MovieDetailScreen() {
     if (!ok) {
       setSectionError('Could not update watched status — try again.');
     }
+  };
+
+  /** Rewatch (Phase 75.7) — an append-only counter, not a toggle (see
+   *  MovieRewatch's model docstring); "Undo" removes the most recent tap
+   *  rather than flipping a boolean. Never touches MovieWatchState/isWatched. */
+  const handleWatchAgain = async () => {
+    if (Number.isNaN(tmdbId) || isTogglingRewatch) return;
+    setIsTogglingRewatch(true);
+    const ok = await addMovieRewatch(tmdbId);
+    setIsTogglingRewatch(false);
+    if (!ok) setSectionError('Could not record rewatch — try again.');
+  };
+
+  const handleUndoWatchAgain = async () => {
+    if (Number.isNaN(tmdbId) || isTogglingRewatch) return;
+    setIsTogglingRewatch(true);
+    const ok = await removeMovieRewatch(tmdbId);
+    setIsTogglingRewatch(false);
+    if (!ok) setSectionError('Could not undo rewatch — try again.');
   };
 
   /** Full-delete "Remove from Watchlist" (Phase F) — mirrors show/[id].tsx's
@@ -591,10 +614,45 @@ export default function MovieDetailScreen() {
           </View>
         </View>
 
+        {/* ── Rewatch (Phase 75.7) — only offered once watched ─────────── */}
+        {isWatched && (
+          <View style={[styles.section, styles.rewatchSection]}>
+            <GlassSurface radius={16} style={styles.rewatchCard}>
+              <View style={styles.rewatchTextColumn}>
+                <Text style={[styles.rewatchTitle, { color: c.textPrimary }]}>
+                  {(movieEntry?.rewatch_count ?? 0) > 0
+                    ? `Watched ${1 + (movieEntry?.rewatch_count ?? 0)}×`
+                    : 'Watched it'}
+                </Text>
+                {(movieEntry?.rewatch_count ?? 0) > 0 && (
+                  <PressableScale onPress={handleUndoWatchAgain} disabled={isTogglingRewatch} hitSlop={8}>
+                    <Text style={[styles.rewatchUndoText, { color: c.textTertiary }]}>Undo last rewatch</Text>
+                  </PressableScale>
+                )}
+              </View>
+              <PressableScale
+                onPress={handleWatchAgain}
+                disabled={isTogglingRewatch}
+                style={[styles.rewatchBtn, { backgroundColor: c.accentFill }]}
+                accessibilityRole="button"
+                accessibilityLabel="Watch again"
+              >
+                <RotateCcw color={c.onAccent} size={15} strokeWidth={2.25} />
+                <Text style={[styles.rewatchBtnText, { color: c.onAccent }]}>Watch again</Text>
+              </PressableScale>
+            </GlassSurface>
+          </View>
+        )}
+
         {/* ── Your Rating (Phase L) ────────────────────────────────────── */}
         {!Number.isNaN(tmdbId) && (
           <View style={styles.section}>
-            <RatingReviewCard mediaType="movie" tmdbId={tmdbId} onSaved={setReviewSnackbarMessage} />
+            <RatingReviewCard
+              mediaType="movie"
+              tmdbId={tmdbId}
+              onSaved={setReviewSnackbarMessage}
+              canReview={isWatched}
+            />
           </View>
         )}
 
@@ -915,6 +973,38 @@ const styles = StyleSheet.create({
     fontSize: 18,
     fontWeight: '700',
     paddingHorizontal: 20,
+  },
+  rewatchSection: { marginTop: 8 },
+  rewatchCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 14,
+    marginHorizontal: 20,
+    padding: 14,
+  },
+  rewatchTextColumn: {
+    flex: 1,
+    gap: 4,
+  },
+  rewatchTitle: {
+    fontSize: 14,
+    fontWeight: '700',
+  },
+  rewatchUndoText: {
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  rewatchBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingHorizontal: 14,
+    paddingVertical: 9,
+    borderRadius: 12,
+  },
+  rewatchBtnText: {
+    fontSize: 13,
+    fontWeight: '700',
   },
   overview: {
     fontSize: 14,

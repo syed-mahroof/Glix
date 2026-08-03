@@ -9,6 +9,7 @@ from django.urls import path
 
 from core.comment_views import (
     CommentDetailView,
+    CommentFeedView,
     CommentLikeToggleView,
     CommentListCreateView,
     CommentReplyListCreateView,
@@ -19,6 +20,7 @@ from core.comment_views import (
 
 urlpatterns = [
     path("comments/", CommentListCreateView.as_view(), name="comment-list-create"),
+    path("comments/feed/", CommentFeedView.as_view(), name="comment-feed"),
     path("comments/<uuid:comment_id>/", CommentDetailView.as_view(), name="comment-detail"),
     path(
         "comments/<uuid:comment_id>/replies/",

@@ -4,7 +4,7 @@
 import { FlashList } from '@shopify/flash-list';
 import { Image } from 'expo-image';
 import { useRouter } from 'expo-router';
-import { ArrowLeft, BookOpen, Search, Sparkles, Tv2, X } from 'lucide-react-native';
+import { ArrowLeft, BookOpen, Search, Tv2, X } from 'lucide-react-native';
 import React, { useEffect, useMemo, useState } from 'react';
 import {
   ScrollView,
@@ -24,7 +24,7 @@ import WatchlistFilterSheet from '../../components/WatchlistFilterSheet';
 import { isAnimeByGenresAndLanguage } from '../../lib/anime';
 import { useAppTheme, type ThemeColors } from '../../lib/theme';
 import { WatchlistEntry } from '../../store/watchStore';
-import { useWatchStore } from '../../store/watchStore';
+import { useLayoutFor, useWatchStore } from '../../store/watchStore';
 
 const POSTER_BASE = 'https://image.tmdb.org/t/p/w185';
 
@@ -73,7 +73,7 @@ function TabPill({
   );
 }
 
-function statusColor(entry: WatchlistEntry, c: ThemeColors): string {
+export function statusColor(entry: WatchlistEntry, c: ThemeColors): string {
   // Was hardcoded '#888'/'#4CAF50' (grey/green) in 3 of 4 branches despite
   // already taking `c` as a param for exactly this — a third/fourth hue
   // outside Phase 12's locked accent+error rule. ENDED/ARCHIVED are both
@@ -88,7 +88,7 @@ function statusColor(entry: WatchlistEntry, c: ThemeColors): string {
   }
 }
 
-function statusLabel(entry: WatchlistEntry): string {
+export function statusLabel(entry: WatchlistEntry): string {
   if (entry.show.status === 'ENDED') return 'Ended';
   switch (entry.status) {
     case 'UP_TO_DATE': return 'Up to Date';
@@ -97,7 +97,7 @@ function statusLabel(entry: WatchlistEntry): string {
   }
 }
 
-function ShowListRow({ entry }: { entry: WatchlistEntry }) {
+export function ShowListRow({ entry }: { entry: WatchlistEntry }) {
   const router = useRouter();
   const { theme } = useAppTheme();
   const c = theme.colors;
@@ -161,7 +161,7 @@ function ShowListRow({ entry }: { entry: WatchlistEntry }) {
   );
 }
 
-function ShowGridCard({ entry }: { entry: WatchlistEntry }) {
+export function ShowGridCard({ entry }: { entry: WatchlistEntry }) {
   return (
     <ShowPosterCard
       showId={entry.show.tmdb_id}
@@ -182,18 +182,13 @@ export default function ProfileShowsScreen() {
   const watchlist = useWatchStore((s) => s.watchlist);
   const isLoadingWatchlist = useWatchStore((s) => s.isLoadingWatchlist);
   const fetchWatchlist = useWatchStore((s) => s.fetchWatchlist);
-  const preferredLayout = useWatchStore((s) => s.preferredLayout);
+  const layout = useLayoutFor('myShows');
   const selectedLanguage = useWatchStore((s) => s.selectedLanguage);
   const setLanguageFilter = useWatchStore((s) => s.setLanguageFilter);
   const [filter, setFilter] = useState<FilterKey>('ALL');
   const [query, setQuery] = useState('');
   const [isLanguageModalVisible, setIsLanguageModalVisible] = useState(false);
   const [isFilterSheetVisible, setIsFilterSheetVisible] = useState(false);
-  // Local, not global store state like selectedLanguage — nothing in this
-  // phase's ask requires the Anime toggle to persist across My Shows / My
-  // Movies the way Language deliberately does; kept simple unless the user
-  // wants it elevated later.
-  const [animeOnly, setAnimeOnly] = useState(false);
   // Derived from the tab selection, not independent state — Last Watched
   // is one of the single-select FILTERS options now (Phase 63), not a
   // second toggle that could be active alongside Continuing/Ended.
@@ -203,12 +198,15 @@ export default function ProfileShowsScreen() {
     fetchWatchlist();
   }, [fetchWatchlist]);
 
+  // Anime shows now live exclusively under My Anime (Phase 75.2) — excluded
+  // here unconditionally, not via an optional toggle, so this list and that
+  // one never overlap.
   const allEntries = useMemo(() => {
     return [
       ...watchlist.to_watch.results,
       ...watchlist.up_to_date.results,
       ...watchlist.archived.results,
-    ];
+    ].filter((e) => !isAnimeByGenresAndLanguage(e.show.genres, e.show.original_language));
   }, [watchlist]);
 
   // Distinct languages present in the user's own cached watchlist — never
@@ -230,10 +228,6 @@ export default function ProfileShowsScreen() {
       result = result.filter((e) => e.show.original_language === selectedLanguage);
     }
 
-    if (animeOnly) {
-      result = result.filter((e) => isAnimeByGenresAndLanguage(e.show.genres, e.show.original_language));
-    }
-
     const trimmedQuery = query.trim().toLowerCase();
     if (trimmedQuery) {
       result = result.filter((e) => e.show.title.toLowerCase().includes(trimmedQuery));
@@ -251,14 +245,13 @@ export default function ProfileShowsScreen() {
       });
     }
     return result;
-  }, [allEntries, filter, selectedLanguage, animeOnly, query, lastWatchedSort]);
+  }, [allEntries, filter, selectedLanguage, query, lastWatchedSort]);
 
-  const hasActiveFilters = filter !== 'ALL' || selectedLanguage !== null || animeOnly;
+  const hasActiveFilters = filter !== 'ALL' || selectedLanguage !== null;
 
   const handleReset = () => {
     setFilter('ALL');
     setLanguageFilter(null);
-    setAnimeOnly(false);
   };
 
   return (
@@ -275,7 +268,7 @@ export default function ProfileShowsScreen() {
           <Tv2 color={c.accentInk} size={20} strokeWidth={1.75} />
           <Text style={[styles.headerTitle, { color: c.textPrimary }]}>My Shows</Text>
         </View>
-        <LayoutToggle />
+        <LayoutToggle scope="myShows" />
       </View>
 
       {/* Status/sort tabs — a normal top-of-screen horizontal pill row
@@ -345,13 +338,13 @@ export default function ProfileShowsScreen() {
       ) : (
         <View style={styles.listWrap}>
           <FlashList
-            key={`profile-shows-${preferredLayout}`}
+            key={`profile-shows-${layout}`}
             data={filtered}
             keyExtractor={(item) => String(item.id)}
-            numColumns={preferredLayout === 'grid' ? 3 : 1}
-            extraData={preferredLayout}
+            numColumns={layout === 'grid' ? 3 : 1}
+            extraData={layout}
             renderItem={({ item }) =>
-              preferredLayout === 'grid' ? <ShowGridCard entry={item} /> : <ShowListRow entry={item} />
+              layout === 'grid' ? <ShowGridCard entry={item} /> : <ShowListRow entry={item} />
             }
             contentContainerStyle={styles.listContent}
             refreshing={isLoadingWatchlist}
@@ -374,15 +367,7 @@ export default function ProfileShowsScreen() {
         selectedLanguage={selectedLanguage}
         onOpenLanguagePicker={() => setIsLanguageModalVisible(true)}
         languageDisplay={selectedLanguage ? languageDisplayName(selectedLanguage) : 'Any Language'}
-        tagToggles={[
-          {
-            key: 'anime',
-            label: 'Anime',
-            Icon: Sparkles,
-            active: animeOnly,
-            onPress: () => setAnimeOnly((prev) => !prev),
-          },
-        ]}
+        tagToggles={[]}
         hasActiveFilters={hasActiveFilters}
         onReset={handleReset}
       />

@@ -20,7 +20,7 @@ from collections import Counter, defaultdict
 from datetime import date, timedelta
 
 from django.core.cache import cache
-from django.db.models import Avg, Count, Min, Q, Sum
+from django.db.models import Avg, Count, Min, Sum
 from django.utils import timezone
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
@@ -41,10 +41,16 @@ from core.analytics_serializers import (
     YearReviewSerializer,
 )
 from core.cache_keys import (
+    ANALYTICS_DASHBOARD_CACHE_TTL_SECONDS,
     ANALYTICS_HEATMAP_ALL_CACHE_TTL_SECONDS,
+    ANALYTICS_MONTHLY_SUMMARY_CACHE_TTL_SECONDS,
     ANALYTICS_MOVIES_CACHE_TTL_SECONDS,
+    ANALYTICS_STATISTICS_CACHE_TTL_SECONDS,
+    analytics_dashboard_cache_key,
     analytics_heatmap_all_cache_key,
+    analytics_monthly_summary_cache_key,
     analytics_movies_cache_key,
+    analytics_statistics_cache_key,
 )
 from core.badge_constants import (
     BADGE_DISPLAY,
@@ -71,8 +77,10 @@ from core.models import (
     CachedEpisode,
     EpisodeInteraction,
     MovieCache,
+    MovieRewatch,
     MovieWatchlist,
     MovieWatchState,
+    RewatchEpisodeState,
     UserProfile,
     Watchlist,
     WatchState,
@@ -124,6 +132,43 @@ def _intensity_for_count(eps: int, scale_max: int) -> int:
     return 1
 
 
+def _rewatch_period_counts(user, start_date, group_fields: list[str]) -> dict[tuple, dict]:
+    """
+    Rewatch counterpart of the `.values(*group_fields).annotate(...)`
+    pattern every WatchState query in this file uses — same grouping
+    fields (e.g. `["watched_at__year", "watched_at__week"]`), summed
+    across BOTH rewatch sources (RewatchEpisodeState ticks + MovieRewatch
+    entries). Callers merge the result into their own WatchState-derived
+    period map so a rewatch shows up in "how much did I watch" activity
+    views (heatmap, daily/weekly/monthly/yearly stats) — see ShowRewatch's
+    model docstring for why this must never touch a WatchState-derived
+    *count* (lifetime episodes_watched, badges, streak) instead.
+
+    Returns a dict keyed by the tuple of group values, in `group_fields`
+    order — e.g. `{(2026, 3): {"episodes_watched": 2, "minutes_watched": 40}}`.
+    """
+    merged: dict[tuple, dict] = {}
+
+    def _accumulate(rows):
+        for row in rows:
+            key = tuple(row[f] for f in group_fields)
+            bucket = merged.setdefault(key, {"episodes_watched": 0, "minutes_watched": 0})
+            bucket["episodes_watched"] += row["episodes_watched"]
+            bucket["minutes_watched"] += row["minutes_watched"] or 0
+
+    _accumulate(
+        RewatchEpisodeState.objects.filter(rewatch__user=user, watched_at__date__gte=start_date)
+        .values(*group_fields)
+        .annotate(episodes_watched=Count("id"), minutes_watched=Sum("episode__runtime_minutes"))
+    )
+    _accumulate(
+        MovieRewatch.objects.filter(user=user, watched_at__date__gte=start_date)
+        .values(*group_fields)
+        .annotate(episodes_watched=Count("id"), minutes_watched=Sum("movie__runtime_minutes"))
+    )
+    return merged
+
+
 def _heatmap_for_user(user, days: int = 365) -> list[dict]:
     """
     Build a heatmap of watch activity over the past `days` calendar days.
@@ -150,6 +195,14 @@ def _heatmap_for_user(user, days: int = 365) -> list[dict]:
         }
         for row in qs
     }
+
+    # Rewatch activity counts toward "how much did I watch" here — see
+    # _rewatch_period_counts's own docstring for why this is safe to merge
+    # into a date-keyed activity map but never into a WatchState-derived count.
+    for (day,), extra in _rewatch_period_counts(user, start_date, ["watched_at__date"]).items():
+        bucket = activity_by_date.setdefault(day, {"episodes_watched": 0, "minutes_watched": 0})
+        bucket["episodes_watched"] += extra["episodes_watched"]
+        bucket["minutes_watched"] += extra["minutes_watched"]
 
     scale_max = max((v["episodes_watched"] for v in activity_by_date.values()), default=0)
 
@@ -217,6 +270,12 @@ def _heatmap_all_time_for_user(user) -> dict:
         }
         for row in qs
     }
+
+    # See _heatmap_for_user's identical merge for why this is safe.
+    for (day,), extra in _rewatch_period_counts(user, start_date, ["watched_at__date"]).items():
+        bucket = activity_by_date.setdefault(day, {"episodes_watched": 0, "minutes_watched": 0})
+        bucket["episodes_watched"] += extra["episodes_watched"]
+        bucket["minutes_watched"] += extra["minutes_watched"]
 
     scale_max = max((v["episodes_watched"] for v in activity_by_date.values()), default=0)
 
@@ -443,40 +502,67 @@ def _compute_badge_progress(user, profile: UserProfile, streak: WatchStreak) -> 
 # ─── Views ────────────────────────────────────────────────────────────────
 
 class AnalyticsDashboardView(APIView):
-    """GET /api/analytics/dashboard/"""
+    """
+    GET /api/analytics/dashboard/
+
+    Cached 300s (Phase 75.8) — this does several grouped aggregate queries
+    on every Profile Hub / Analytics tab focus, previously uncached.
+    Invalidated by signals.py's WatchState/MovieWatchState/rewatch
+    receivers; the TTL is a defense-in-depth backstop, same convention as
+    AnalyticsMoviesView's own cache.
+    """
 
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
+        cache_key = analytics_dashboard_cache_key(request.user.id)
+        cached = cache.get(cache_key)
+        if cached is not None:
+            return Response(cached)
+
         profile = _get_profile(request.user)
         streak = _get_streak(request.user)
 
         today = timezone.now().date()
         total_episodes = WatchState.objects.filter(user=request.user).count()
-        total_shows = Watchlist.objects.filter(user=request.user).count()
+        show_ids = list(Watchlist.objects.filter(user=request.user).values_list("show_id", flat=True))
+        total_shows = len(show_ids)
 
-        # Completed shows: every aired episode has a WatchState row
-        completed_qs = Watchlist.objects.filter(user=request.user).annotate(
-            aired=Count(
-                "show__episodes",
-                filter=Q(show__episodes__air_date__lte=today),
-                distinct=True,
-            ),
-            watched=Count(
-                "show__episodes__watch_states",
-                filter=Q(show__episodes__watch_states__user=request.user),
-                distinct=True,
-            ),
+        # Completed shows: every aired episode has a WatchState row. Two
+        # flat grouped queries joined in Python (Phase 75.8), not one
+        # queryset annotated with two Count(..., distinct=True) over
+        # different relations off the same Watchlist row — that shape joins
+        # both relations before Postgres can dedupe, exploding into
+        # aired-count × watched-count intermediate rows per show before the
+        # DISTINCT collapses it back down. Correct either way; this is the
+        # cheaper query plan.
+        aired_counts = dict(
+            CachedEpisode.objects.filter(show_id__in=show_ids, air_date__lte=today)
+            .values("show_id")
+            # CachedEpisode's primary key is `tmdb_id`, not `id` — Count("id")
+            # raises FieldError on this model. Count("pk") is PK-name-agnostic.
+            .annotate(c=Count("pk"))
+            .values_list("show_id", "c")
+        )
+        watched_counts = dict(
+            WatchState.objects.filter(user=request.user, episode__show_id__in=show_ids)
+            .values("episode__show_id")
+            .annotate(c=Count("id"))
+            .values_list("episode__show_id", "c")
         )
         # Simpler proxy: aired == watched for non-zero aired
         shows_completed = sum(
-            1 for e in completed_qs if e.aired > 0 and e.watched >= e.aired
+            1
+            for show_id in show_ids
+            if aired_counts.get(show_id, 0) > 0
+            and watched_counts.get(show_id, 0) >= aired_counts.get(show_id, 0)
         )
         shows_archived = Watchlist.objects.filter(
             user=request.user, status=Watchlist.Status.ARCHIVED
         ).count()
 
         total_minutes = profile.total_time_watched
+        total_rewatch_minutes = profile.total_rewatch_time_watched
         data = {
             "total_episodes_watched": total_episodes,
             "total_shows_tracked": total_shows,
@@ -489,6 +575,8 @@ class AnalyticsDashboardView(APIView):
             "badges_earned": len(profile.earned_badges),
             "shows_completed": shows_completed,
             "shows_archived": shows_archived,
+            "total_rewatch_minutes_watched": total_rewatch_minutes,
+            "total_rewatch_hours_watched": round(total_rewatch_minutes / 60, 1),
             "watch_time": {
                 "total_minutes": total_minutes,
                 "total_hours": round(total_minutes / 60, 1),
@@ -498,16 +586,28 @@ class AnalyticsDashboardView(APIView):
                 "avg_minutes_per_month": round((total_minutes / max(streak.total_streak_days, 1)) * 30, 1),
             },
         }
-        serializer = DashboardSerializer(data)
-        return Response(serializer.data)
+        serialized = DashboardSerializer(data).data
+        cache.set(cache_key, serialized, ANALYTICS_DASHBOARD_CACHE_TTL_SECONDS)
+        return Response(serialized)
 
 
 class AnalyticsStatisticsView(APIView):
-    """GET /api/analytics/statistics/"""
+    """
+    GET /api/analytics/statistics/
+
+    Cached 300s (Phase 75.8) — the daily/weekly/monthly/yearly buckets here
+    are the most query-heavy analytics view in the app, previously
+    uncached. Same invalidation/TTL convention as AnalyticsDashboardView.
+    """
 
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
+        cache_key = analytics_statistics_cache_key(request.user.id)
+        cached = cache.get(cache_key)
+        if cached is not None:
+            return Response(cached)
+
         profile = _get_profile(request.user)
         streak = _get_streak(request.user)
         total_minutes = profile.total_time_watched
@@ -524,7 +624,11 @@ class AnalyticsStatisticsView(APIView):
             )
             .order_by("watched_at__date")
         )
-        day_map = {row["watched_at__date"]: row for row in daily_qs}
+        day_map = {row["watched_at__date"]: dict(row) for row in daily_qs}
+        for (day,), extra in _rewatch_period_counts(request.user, start_30, ["watched_at__date"]).items():
+            bucket = day_map.setdefault(day, {"episodes_watched": 0, "minutes_watched": 0})
+            bucket["episodes_watched"] += extra["episodes_watched"]
+            bucket["minutes_watched"] += extra["minutes_watched"]
         daily = []
         d = start_30
         while d <= end_date:
@@ -552,14 +656,27 @@ class AnalyticsStatisticsView(APIView):
             )
             .order_by("watched_at__year", "watched_at__week")
         )
-        weekly = [
-            {
-                "period": f"{row['watched_at__year']}-W{row['watched_at__week']:02d}",
-                "label": f"Week {row['watched_at__week']}",
+        weekly_map: dict[tuple, dict] = {
+            (row["watched_at__year"], row["watched_at__week"]): {
                 "episodes_watched": row["episodes_watched"],
                 "minutes_watched": row["minutes_watched"] or 0,
             }
             for row in weekly_qs
+        }
+        for key, extra in _rewatch_period_counts(
+            request.user, end_date - timedelta(weeks=12), ["watched_at__year", "watched_at__week"]
+        ).items():
+            bucket = weekly_map.setdefault(key, {"episodes_watched": 0, "minutes_watched": 0})
+            bucket["episodes_watched"] += extra["episodes_watched"]
+            bucket["minutes_watched"] += extra["minutes_watched"]
+        weekly = [
+            {
+                "period": f"{year}-W{week:02d}",
+                "label": f"Week {week}",
+                "episodes_watched": data["episodes_watched"],
+                "minutes_watched": data["minutes_watched"],
+            }
+            for (year, week), data in sorted(weekly_map.items())
         ]
 
         # Monthly stats (last 12 months)
@@ -575,14 +692,27 @@ class AnalyticsStatisticsView(APIView):
             )
             .order_by("watched_at__year", "watched_at__month")
         )
-        monthly = [
-            {
-                "period": f"{row['watched_at__year']}-{row['watched_at__month']:02d}",
-                "label": date(row["watched_at__year"], row["watched_at__month"], 1).strftime("%b %Y"),
+        monthly_map: dict[tuple, dict] = {
+            (row["watched_at__year"], row["watched_at__month"]): {
                 "episodes_watched": row["episodes_watched"],
                 "minutes_watched": row["minutes_watched"] or 0,
             }
             for row in monthly_qs
+        }
+        for key, extra in _rewatch_period_counts(
+            request.user, end_date - timedelta(days=365), ["watched_at__year", "watched_at__month"]
+        ).items():
+            bucket = monthly_map.setdefault(key, {"episodes_watched": 0, "minutes_watched": 0})
+            bucket["episodes_watched"] += extra["episodes_watched"]
+            bucket["minutes_watched"] += extra["minutes_watched"]
+        monthly = [
+            {
+                "period": f"{year}-{month:02d}",
+                "label": date(year, month, 1).strftime("%b %Y"),
+                "episodes_watched": data["episodes_watched"],
+                "minutes_watched": data["minutes_watched"],
+            }
+            for (year, month), data in sorted(monthly_map.items())
         ]
 
         # Yearly stats (all time)
@@ -595,14 +725,25 @@ class AnalyticsStatisticsView(APIView):
             )
             .order_by("watched_at__year")
         )
-        yearly = [
-            {
-                "period": str(row["watched_at__year"]),
-                "label": str(row["watched_at__year"]),
+        yearly_map: dict[tuple, dict] = {
+            (row["watched_at__year"],): {
                 "episodes_watched": row["episodes_watched"],
                 "minutes_watched": row["minutes_watched"] or 0,
             }
             for row in yearly_qs
+        }
+        for key, extra in _rewatch_period_counts(request.user, date.min, ["watched_at__year"]).items():
+            bucket = yearly_map.setdefault(key, {"episodes_watched": 0, "minutes_watched": 0})
+            bucket["episodes_watched"] += extra["episodes_watched"]
+            bucket["minutes_watched"] += extra["minutes_watched"]
+        yearly = [
+            {
+                "period": str(year),
+                "label": str(year),
+                "episodes_watched": data["episodes_watched"],
+                "minutes_watched": data["minutes_watched"],
+            }
+            for (year,), data in sorted(yearly_map.items())
         ]
 
         # Top shows by episodes watched
@@ -648,8 +789,9 @@ class AnalyticsStatisticsView(APIView):
             "top_shows": top_shows,
             "most_watched_day": most_watched_day,
         }
-        serializer = StatisticsSerializer(data)
-        return Response(serializer.data)
+        serialized = StatisticsSerializer(data).data
+        cache.set(cache_key, serialized, ANALYTICS_STATISTICS_CACHE_TTL_SECONDS)
+        return Response(serialized)
 
 
 class AnalyticsGenresView(APIView):
@@ -724,19 +866,26 @@ class AnalyticsCompletionView(APIView):
     def get(self, request):
         today = timezone.now().date()
 
-        # Total aired episodes across all tracked shows
-        watchlist_qs = Watchlist.objects.filter(user=request.user).annotate(
-            aired=Count(
-                "show__episodes",
-                filter=Q(show__episodes__air_date__lte=today),
-                distinct=True,
-            ),
-            watched=Count(
-                "show__episodes__watch_states",
-                filter=Q(show__episodes__watch_states__user=request.user),
-                distinct=True,
-            ),
-            total_eps=Count("show__episodes", distinct=True),
+        # Total aired episodes across all tracked shows. Two flat grouped
+        # queries joined in Python (Phase 75.8), not one queryset annotated
+        # with two Count(..., distinct=True) over different relations off
+        # the same Watchlist row — see AnalyticsDashboardView's identical
+        # fix for the full reasoning. The old `total_eps` annotation here
+        # was never even read below; dropped rather than carried forward.
+        show_ids = list(Watchlist.objects.filter(user=request.user).values_list("show_id", flat=True))
+        aired_counts = dict(
+            CachedEpisode.objects.filter(show_id__in=show_ids, air_date__lte=today)
+            .values("show_id")
+            # CachedEpisode's primary key is `tmdb_id`, not `id` — Count("id")
+            # raises FieldError on this model. Count("pk") is PK-name-agnostic.
+            .annotate(c=Count("pk"))
+            .values_list("show_id", "c")
+        )
+        watched_counts = dict(
+            WatchState.objects.filter(user=request.user, episode__show_id__in=show_ids)
+            .values("episode__show_id")
+            .annotate(c=Count("id"))
+            .values_list("episode__show_id", "c")
         )
 
         total_aired = 0
@@ -744,11 +893,13 @@ class AnalyticsCompletionView(APIView):
         total_shows = 0
         completed_shows = 0
 
-        for entry in watchlist_qs:
-            total_aired += entry.aired
-            total_watched += entry.watched
+        for show_id in show_ids:
+            aired = aired_counts.get(show_id, 0)
+            watched = watched_counts.get(show_id, 0)
+            total_aired += aired
+            total_watched += watched
             total_shows += 1
-            if entry.aired > 0 and entry.watched >= entry.aired:
+            if aired > 0 and watched >= aired:
                 completed_shows += 1
 
         ep_pct = round((total_watched / total_aired) * 100, 1) if total_aired else 0.0
@@ -1047,21 +1198,31 @@ class AnalyticsYearReviewView(APIView):
         # completed_at column written the moment a show's last episode is
         # marked watched — out of scope here.
         today = timezone.now().date()
-        shows_finished = 0
-        for entry in Watchlist.objects.filter(user=request.user).annotate(
-            aired=Count(
-                "show__episodes",
-                filter=Q(show__episodes__air_date__lte=today),
-                distinct=True,
-            ),
-            watched=Count(
-                "show__episodes__watch_states",
-                filter=Q(show__episodes__watch_states__user=request.user),
-                distinct=True,
-            ),
-        ):
-            if entry.aired > 0 and entry.watched >= entry.aired:
-                shows_finished += 1
+        # Two flat grouped queries joined in Python (Phase 75.8) — see
+        # AnalyticsDashboardView's identical fix for the full reasoning.
+        year_review_show_ids = list(
+            Watchlist.objects.filter(user=request.user).values_list("show_id", flat=True)
+        )
+        year_review_aired_counts = dict(
+            CachedEpisode.objects.filter(show_id__in=year_review_show_ids, air_date__lte=today)
+            .values("show_id")
+            # CachedEpisode's primary key is `tmdb_id`, not `id` — Count("id")
+            # raises FieldError on this model. Count("pk") is PK-name-agnostic.
+            .annotate(c=Count("pk"))
+            .values_list("show_id", "c")
+        )
+        year_review_watched_counts = dict(
+            WatchState.objects.filter(user=request.user, episode__show_id__in=year_review_show_ids)
+            .values("episode__show_id")
+            .annotate(c=Count("id"))
+            .values_list("episode__show_id", "c")
+        )
+        shows_finished = sum(
+            1
+            for show_id in year_review_show_ids
+            if year_review_aired_counts.get(show_id, 0) > 0
+            and year_review_watched_counts.get(show_id, 0) >= year_review_aired_counts.get(show_id, 0)
+        )
 
         # Biggest month (most minutes)
         biggest_month_qs = (
@@ -1107,7 +1268,13 @@ class AnalyticsYearReviewView(APIView):
 
 
 class AnalyticsMonthlySummaryView(APIView):
-    """GET /api/analytics/monthly-summary/?year=2025"""
+    """
+    GET /api/analytics/monthly-summary/?year=2025
+
+    Cached 900s per (user, year) (Phase 75.8) — see
+    analytics_monthly_summary_cache_key's own comment for why only the
+    current year's key is signal-busted.
+    """
 
     permission_classes = [IsAuthenticated]
 
@@ -1117,6 +1284,11 @@ class AnalyticsMonthlySummaryView(APIView):
             year = int(request.query_params.get("year", current_year))
         except (ValueError, TypeError):
             year = current_year
+
+        cache_key = analytics_monthly_summary_cache_key(request.user.id, year)
+        cached = cache.get(cache_key)
+        if cached is not None:
+            return Response(cached)
 
         # Was 12 months × ~4 queries each (count/sum/genre-loop/top-show) —
         # one query for the whole year plus a single Python pass instead,
@@ -1174,8 +1346,9 @@ class AnalyticsMonthlySummaryView(APIView):
                 }
             )
 
-        serializer = MonthlySummaryItemSerializer(results, many=True)
-        return Response(serializer.data)
+        serialized = MonthlySummaryItemSerializer(results, many=True).data
+        cache.set(cache_key, serialized, ANALYTICS_MONTHLY_SUMMARY_CACHE_TTL_SECONDS)
+        return Response(serialized)
 
 
 class AnalyticsAchievementsView(APIView):

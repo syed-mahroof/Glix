@@ -10,7 +10,6 @@ profile_views.py/search_views.py, rather than growing that already
 
 from collections import defaultdict
 
-from django.db.models import Count
 from django.shortcuts import get_object_or_404
 from rest_framework import status
 from rest_framework.permissions import IsAuthenticated
@@ -60,26 +59,20 @@ class CustomListsView(APIView):
         lists = list(CustomList.objects.filter(user=request.user))
         list_ids = [l.id for l in lists]
 
-        item_counts = {
-            row["list"]: row["c"]
-            for row in CustomListItem.objects.filter(list_id__in=list_ids)
-            .values("list")
-            .annotate(c=Count("id"))
-        }
-        # Per-media-type breakdown (tv vs movie) for the Shows/Movies filter
-        # on the "My Lists" hub — one extra grouped query, additive to
-        # item_counts above rather than replacing it.
-        media_counts = {
-            (row["list"], row["media_type"]): row["c"]
-            for row in CustomListItem.objects.filter(list_id__in=list_ids)
-            .values("list", "media_type")
-            .annotate(c=Count("id"))
-        }
-        # Only need a few items per list for the cover collage, not all of
-        # them — capped client-side of the DB (per-list slice) since a
-        # single query can't LIMIT per group without a window function.
+        # One query for the whole response, not three separate scans of
+        # CustomListItem — this is a user's own list items (a personal
+        # collection, not a global table), so a single ordered fetch and
+        # deriving all three outputs (counts, per-media-type counts, and
+        # the capped-4-per-list cover preview) in one Python pass is cheap
+        # and avoids the two round trips the old per-purpose queries cost,
+        # one of which (the cover preview) already fetched every item
+        # across every list just to keep 4 of them.
+        item_counts: dict = defaultdict(int)
+        media_counts: dict = defaultdict(int)
         items_by_list: dict = defaultdict(list)
-        for item in CustomListItem.objects.filter(list_id__in=list_ids).order_by("-added_at"):
+        for item in CustomListItem.objects.filter(list_id__in=list_ids).order_by("list_id", "-added_at"):
+            item_counts[item.list_id] += 1
+            media_counts[(item.list_id, item.media_type)] += 1
             if len(items_by_list[item.list_id]) < 4:
                 items_by_list[item.list_id].append(item)
 

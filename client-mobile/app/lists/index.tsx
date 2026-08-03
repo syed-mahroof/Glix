@@ -6,7 +6,7 @@
 // of splitting into two screens this hub gets an All/Shows/Movies filter.
 
 import { Image } from 'expo-image';
-import { useRouter } from 'expo-router';
+import { useLocalSearchParams, useRouter } from 'expo-router';
 import { ArrowLeft, ListChecks, Lock, Plus } from 'lucide-react-native';
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
@@ -90,6 +90,13 @@ export default function ListsHubScreen() {
   const router = useRouter();
   const { theme } = useAppTheme();
   const c = theme.colors;
+  // Arriving from the Shows Hub / Movies Hub's own list button seeds the
+  // filter from ?media=tv|movie so "my shows' lists" opens already scoped
+  // to shows, instead of always defaulting to All regardless of where the
+  // user tapped in from (Phase 75.4). Any other/missing value falls back
+  // to 'all' — the Profile Hub's "My Lists" row links here with no param.
+  const { media } = useLocalSearchParams<{ media?: string }>();
+  const initialMediaFilter: MediaFilter = media === 'tv' || media === 'movie' ? media : 'all';
 
   const lists = useListsStore((s) => s.lists);
   const isLoadingLists = useListsStore((s) => s.isLoadingLists);
@@ -98,7 +105,7 @@ export default function ListsHubScreen() {
 
   const [newListName, setNewListName] = useState('');
   const [isCreating, setIsCreating] = useState(false);
-  const [mediaFilter, setMediaFilter] = useState<MediaFilter>('all');
+  const [mediaFilter, setMediaFilter] = useState<MediaFilter>(initialMediaFilter);
 
   useEffect(() => {
     fetchLists();

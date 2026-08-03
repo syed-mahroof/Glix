@@ -22,15 +22,26 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 
 import CalendarGrid from '../../components/CalendarGrid';
 import CascadeModal from '../../components/CascadeModal';
+import FilterPill from '../../components/FilterPill';
 import GlassSurface from '../../components/GlassSurface';
 import HistoryRow from '../../components/HistoryRow';
+import HubHeadingSwitch, { HubKind } from '../../components/HubHeadingSwitch';
 import LayoutToggle from '../../components/LayoutToggle';
 import PressableScale from '../../components/PressableScale';
 import { SegmentedControl } from '../../components/SegmentedControl';
 import ShowPosterCard from '../../components/ShowPosterCard';
 import ShowRow from '../../components/ShowRow';
 import Snackbar from '../../components/Snackbar';
-import { formatCountdown, formatDaysAgo, hasAired, pad, todayLocalIso } from '../../lib/dateFormat';
+import { isAnimeByGenresAndLanguage } from '../../lib/anime';
+import {
+  formatCountdown,
+  formatDaysAgo,
+  hasAired,
+  pad,
+  resolveAirInstant,
+  resolveDisplayDateIso,
+  todayLocalIso,
+} from '../../lib/dateFormat';
 import { useAppTheme } from '../../lib/theme';
 import {
   buildUpcomingItems,
@@ -40,7 +51,7 @@ import {
   UpcomingListEntry,
 } from '../../lib/upcoming';
 import { useCatchupCascade } from '../../lib/useCatchupCascade';
-import { Episode, useWatchStore, WatchlistBuckets, WatchlistEntry } from '../../store/watchStore';
+import { Episode, useLayoutFor, useWatchStore, WatchlistBuckets, WatchlistEntry } from '../../store/watchStore';
 
 const POSTER_BASE_URL = 'https://image.tmdb.org/t/p/w185';
 
@@ -228,38 +239,6 @@ function gridBadgeForRow(item: ShowEpisodeRow): { label: string; highlighted: bo
   return { label: `+${diffDays} DAYS`, highlighted: false };
 }
 
-// ─── Filter Pill (Watch List tab) ──────────────────────────────────────────────
-
-function FilterPill({
-  label,
-  active,
-  onPress,
-}: {
-  label: string;
-  active: boolean;
-  onPress: () => void;
-}) {
-  const { theme } = useAppTheme();
-  const c = theme.colors;
-
-  return (
-    <PressableScale
-      style={[
-        styles.pill,
-        { backgroundColor: c.glassFill, borderColor: c.hairline },
-        active && { borderColor: c.accentFill, backgroundColor: c.accentFill },
-      ]}
-      onPress={onPress}
-      accessibilityRole="button"
-      accessibilityState={{ selected: active }}
-    >
-      <Text style={[styles.pillText, { color: c.textSecondary }, active && { color: c.onAccent }]}>
-        {label}
-      </Text>
-    </PressableScale>
-  );
-}
-
 // ─── Zombie Row (List view fallback for zero-cached-episode entries) ──────────
 // A watchlist entry can have no cached episode data at all — see the
 // buildRows() comment on the null-episode row it produces. Shares ShowRow's
@@ -323,9 +302,9 @@ function UpcomingRow({
   const router = useRouter();
   const { theme } = useAppTheme();
   const c = theme.colors;
-  const target = new Date(`${item.airDate}T00:00:00`);
+  const target = resolveAirInstant(item.airDate, item.airDateTime, item.airsTime, item.airsTimezone);
   const { formatted, isImminent, dayOfWeek } = formatCountdown(target, now);
-  const todayIso = todayLocalIso(now);
+  const displayDateIso = resolveDisplayDateIso(item.airDate, item.airDateTime, item.airsTime, item.airsTimezone);
   const isAired = hasAired(item.airDate, now);
   // Distinct from isAired: a TODAY item is technically "aired" (markable —
   // WatchStateToggleView's own gate is air_date <= today) but still shows
@@ -333,7 +312,7 @@ function UpcomingRow({
   // overdue items) swaps to the "OVERDUE" label — formatCountdown clamps a
   // negative diff to 00:00:00, which would misleadingly read as "airing
   // right now" instead of "N days ago" for those.
-  const isOverdue = item.airDate < todayIso;
+  const isOverdue = displayDateIso < todayLocalIso(now);
   const canMarkWatched = isAired && item.episodeId != null && !!onMarkWatched;
 
   return (
@@ -369,7 +348,7 @@ function UpcomingRow({
             isOverdue && { color: c.negative },
           ]}
         >
-          {isOverdue ? formatDaysAgo(item.airDate, now) : `${formatted} (${dayOfWeek})`}
+          {isOverdue ? formatDaysAgo(displayDateIso, now) : `${formatted} (${dayOfWeek})`}
         </Text>
       </View>
       {canMarkWatched && (
@@ -473,13 +452,18 @@ export default function ShowsScreen() {
   const clearError = useWatchStore((s) => s.clearError);
   const toggleWatchState = useWatchStore((s) => s.toggleWatchState);
   const bulkToggleWatchState = useWatchStore((s) => s.bulkToggleWatchState);
-  const preferredLayout = useWatchStore((s) => s.preferredLayout);
-  const toggleLayout = useWatchStore((s) => s.toggleLayout);
+  const layout = useLayoutFor('shows');
+  const setLayoutForScope = useWatchStore((s) => s.setLayoutForScope);
   const { highlightFilter } = useLocalSearchParams<{ highlightFilter?: string }>();
   const { theme } = useAppTheme();
   const c = theme.colors;
   const router = useRouter();
 
+  // Shows vs. Anime heading (Phase 75.2) — filters the WATCH LIST tab only.
+  // UPCOMING is deliberately left unfiltered by hubKind: it's meant to read
+  // as "everything airing next" regardless of which heading is selected, a
+  // decision made explicitly rather than an oversight.
+  const [hubKind, setHubKind] = useState<HubKind>('shows');
   const [activeTab, setActiveTab] = useState<HubTab>('watchlist');
   const [upcomingView, setUpcomingView] = useState<UpcomingView>('list');
   const [filter, setFilter] = useState<FilterKey>('WATCH_NEXT');
@@ -488,7 +472,31 @@ export default function ShowsScreen() {
   // catch-up list the user opts into, not a wall of backlog ahead of real
   // future dates. Only labels the user has explicitly opened live in here.
   const [expandedPastLabels, setExpandedPastLabels] = useState<string[]>([]);
-  const now = useNow(1000, activeTab === 'upcoming' && upcomingView === 'list');
+
+  const upcomingItems = useMemo(
+    () => buildUpcomingItems([...watchlist.to_watch.results, ...watchlist.up_to_date.results]),
+    [watchlist]
+  );
+
+  // Phase 75.8: ticked at a flat 1s whenever the Upcoming List view was
+  // active, regardless of whether anything was actually about to air —
+  // re-rendering the whole list every second even when the soonest item
+  // was weeks out. Only ticks that fast when something is genuinely
+  // imminent (<1h away); otherwise a 60s tick is plenty for a countdown
+  // measured in days. Deliberately NOT memoized on `upcomingItems` alone —
+  // this component already re-renders once per tick (useNow's own state
+  // update below), so a plain recompute against Date.now() at each of
+  // those renders is what lets crossing the 1h boundary self-correct
+  // without waiting on the next watchlist refetch; it's a single pass over
+  // an already-capped list, cheap enough to skip memoizing at all.
+  let soonestFutureMs = Infinity;
+  for (const item of upcomingItems) {
+    const delta = resolveAirInstant(item.airDate, item.airDateTime, item.airsTime, item.airsTimezone).getTime() - Date.now();
+    if (delta > 0 && delta < soonestFutureMs) soonestFutureMs = delta;
+  }
+  const ONE_HOUR_MS = 60 * 60 * 1000;
+  const tickIntervalMs = soonestFutureMs < ONE_HOUR_MS ? 1000 : 60000;
+  const now = useNow(tickIntervalMs, activeTab === 'upcoming' && upcomingView === 'list');
 
   // Arriving from "Add to Watchlist" (show detail) passes highlightFilter
   // so the newly added show's bucket is on-screen immediately instead of
@@ -519,12 +527,17 @@ export default function ShowsScreen() {
   }, [fetchWatchlist, fetchHistory]);
 
   const allEntries = useMemo(() => getAllEntries(watchlist), [watchlist]);
-  const rows = useMemo(() => buildRows(allEntries, filter), [allEntries, filter]);
-
-  const upcomingItems = useMemo(
-    () => buildUpcomingItems([...watchlist.to_watch.results, ...watchlist.up_to_date.results]),
-    [watchlist]
+  // WATCH LIST rows are split by the Shows/Anime heading; UPCOMING (below)
+  // is built from the unfiltered watchlist on purpose — see hubKind's note.
+  const hubFilteredEntries = useMemo(
+    () =>
+      allEntries.filter((entry) => {
+        const isAnime = isAnimeByGenresAndLanguage(entry.show.genres, entry.show.original_language);
+        return hubKind === 'anime' ? isAnime : !isAnime;
+      }),
+    [allEntries, hubKind]
   );
+  const rows = useMemo(() => buildRows(hubFilteredEntries, filter), [hubFilteredEntries, filter]);
 
   // Day-wise grouping (user-requested): TODAY/TOMORROW/weekday/exact-date
   // headers, so an episode of one show and an episode of another show
@@ -745,17 +758,17 @@ export default function ShowsScreen() {
           />
         );
       const item = entry.data;
-      const todayIso = todayLocalIso(now);
-      const isOverdue = item.airDate < todayIso;
+      const displayDateIso = resolveDisplayDateIso(item.airDate, item.airDateTime, item.airsTime, item.airsTimezone);
+      const isOverdue = displayDateIso < todayLocalIso(now);
       const isAired = hasAired(item.airDate, now);
-      const target = new Date(`${item.airDate}T00:00:00`);
+      const target = resolveAirInstant(item.airDate, item.airDateTime, item.airsTime, item.airsTimezone);
       const { formatted, isImminent, dayOfWeek } = formatCountdown(target, now);
       return (
         <ShowPosterCard
           showId={item.tmdbShowId}
           title={item.showTitle}
           posterPath={item.posterPath}
-          overlayBadge={isOverdue ? formatDaysAgo(item.airDate, now) : `${formatted} (${dayOfWeek})`}
+          overlayBadge={isOverdue ? formatDaysAgo(displayDateIso, now) : `${formatted} (${dayOfWeek})`}
           overlayBadgeHighlighted={isImminent}
           subtitle={`S${pad(item.seasonNumber)}E${pad(item.episodeNumber)} · ${item.episodeTitle}`}
           checkmark={
@@ -786,22 +799,18 @@ export default function ShowsScreen() {
 
   return (
     <SafeAreaView style={[styles.container, { backgroundColor: c.bg }]} edges={['top']}>
-      {/* ── Header ──
-          The global LayoutToggle only shows on WATCH LIST — UPCOMING has its
-          own 3-way List/Grid/Calendar toggle below (see viewToggleRow), and
-          stacking both read as two redundant, cluttered controls. */}
+      {/* ── Header ── */}
       <View style={styles.header}>
-        <Text style={[styles.headerTitle, { color: c.textPrimary }]}>Shows</Text>
+        <HubHeadingSwitch value={hubKind} onChange={setHubKind} />
         <View style={styles.headerRight}>
           <PressableScale
             style={[styles.headerIcon, { backgroundColor: c.glassFill, borderColor: c.hairline }]}
-            onPress={() => router.push('/lists' as any)}
+            onPress={() => router.push('/lists?media=tv' as any)}
             accessibilityRole="button"
             accessibilityLabel="My Lists"
           >
             <ListChecks color={c.accentInk} size={22} strokeWidth={2} />
           </PressableScale>
-          {activeTab === 'watchlist' && <LayoutToggle />}
         </View>
       </View>
 
@@ -849,6 +858,11 @@ export default function ShowsScreen() {
             ))}
           </ScrollView>
 
+          {/* ── Layout toggle: right-aligned below the pills ── */}
+          <View style={styles.layoutToggleRow}>
+            <LayoutToggle scope="shows" />
+          </View>
+
           {/* ── List ── */}
           {filter === 'HISTORY' ? (
              isLoadingHistory && history.results.length === 0 ? (
@@ -865,7 +879,7 @@ export default function ShowsScreen() {
                </View>
              ) : (
                <FlashList
-                 key={`history-${preferredLayout}`}
+                 key={`history-${layout}`}
                  data={history.results}
                  keyExtractor={(item) => item.id}
                  renderItem={({ item }) => <HistoryRow item={item} />}
@@ -893,19 +907,19 @@ export default function ShowsScreen() {
                   {filter === 'ATTENTION'
                     ? "You're all caught up — nothing needs attention."
                     : filter === 'NOT_STARTED'
-                    ? "Every show in your list has been started."
-                    : "No shows to watch next."}
+                    ? `Every ${hubKind === 'anime' ? 'anime' : 'show'} in your list has been started.`
+                    : `No ${hubKind === 'anime' ? 'anime' : 'shows'} to watch next.`}
                 </Text>
               </GlassSurface>
             </View>
           ) : (
             <FlashList
-              key={`watchlist-${preferredLayout}`}
+              key={`watchlist-${layout}`}
               data={rows}
               keyExtractor={(item) => item.id}
-              renderItem={preferredLayout === 'grid' ? renderGridRow : renderRow}
-              numColumns={preferredLayout === 'grid' ? 3 : 1}
-              extraData={preferredLayout}
+              renderItem={layout === 'grid' ? renderGridRow : renderRow}
+              numColumns={layout === 'grid' ? 3 : 1}
+              extraData={layout}
               contentContainerStyle={styles.listContent}
               refreshControl={
                 <RefreshControl
@@ -927,8 +941,8 @@ export default function ShowsScreen() {
               icon-only, right-aligned utility control instead — visually a
               tier below the primary tab switch, not a peer to it.
               3-way, not a separate global-toggle-plus-2-way-control: List
-              and Grid both drive the same global `preferredLayout` the
-              header toggle drives on WATCH LIST, so a duplicate toggle
+              and Grid both drive the same 'shows'-scoped layout the pills
+              row's toggle drives on WATCH LIST, so a duplicate toggle
               stacked on top of this one would just be a second control for
               the same state. Calendar is its own view, orthogonal to
               list/grid. */}
@@ -941,20 +955,20 @@ export default function ShowsScreen() {
             <PressableScale
               onPress={() => {
                 setUpcomingView('list');
-                if (preferredLayout !== 'list') toggleLayout();
+                if (layout !== 'list') setLayoutForScope('shows', 'list');
               }}
               style={[
                 styles.viewToggleBtn,
                 upcomingView === 'list' &&
-                  preferredLayout === 'list' && { backgroundColor: c.accentFill },
+                  layout === 'list' && { backgroundColor: c.accentFill },
               ]}
               accessibilityRole="button"
               accessibilityLabel="List view"
-              accessibilityState={{ selected: upcomingView === 'list' && preferredLayout === 'list' }}
+              accessibilityState={{ selected: upcomingView === 'list' && layout === 'list' }}
             >
               <ListIcon
                 color={
-                  upcomingView === 'list' && preferredLayout === 'list' ? c.onAccent : c.textSecondary
+                  upcomingView === 'list' && layout === 'list' ? c.onAccent : c.textSecondary
                 }
                 size={16}
                 strokeWidth={2.25}
@@ -963,20 +977,20 @@ export default function ShowsScreen() {
             <PressableScale
               onPress={() => {
                 setUpcomingView('list');
-                if (preferredLayout !== 'grid') toggleLayout();
+                if (layout !== 'grid') setLayoutForScope('shows', 'grid');
               }}
               style={[
                 styles.viewToggleBtn,
                 upcomingView === 'list' &&
-                  preferredLayout === 'grid' && { backgroundColor: c.accentFill },
+                  layout === 'grid' && { backgroundColor: c.accentFill },
               ]}
               accessibilityRole="button"
               accessibilityLabel="Grid view"
-              accessibilityState={{ selected: upcomingView === 'list' && preferredLayout === 'grid' }}
+              accessibilityState={{ selected: upcomingView === 'list' && layout === 'grid' }}
             >
               <LayoutGrid
                 color={
-                  upcomingView === 'list' && preferredLayout === 'grid' ? c.onAccent : c.textSecondary
+                  upcomingView === 'list' && layout === 'grid' ? c.onAccent : c.textSecondary
                 }
                 size={16}
                 strokeWidth={2.25}
@@ -1016,14 +1030,14 @@ export default function ShowsScreen() {
             </View>
           ) : upcomingView === 'list' ? (
             <FlashList
-              key={`upcoming-${preferredLayout}`}
+              key={`upcoming-${layout}`}
               data={visibleUpcomingEntries}
               keyExtractor={(entry) => entry.key}
-              renderItem={preferredLayout === 'grid' ? renderUpcomingGridEntry : renderUpcomingEntry}
+              renderItem={layout === 'grid' ? renderUpcomingGridEntry : renderUpcomingEntry}
               getItemType={upcomingItemType}
-              overrideItemLayout={preferredLayout === 'grid' ? upcomingOverrideLayout : undefined}
-              numColumns={preferredLayout === 'grid' ? 3 : 1}
-              extraData={[preferredLayout, expandedPastLabels]}
+              overrideItemLayout={layout === 'grid' ? upcomingOverrideLayout : undefined}
+              numColumns={layout === 'grid' ? 3 : 1}
+              extraData={[layout, expandedPastLabels]}
               contentContainerStyle={styles.listContent}
               refreshControl={
                 <RefreshControl
@@ -1137,24 +1151,17 @@ const styles = StyleSheet.create({
   upcomingContainer: {
     flex: 1,
   },
+  layoutToggleRow: {
+    alignItems: 'flex-end',
+    paddingHorizontal: 16,
+    marginBottom: 12,
+  },
   pillsScroll: { flexGrow: 0 },
   pillsContainer: {
     paddingHorizontal: 16,
     paddingBottom: 12,
     gap: 8,
     flexDirection: 'row',
-  },
-  pill: {
-    paddingHorizontal: 14,
-    paddingVertical: 7,
-    borderRadius: 20,
-    borderWidth: StyleSheet.hairlineWidth,
-  },
-  pillText: {
-    fontSize: 11,
-    fontWeight: '700',
-    letterSpacing: 0.5,
-    textTransform: 'uppercase',
   },
   listContent: {
     paddingHorizontal: 14,

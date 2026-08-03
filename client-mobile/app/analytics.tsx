@@ -13,7 +13,7 @@ import {
   Flame,
   Trophy,
 } from 'lucide-react-native';
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   ScrollView,
@@ -67,6 +67,7 @@ export default function AnalyticsScreen() {
   const fetchStreak = useWatchStore((s) => s.fetchStreak);
   const fetchCompletion = useWatchStore((s) => s.fetchCompletion);
   const fetchMonthlyRecap = useWatchStore((s) => s.fetchMonthlyRecap);
+  const analyticsDirtyAt = useWatchStore((s) => s.analyticsDirtyAt);
 
   const dashboard = useWatchStore((s) => s.dashboard);
   const genres = useWatchStore((s) => s.genres);
@@ -101,15 +102,42 @@ export default function AnalyticsScreen() {
   // from the mutation site (server-computed aggregates) — refetch on
   // focus is the minimal correct fix instead of reimplementing the
   // aggregation client-side.
+  //
+  // Phase 75.8: that refetch fired unconditionally on every single focus —
+  // switching Analytics <-> Profile <-> Community back and forth re-ran
+  // all 6 requests each time even when nothing had changed. Skipped now
+  // unless either >60s has passed since the last fetch, or
+  // analyticsDirtyAt (bumped by fetchProfile — see its own comment) has
+  // moved since the last time this effect actually ran, i.e. a real watch
+  // mutation happened somewhere in the meantime.
+  const lastFetchedAtRef = useRef(0);
+  const lastSeenDirtyAtRef = useRef(analyticsDirtyAt);
+  const STALE_AFTER_MS = 60_000;
+
   useFocusEffect(
     useCallback(() => {
+      const now = Date.now();
+      const isStale = now - lastFetchedAtRef.current > STALE_AFTER_MS;
+      const hasNewActivity = analyticsDirtyAt !== lastSeenDirtyAtRef.current;
+      if (!isStale && !hasNewActivity) return;
+
+      lastFetchedAtRef.current = now;
+      lastSeenDirtyAtRef.current = analyticsDirtyAt;
       fetchDashboard();
       fetchGenres();
       fetchHeatmap();
       fetchStreak();
       fetchCompletion();
       fetchMonthlyRecap();
-    }, [fetchDashboard, fetchGenres, fetchHeatmap, fetchStreak, fetchCompletion, fetchMonthlyRecap])
+    }, [
+      analyticsDirtyAt,
+      fetchDashboard,
+      fetchGenres,
+      fetchHeatmap,
+      fetchStreak,
+      fetchCompletion,
+      fetchMonthlyRecap,
+    ])
   );
 
   const totalHoursWhole = Math.floor(dashboard?.total_hours_watched ?? 0);

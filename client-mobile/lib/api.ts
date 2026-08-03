@@ -100,9 +100,22 @@ function resolveQueue(token: string | null) {
   refreshQueue = [];
 }
 
-async function performRefresh(): Promise<string | null> {
+/**
+ * `expired` — the server gave a definitive rejection (401/403: the refresh
+ * token itself is invalid, expired, or was already blacklisted by a prior
+ * rotation) — the session really is over.
+ * `transient_failure` — the refresh request itself didn't complete cleanly
+ * (network blip, timeout, a 5xx from the backend) — this says nothing
+ * about whether the refresh token is still good.
+ */
+type RefreshOutcome =
+  | { status: 'success'; token: string }
+  | { status: 'expired' }
+  | { status: 'transient_failure' };
+
+async function performRefresh(): Promise<RefreshOutcome> {
   const refreshToken = await SecureStore.getItemAsync(REFRESH_TOKEN_KEY);
-  if (!refreshToken) return null;
+  if (!refreshToken) return { status: 'expired' };
 
   try {
     // Deliberately bypass the shared `api` instance here so this call
@@ -116,11 +129,25 @@ async function performRefresh(): Promise<string | null> {
     if (newRefreshToken) {
       await SecureStore.setItemAsync(REFRESH_TOKEN_KEY, newRefreshToken);
     }
-    return newAccessToken;
-  } catch {
-    await SecureStore.deleteItemAsync(ACCESS_TOKEN_KEY);
-    await SecureStore.deleteItemAsync(REFRESH_TOKEN_KEY);
-    return null;
+    return { status: 'success', token: newAccessToken };
+  } catch (err) {
+    // Bug fix (2026-08-03, user-reported "sometimes automatically logged
+    // out"): this used to treat ANY failure here — including a network
+    // blip, a request timeout, or a transient 5xx from the backend, none
+    // of which say anything about the refresh token itself — identically
+    // to a genuine rejection, wiping both tokens and forcing a hard
+    // redirect to /login even though the 30-day refresh token was still
+    // perfectly valid. Only a real 401/403 response means the server
+    // actually rejected the token; everything else is a failed *attempt*,
+    // not proof the session is over, so the stored tokens survive it and
+    // the next natural request just retries the whole flow fresh.
+    const status = axios.isAxiosError(err) ? err.response?.status : undefined;
+    if (status === 401 || status === 403) {
+      await SecureStore.deleteItemAsync(ACCESS_TOKEN_KEY);
+      await SecureStore.deleteItemAsync(REFRESH_TOKEN_KEY);
+      return { status: 'expired' };
+    }
+    return { status: 'transient_failure' };
   }
 }
 
@@ -183,17 +210,22 @@ api.interceptors.response.use(
     }
 
     isRefreshing = true;
-    const newToken = await performRefresh();
+    const outcome = await performRefresh();
     isRefreshing = false;
-    resolveQueue(newToken);
+    resolveQueue(outcome.status === 'success' ? outcome.token : null);
 
-    if (!newToken) {
-      sessionExpiredHandler?.();
+    if (outcome.status !== 'success') {
+      // Only a genuine rejection ends the session — a transient failure
+      // just fails this one request and leaves the stored tokens intact
+      // for the next attempt (see performRefresh's docstring).
+      if (outcome.status === 'expired') {
+        sessionExpiredHandler?.();
+      }
       return Promise.reject(error);
     }
 
     originalRequest.headers = originalRequest.headers ?? {};
-    originalRequest.headers.Authorization = `Bearer ${newToken}`;
+    originalRequest.headers.Authorization = `Bearer ${outcome.token}`;
     return api(originalRequest);
   }
 );

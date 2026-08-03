@@ -134,6 +134,7 @@ class CachedEpisodeSerializer(serializers.ModelSerializer):
             "title",
             "overview",
             "air_date",
+            "air_datetime",
             "runtime_minutes",
             "still_path",
             "is_watched",
@@ -166,6 +167,7 @@ LEAN_EPISODE_FIELDS = (
     "episode_number",
     "title",
     "air_date",
+    "air_datetime",
     "runtime_minutes",
 )
 
@@ -189,6 +191,7 @@ class CachedShowSerializer(serializers.ModelSerializer):
             "original_language",
             "genres",
             "next_episode_air_date",
+            "next_episode_air_datetime",
             "next_episode_season_number",
             "next_episode_number",
             "next_episode_name",
@@ -233,6 +236,7 @@ class WatchlistSerializer(serializers.ModelSerializer):
     aired_episode_count = serializers.SerializerMethodField()
     progress_percentage = serializers.SerializerMethodField()
     last_watched_at = serializers.SerializerMethodField()
+    active_rewatch = serializers.SerializerMethodField()
 
     class Meta:
         model = Watchlist
@@ -246,6 +250,7 @@ class WatchlistSerializer(serializers.ModelSerializer):
             "aired_episode_count",
             "progress_percentage",
             "last_watched_at",
+            "active_rewatch",
             "added_at",
             "updated_at",
         ]
@@ -278,6 +283,19 @@ class WatchlistSerializer(serializers.ModelSerializer):
         if annotated is not None:
             return annotated
         return WatchState.objects.filter(user=obj.user, episode__show=obj.show).count()
+
+    def get_active_rewatch(self, obj: Watchlist):
+        # WatchlistView builds this dict with two flat queries for the whole
+        # response (same technique as episodes_by_show) — never a per-row
+        # query. None for any entry with no in-progress rewatch round.
+        entry = self.context.get("active_rewatch_by_show", {}).get(obj.show_id)
+        if entry is None:
+            return None
+        return {
+            "round_number": entry["round_number"],
+            "watched_episode_count": entry["watched_episode_count"],
+            "aired_episode_count": self.get_aired_episode_count(obj),
+        }
 
     def get_progress_percentage(self, obj: Watchlist) -> float:
         aired = self.get_aired_episode_count(obj)
@@ -397,6 +415,9 @@ class MovieWatchlistSerializer(serializers.ModelSerializer):
     # (MovieWatchlistView.get()) — None for entries with no annotation
     # (e.g. any other caller of this serializer that doesn't annotate it).
     watched_at = serializers.SerializerMethodField()
+    # Populated via the view's `rewatch_count_annotated` Count annotation —
+    # see watched_at's comment above, same convention.
+    rewatch_count = serializers.SerializerMethodField()
 
     class Meta:
         model = MovieWatchlist
@@ -406,10 +427,14 @@ class MovieWatchlistSerializer(serializers.ModelSerializer):
             "added_at",
             "updated_at",
             "watched_at",
+            "rewatch_count",
         ]
 
     def get_watched_at(self, obj):
         return getattr(obj, "watch_state_watched_at", None)
+
+    def get_rewatch_count(self, obj):
+        return getattr(obj, "rewatch_count_annotated", 0)
 class ImportJobSerializer(serializers.ModelSerializer):
     """
     Progress + result for one TV Time import run. `payload` is

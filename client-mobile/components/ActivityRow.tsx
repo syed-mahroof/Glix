@@ -1,7 +1,9 @@
 // client-mobile/components/ActivityRow.tsx
-// One card in the friends activity feed (Phase 74) — either a collapsed
-// multi-episode binge or a single movie watch. See
-// core/social_views.py::FriendsActivityView for how these are built.
+// One card in the friends activity feed — a review left by someone you
+// follow (Phase 75.6; was raw watch activity — see
+// core/social_views.py::FriendsActivityView's docstring for why that
+// changed). Reuses StarRatingDisplay.tsx, the same read-only star row
+// app/profile/reviews.tsx's own review rows use.
 
 import { Image } from 'expo-image';
 import { useRouter } from 'expo-router';
@@ -13,6 +15,7 @@ import { useAppTheme } from '../lib/theme';
 import type { ActivityCard } from '../store/socialStore';
 import GlassSurface from './GlassSurface';
 import PressableScale from './PressableScale';
+import StarRatingDisplay from './StarRatingDisplay';
 
 const POSTER_BASE_URL = 'https://image.tmdb.org/t/p/w185';
 
@@ -36,10 +39,7 @@ export default function ActivityRow({ card }: ActivityRowProps) {
   const { theme } = useAppTheme();
   const c = theme.colors;
 
-  const isEpisodes = card.type === 'episodes';
-  const posterPath = isEpisodes ? card.poster_path : card.poster_path;
-  const title = isEpisodes ? card.show_title : card.movie_title;
-  const detailHref = isEpisodes ? `/show/${card.show_id}` : `/movie/${card.movie_id}`;
+  const detailHref = card.media_type === 'tv' ? `/show/${card.tmdb_id}` : `/movie/${card.tmdb_id}`;
 
   return (
     <GlassSurface radius={14} style={styles.card}>
@@ -55,29 +55,31 @@ export default function ActivityRow({ card }: ActivityRowProps) {
         )}
       </PressableScale>
 
-      <View style={styles.textColumn}>
-        <Text style={[styles.line, { color: c.textPrimary }]} numberOfLines={2}>
+      <PressableScale style={styles.textColumn} onPress={() => router.push(detailHref as any)}>
+        <Text style={[styles.line, { color: c.textPrimary }]} numberOfLines={1}>
           <Text style={styles.username} onPress={() => router.push(`/user/${card.username}` as any)}>
             {card.username}
           </Text>{' '}
-          watched{' '}
-          {isEpisodes ? (
-            <Text style={styles.mediaTitle}>
-              {card.episode_count} episode{card.episode_count === 1 ? '' : 's'} of {title}
-            </Text>
-          ) : (
-            <Text style={styles.mediaTitle}>{title}</Text>
-          )}
+          rated <Text style={styles.mediaTitle}>{card.title}</Text>
         </Text>
-        <Text style={[styles.timestamp, { color: c.textTertiary }]}>{timeAgo(card.watched_at)}</Text>
-      </View>
+        <StarRatingDisplay rating={card.rating} size={13} gap={1} />
+        {card.note ? (
+          <Text style={[styles.note, { color: c.textSecondary }]} numberOfLines={2}>
+            {card.note}
+          </Text>
+        ) : null}
+        <Text style={[styles.timestamp, { color: c.textTertiary }]}>{timeAgo(card.updated_at)}</Text>
+      </PressableScale>
 
       <PressableScale onPress={() => router.push(detailHref as any)}>
-        {posterPath ? (
-          <Image source={{ uri: `${POSTER_BASE_URL}${posterPath}` }} style={[styles.poster, { backgroundColor: c.bgElevated }]} />
+        {card.poster_path ? (
+          <Image
+            source={{ uri: `${POSTER_BASE_URL}${card.poster_path}` }}
+            style={[styles.poster, { backgroundColor: c.bgElevated }]}
+          />
         ) : (
           <View style={[styles.posterFallback, { backgroundColor: c.bgElevated }]}>
-            {isEpisodes ? (
+            {card.media_type === 'tv' ? (
               <Tv color={c.textTertiary} size={16} strokeWidth={1.75} />
             ) : (
               <Clapperboard color={c.textTertiary} size={16} strokeWidth={1.75} />
@@ -114,6 +116,7 @@ const styles = StyleSheet.create({
   },
   textColumn: {
     flex: 1,
+    gap: 3,
   },
   line: {
     fontSize: 13,
@@ -125,9 +128,13 @@ const styles = StyleSheet.create({
   mediaTitle: {
     fontWeight: '700',
   },
+  note: {
+    fontSize: 12,
+    lineHeight: 16,
+  },
   timestamp: {
     fontSize: 11,
-    marginTop: 3,
+    marginTop: 1,
   },
   poster: {
     width: 36,

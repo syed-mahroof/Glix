@@ -24,7 +24,7 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from core.models import CachedShow, MovieCache, MovieReview, ShowReview
+from core.models import CachedShow, MovieCache, MovieReview, MovieWatchState, ShowReview, WatchState
 from core.review_serializers import MovieReviewSerializer, ShowReviewSerializer
 
 # Half-star steps: 0.5, 1.0, 1.5, ... 5.0.
@@ -78,6 +78,17 @@ class ShowReviewView(APIView):
             return Response({"detail": "note must be a string."}, status=status.HTTP_400_BAD_REQUEST)
 
         show = get_object_or_404(CachedShow, pk=tmdb_id)
+
+        # Gated on having watched something (Phase 75.3) — a review is a
+        # verdict on the show, not a prediction. One episode is the bar
+        # (not "fully caught up") since people legitimately rate mid-season;
+        # requiring 100% completion would be hostile to that normal case.
+        if not WatchState.objects.filter(user=request.user, episode__show_id=tmdb_id).exists():
+            return Response(
+                {"detail": "Watch at least one episode before reviewing this show."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
         review, created = ShowReview.objects.update_or_create(
             user=request.user, show=show, defaults={"rating": rating, "note": note}
         )
@@ -112,6 +123,16 @@ class MovieReviewView(APIView):
             return Response({"detail": "note must be a string."}, status=status.HTTP_400_BAD_REQUEST)
 
         movie = get_object_or_404(MovieCache, pk=tmdb_id)
+
+        # Gated on having watched it (Phase 75.3) — same reasoning as
+        # ShowReviewView.post, a movie is binary so there's no mid-way case
+        # to accommodate the way there is for a show's episodes.
+        if not MovieWatchState.objects.filter(user=request.user, movie_id=tmdb_id).exists():
+            return Response(
+                {"detail": "Mark this movie as watched before reviewing it."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
         review, created = MovieReview.objects.update_or_create(
             user=request.user, movie=movie, defaults={"rating": rating, "note": note}
         )

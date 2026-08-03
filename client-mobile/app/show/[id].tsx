@@ -8,6 +8,7 @@ import {
   ListPlus,
   MessageCircle,
   Plus,
+  RotateCcw,
   Share2,
   Star,
   Trash2,
@@ -101,6 +102,9 @@ export default function ShowDetailScreen() {
   const bulkToggleWatchState = useWatchStore((state) => state.bulkToggleWatchState);
   const removeShowFromWatchlist = useWatchStore((state) => state.removeShowFromWatchlist);
   const undoRemoveShow = useWatchStore((state) => state.undoRemoveShow);
+  const startShowRewatch = useWatchStore((state) => state.startShowRewatch);
+  const cancelShowRewatch = useWatchStore((state) => state.cancelShowRewatch);
+  const [isTogglingRewatch, setIsTogglingRewatch] = useState(false);
 
   const [show, setShow] = useState<Show | null>(null);
   const [cast, setCast] = useState<CastMember[]>([]);
@@ -235,6 +239,25 @@ export default function ShowDetailScreen() {
     } finally {
       setIsTogglingFavorite(false);
     }
+  };
+
+  /** Rewatch (Phase 75.7) — only offered once every aired episode is
+   *  already watched (progress_percentage === 100). Starting/cancelling a
+   *  round never touches WatchState; see ShowRewatch's model docstring. */
+  const handleStartRewatch = async () => {
+    if (Number.isNaN(tmdbId) || isTogglingRewatch) return;
+    setIsTogglingRewatch(true);
+    const error = await startShowRewatch(tmdbId);
+    setIsTogglingRewatch(false);
+    if (error) setSectionError(error);
+  };
+
+  const handleStopRewatching = async () => {
+    if (Number.isNaN(tmdbId) || isTogglingRewatch) return;
+    setIsTogglingRewatch(true);
+    const success = await cancelShowRewatch(tmdbId);
+    setIsTogglingRewatch(false);
+    if (!success) setSectionError('Could not stop rewatching — try again.');
   };
 
   /** Phase I: no forced navigation on add — the pill itself already flips to
@@ -579,9 +602,64 @@ export default function ShowDetailScreen() {
           </GlassSurface>
         )}
 
+        {/* Rewatch (Phase 75.7) — only offered once every aired episode is
+            already watched; never touches the progress card above, which
+            always reflects the original watch-through regardless of
+            whether a rewatch round is active. */}
+        {watchlistEntry && watchlistEntry.progress_percentage >= 100 && (
+          <GlassSurface radius={16} style={styles.rewatchCard}>
+            {watchlistEntry.active_rewatch ? (
+              <>
+                <View style={styles.progressTextColumn}>
+                  <Text style={[styles.progressTitle, { color: c.accentInk }]}>
+                    Rewatching · Round {watchlistEntry.active_rewatch.round_number}
+                  </Text>
+                  <Text style={[styles.progressSubtitle, { color: c.textSecondary }]}>
+                    {watchlistEntry.active_rewatch.watched_episode_count} of{' '}
+                    {watchlistEntry.active_rewatch.aired_episode_count} episodes this round
+                  </Text>
+                </View>
+                <PressableScale
+                  onPress={handleStopRewatching}
+                  disabled={isTogglingRewatch}
+                  style={[styles.rewatchBtn, { borderColor: c.hairline, borderWidth: StyleSheet.hairlineWidth }]}
+                  accessibilityRole="button"
+                  accessibilityLabel="Stop rewatching"
+                >
+                  <Text style={[styles.rewatchBtnText, { color: c.textSecondary }]}>Stop rewatching</Text>
+                </PressableScale>
+              </>
+            ) : (
+              <>
+                <View style={styles.progressTextColumn}>
+                  <Text style={[styles.progressTitle, { color: c.textPrimary }]}>Watched it all</Text>
+                  <Text style={[styles.progressSubtitle, { color: c.textSecondary }]}>
+                    Start a rewatch to go through it again
+                  </Text>
+                </View>
+                <PressableScale
+                  onPress={handleStartRewatch}
+                  disabled={isTogglingRewatch}
+                  style={[styles.rewatchBtn, { backgroundColor: c.accentFill }]}
+                  accessibilityRole="button"
+                  accessibilityLabel="Rewatch"
+                >
+                  <RotateCcw color={c.onAccent} size={15} strokeWidth={2.25} />
+                  <Text style={[styles.rewatchBtnText, { color: c.onAccent }]}>Rewatch</Text>
+                </PressableScale>
+              </>
+            )}
+          </GlassSurface>
+        )}
+
         {!Number.isNaN(tmdbId) && (
           <View style={styles.section}>
-            <RatingReviewCard mediaType="show" tmdbId={tmdbId} onSaved={setReviewSnackbarMessage} />
+            <RatingReviewCard
+              mediaType="show"
+              tmdbId={tmdbId}
+              onSaved={setReviewSnackbarMessage}
+              canReview={(watchlistEntry?.watched_episode_count ?? 0) > 0}
+            />
           </View>
         )}
 
@@ -622,8 +700,14 @@ export default function ShowDetailScreen() {
                   episodeCount={progress?.episodeCount}
                   watchedCount={progress?.watchedCount}
                   onPress={() => router.push(`/show/${tmdbId}/season/${seasonNumber}`)}
+                  // Whole-season bulk toggle has no rewatch-aware counterpart
+                  // (RewatchEpisodeToggleView is per-episode only) — while a
+                  // round is active this is hidden in favor of the season
+                  // screen's per-episode rewatch ticks.
                   onToggleWatched={
-                    watchlistEntry ? () => handleToggleSeasonOutside(seasonNumber) : undefined
+                    watchlistEntry && !watchlistEntry.active_rewatch
+                      ? () => handleToggleSeasonOutside(seasonNumber)
+                      : undefined
                   }
                   isTogglingWatched={togglingSeasonNumber === seasonNumber}
                 />
@@ -904,6 +988,26 @@ const styles = StyleSheet.create({
   },
   progressSubtitle: {
     fontSize: 12,
+  },
+  rewatchCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 14,
+    marginHorizontal: 20,
+    marginTop: 10,
+    padding: 14,
+  },
+  rewatchBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingHorizontal: 14,
+    paddingVertical: 9,
+    borderRadius: 12,
+  },
+  rewatchBtnText: {
+    fontSize: 13,
+    fontWeight: '700',
   },
   overview: {
     fontSize: 13,

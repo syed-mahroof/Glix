@@ -1,5 +1,6 @@
 # Glix — Roadmap & Feature Checklist
-**Last Updated:** 2026-08-01 (Phase 74 — 14-item user bundle in one continuous pass, performance deliberately last: unreleased-content gating extended to movies (was TV-only), half-star ratings (`DecimalField` + `CheckConstraint`, migration `0015`), a full social layer — follow graph, search, public profiles, friends activity feed (`Follow` model + `UserProfile.is_private`, migration `0016`) — Watch Activity full-history heatmap (`?range=all` on the existing endpoint, fixed-threshold intensity normalization replacing a scheme that broke at multi-year scale), a Movies analytics segment (existing TV numbers explicitly unchanged), avatar picker expanded 2→3 tabs, a backend/client performance pass (real TMDB timeout budget fix — prior "3.5s bound" comment only counted backoff sleep, not timeout×attempts; thread-pooled TMDB calls; `CONN_MAX_AGE`; Redis socket timeouts; client request dedup+abort), and a mid-session ad hoc "everything should be snappy" follow-up (React.memo on 4 previously-unmemoized list row/card components + two watchStore optimistic-update fixes that were rebuilding the user's entire library on a single-show toggle). Security/audit pass closed a real username-uniqueness race (case-insensitive app check vs. case-sensitive DB constraint) and confirmed private-account enumeration is genuinely blocked. Backend suite 118→148 (+30), `tsc --noEmit` clean, `manage.py check` clean, two new additive migrations. See Phase 73 below.)
+**Last Updated:** 2026-08-03 (Phase 75 — 9-phase user-approved plan in one continuous pass: real per-episode air times via TVmaze `airstamp` (migration `0017`), a first-class Shows/Anime split + "My Anime" profile screen, reviews gated on watched, context-aware Lists defaults, a default-layout preference system (global + per-screen override), Community's Activity feed switched from watch history to real reviews (+ a self-follow-button-400s fix + Discussions 8→1 request collapse), a rewatch system (`ShowRewatch`/`RewatchEpisodeState`/`MovieRewatch`, migration `0018`, parallel to `WatchState` by design), a Celery/Redis cost pass (gossip/mingle/heartbeat off, throttling off Redis, wider polling) plus 5 cartesian-join query fixes and 2 N+1 fixes, and a closing sweep (shared `FilterPill`, dead-code removal). Plus a user-reported auto-logout bug fixed via two independent root causes in the token-refresh/auth-boot path, outside the plan's scope. Backend suite 148→192 (+44), `tsc --noEmit` clean, `jest` 12/12, `manage.py check` clean, two new additive migrations applied. Render redeploy (for the infra savings to take effect) not yet triggered. See Phase 74 below.)
+**Last Updated (prior):** 2026-08-01 (Phase 74 — 14-item user bundle in one continuous pass, performance deliberately last: unreleased-content gating extended to movies (was TV-only), half-star ratings (`DecimalField` + `CheckConstraint`, migration `0015`), a full social layer — follow graph, search, public profiles, friends activity feed (`Follow` model + `UserProfile.is_private`, migration `0016`) — Watch Activity full-history heatmap (`?range=all` on the existing endpoint, fixed-threshold intensity normalization replacing a scheme that broke at multi-year scale), a Movies analytics segment (existing TV numbers explicitly unchanged), avatar picker expanded 2→3 tabs, a backend/client performance pass (real TMDB timeout budget fix — prior "3.5s bound" comment only counted backoff sleep, not timeout×attempts; thread-pooled TMDB calls; `CONN_MAX_AGE`; Redis socket timeouts; client request dedup+abort), and a mid-session ad hoc "everything should be snappy" follow-up (React.memo on 4 previously-unmemoized list row/card components + two watchStore optimistic-update fixes that were rebuilding the user's entire library on a single-show toggle). Security/audit pass closed a real username-uniqueness race (case-insensitive app check vs. case-sensitive DB constraint) and confirmed private-account enumeration is genuinely blocked. Backend suite 118→148 (+30), `tsc --noEmit` clean, `manage.py check` clean, two new additive migrations. See Phase 73 below.)
 **Last Updated (prior):** 2026-07-31 (Phase 73 — widget countdown restored + a genuine TVmaze-sourced local release time (TMDB has none), "For You" recommendations split into independent tv/movie feeds (`?type=` param), 3 push-notification bugs fixed (a foreground-display regression, a fresh-login token-registration gap, a new-episode alert condition that could essentially never fire), and one more real bug found via a broad sweep (Cascade Catch-Up's `bulk_create` silently skipping badges/streak/cache invalidation, same class of gap `run_tvtime_import` already worked around for its own `bulk_create`). New migration `0014` (`CachedEpisode.notified_at`, `CachedShow.airs_time`/`airs_timezone`/`airtime_checked_at`). Backend suite 93→118 (+25), jest 3→7 (+4), `tsc --noEmit` clean, `manage.py check` clean. See Phase 72 below.)
 **Last Updated (prior):** 2026-07-29 (Phase 71 — Achievements screen silent-failure bug + 3 new features, user-reported: badges genuinely earned weren't appearing ("0 / 0, No badges in this category"). Root cause: `achievements.tsx` (and, once audited, the 3 other analytics screens — `analytics.tsx`, `statistics.tsx`, `year-review.tsx`) fetched via `fetchX()` actions that already caught errors into `analyticsError`, but none of the four screens ever read that state — a failed/slow request (the exact "Can't reach Glix" class Phase 70 targeted) silently rendered an indistinguishable-from-genuinely-empty state instead of an error. Backend always returns all `BADGE_ORDER` entries regardless of earned status, so a real empty state is never actually "0 / 0" — that fraction was proof of a swallowed fetch failure, not zero badges. Fixed by extracting the existing show/movie-detail retry-card pattern into a shared `ErrorState.tsx` component and wiring `analyticsError` into all four screens. New features: (1) shareable Year in Review image export — `react-native-view-shot` (new native dependency, needs a native rebuild) captures an enriched hero card (brand label, top show, favorite genre) to PNG, shared via `expo-sharing`; (2) smarter weekly push digest — `send_weekly_digest` now reports movies watched (previously never counted at all), the week's top show by name, and episodes airing in the next 7 days, instead of a single raw episode count; (3) real cross-library "For You" recommendations — new `GET /api/recommendations/for-you/`, seeds from the user's own top-watched shows/movies, merges TMDB's per-title `/recommendations` across seeds and ranks by cross-seed frequency (distinct from the existing single-title passthrough), 6h per-user cache, new Discover Hub row with a "Because you watched X" reason line. Added 8 new backend tests (digest content, upcoming-count Watchlist-archived-row exclusion correctness, recommendations exclusion/caching) — backend suite 93/93 passing, `tsc --noEmit` clean, both jest suites passing, `manage.py check` clean, no migration drift. See Phase 70 below.)
 **Last Updated (prior):** 2026-07-29 (Phase 70 — multi-user performance/stability + 3 new features + 4 confirmed bug fixes, prompted by the app's first real multi-user usage (owner + brother + a friend, one importing 300+ shows) surfacing intermittent "Can't reach Glix right now" failures on Render's single free-tier container. Root-caused to two real, fixable things (not the already-solved cold-start path from Phase 69): (1) gunicorn running `--workers 1` with no threads, so one slow/blocked request serialized every other user's request behind it, especially during a big import chunk sharing the same container's CPU with the Celery worker — fixed via `--threads 4 --worker-class gthread` (no extra process memory) + `--max-requests`/jitter recycling; (2) `WatchlistView`'s `page_size=all` path (the Shows Hub's always-used fetch mode) and `MovieWatchlistView` re-running their full annotate+prefetch query on every load regardless of whether anything changed — fixed with a short-TTL (25s) per-user Redis cache, invalidated primarily via new `post_save`/`post_delete` signal receivers on Watchlist/WatchState/MovieWatchlist/MovieWatchState (covers every view-layer mutation site without threading manual busts through ~11 call sites) plus one explicit bust in `run_tvtime_import` (the one path that bypasses signals by design, via `bulk_create`). Added a lock around `TMDBService`'s shared-session lazy-init (Phase 69's fix), now genuinely reachable under real thread concurrency. New: a stats resync endpoint/action (`POST /api/profile/resync-stats/`, recomputes `total_time_watched` from a true aggregate SUM over WatchState/MovieWatchState rather than trusting the incrementally-maintained counter) with tap-to-sync UI on both Profile Hub stat cards; a "Last Watched" pill on Movies Hub (new `watch_state_watched_at` subquery annotation + serializer field, sorted client-side); a full "Add to List" feature (`CustomList`/`CustomListItem` models + migration `0012`, `lists_views.py`/`lists_urls.py`, `listsStore.ts`, `AddToListSheet.tsx`, new `/lists` + `/lists/[id]` screens, entry point on the movie detail screen, Movies Hub's old Discover-shortcut header icon repurposed to open it — Discover stays one tap away via the bottom tab bar). Android's Upcoming widget row was silently dropping the `countdown` string the payload already computed (iOS showed it, Android didn't) — now shown on both, matching format; confirmed TMDB has no per-episode time-of-day, only a calendar date, so this is the real ceiling on "release time" precision. Fixed 4 confirmed-live bugs: `AnalyticsAchievementsView` compared an int `Count()` annotation against the string literal `"watched"` (a bogus `models_aired()` helper) — this 500'd on every real call on Postgres; deleted the dead/broken block. `AnalyticsDashboardView` computed `shows_completed` twice, discarding the first (a wasted query). Deleted the unused `IsOwner` permission class and a dead local var in `CommentSerializer.validate()`. Added focused backend tests for all of the above (analytics regression, cache-invalidation with `django_db(transaction=True)` to genuinely exercise `on_commit`, stats resync, the full Lists CRUD/ownership surface) — backend suite 65→85 passing. Fixed a pre-existing gap that silently no-op'd `__tests__/watchStore.test.ts` (AsyncStorage has no native module under Jest; added the package's own documented mock via a new `jest.setup.js`). `tsc --noEmit` zero errors, both jest suites passing, backend 85/85 — all verified inside the `watchtracker_backend` container (the host venv still can't reach the right Postgres — a native Windows postgres.exe squats on port 5432 alongside Docker's mapping, same pre-existing machine quirk Phase 69 first hit, worked around not fixed). See Phase 69 below.)
@@ -98,6 +99,7 @@ Legend: ✅ Complete · 🟨 Partial · ⬜ Not Started
 | 72 | TV Time Import Overhaul + Free-Tier Hardening — cached external-id resolution, bulk episode upsert, `ImportJob.payload_fingerprint`, self-healing stalled-import beat task, progress-based client polling, `WatchlistView` payload slimming (~25k model instances → 2 flat queries), gzip, Celery/gunicorn free-tier tuning, widget countdown → date-only label | 2026-07-31 ✅ |
 | 73 | Widget Countdown+Real Air-Time Restore + Per-Segment Recommendations + Push-Notification Fixes — countdown restored + new TVmaze-sourced local release time, "For You" split into independent tv/movie feeds, 3 push bugs fixed (foreground display, fresh-login token registration, new-episode alert condition), Cascade Catch-Up badge/streak/cache-bust gap found and fixed | 2026-07-31 ✅ |
 | 74 | 14-Item Bundle: Unreleased-Content Gating (Movies) + Half-Star Ratings + Full Social Layer + Watch-Activity Full History + Movie Analytics + Avatar Picker Expansion + Performance Pass + Security/Polish Audit — `Follow` model/`is_private` (migration `0016`), half-star `DecimalField`+`CheckConstraint` (migration `0015`), `?range=all` heatmap with fixed-threshold intensity, `AnalyticsMoviesView`, TMDB timeout-budget fix + thread-pooled calls, `CONN_MAX_AGE`/Redis timeouts, request dedup+abort, list-row `React.memo` + watchStore rebuild-scope fixes (user-reported "laggy" follow-up), username-race fix | 2026-08-01 ✅ |
+| 75 | Air-Time Truth + Anime Split + Rewatch + Community Reviews + Performance — real per-episode air times via TVmaze `airstamp` (`CachedEpisode.air_datetime`, migration `0017`) + countdown removed from the widget, first-class Shows/Anime split (`HubHeadingSwitch`, new "My Anime" profile screen), reviews gated on watched, context-aware Lists defaults, default-layout preference system (global + per-screen override), Community Activity feed switched to real reviews (+ self-follow-button fix + Discussions 8→1 request collapse), rewatch system (`ShowRewatch`/`RewatchEpisodeState`/`MovieRewatch`, migration `0018`, parallel to `WatchState`), Celery/Redis cost pass + 5 cartesian-join query fixes + 2 N+1 fixes, closing sweep (`FilterPill` extraction, dead-code removal); plus a user-reported auto-logout bug fixed via 2 independent root causes in the token-refresh/auth-boot path | 2026-08-03 ✅ |
 
 ---
 
@@ -454,8 +456,12 @@ Design plan lives in a published artifact ("Glix · Phase 9 · Design System & P
 - ✅ Movies Hub (`(tabs)/movies.tsx`)
 - ✅ Discover Hub (`(tabs)/discover.tsx`) — Hero carousel, sections, genre grid, universal search
 - ✅ Profile Hub (`(tabs)/profile.tsx`) — Stats, badges, social bar, migration tools
-- ✅ Profile > My Shows (`profile/shows.tsx`)
-- ✅ Profile > My Movies (`profile/movies.tsx`)
+- ✅ Profile > My Shows (`profile/shows.tsx`) — **Phase 75:** anime removed (moved to My Anime)
+- ✅ Profile > My Movies (`profile/movies.tsx`) — **Phase 75:** anime movies removed (moved to My Anime)
+- ✅ Profile > My Anime (`profile/anime.tsx`) — **NEW Phase 75** — Shows/Movies segmented anime hub
+- ✅ Profile > Reviews (`profile/reviews.tsx`) — **NEW Phase 74** — consumes the pre-existing review list endpoints
+- ✅ Public Profile (`user/[username].tsx`) + Connections (`user/[username]/connections.tsx`) — **NEW Phase 74**
+- ✅ Lists (`lists/index.tsx`) + List Detail (`lists/[id].tsx`) — **NEW Phase 70**
 - ✅ Search (`search.tsx`) — debounced, universal
 - ✅ Settings (`settings.tsx`)
 - ✅ Show Details (`show/[id].tsx`) — Optimistic UI, cast, seasons, providers
@@ -526,12 +532,30 @@ Design plan lives in a published artifact ("Glix · Phase 9 · Design System & P
 
 ### Community
 - ✅ GET/POST `/api/comments/`
+- ✅ GET `/api/comments/feed/` — **NEW Phase 75** — one paginated feed of recent comments across the viewer's tracked shows, replacing Discussions' old 8-parallel-request client-side fan-out
 - ✅ GET/POST `/api/comments/<id>/replies/`
 - ✅ GET/PATCH/DELETE `/api/comments/<id>/`
 - ✅ POST `/api/comments/<id>/like/`
 - ✅ POST `/api/comments/<id>/report/`
 - ✅ GET `/api/moderation/reports/`
 - ✅ POST `/api/moderation/reports/<id>/resolve/`
+
+### Reviews & Ratings (Phase L / 52; half-star upgrade Phase 74)
+- ✅ GET `/api/reviews/shows/` / GET `/api/reviews/movies/` — paginated, own reviews
+- ✅ GET/POST/DELETE `/api/reviews/shows/<tmdb_id>/` / `/api/reviews/movies/<tmdb_id>/` — **Phase 75:** POST now 403s unless ≥1 episode (or the movie) is marked watched; DELETE stays ungated
+
+### Social — follow graph, search, public profiles, activity feed (NEW Phase 74)
+- ✅ GET `/api/users/search/`
+- ✅ POST `/api/users/<username>/follow/` — **Phase 75:** `is_self` now on the edge serializer, fixing a confirmed 400 when your own row rendered a tappable "Follow" button
+- ✅ GET `/api/users/<username>/followers/` / GET `/api/users/<username>/following/`
+- ✅ GET `/api/users/<username>/` — public profile blob
+- ✅ GET `/api/feed/activity/` — **Phase 75:** rewritten from a `WatchState`/`MovieWatchState` union to real `ShowReview`/`MovieReview` rows from followees; fixed a confirmed cache-key bug where every page returned page 1's payload for the full TTL
+
+### Rewatch (NEW Phase 75)
+- ✅ GET `/api/rewatch/shows/<tmdb_id>/` — active round + its watched episode ids
+- ✅ POST `/api/rewatch/shows/<tmdb_id>/start/` — 400 unless every aired episode is already watched and no round is already active
+- ✅ POST `/api/rewatch/episodes/<episode_tmdb_id>/toggle/` — presence toggle within the active round
+- ✅ POST/DELETE `/api/rewatch/movies/<tmdb_id>/` — +1 / remove-most-recent movie rewatch counter
 
 ### Analytics (11 endpoints)
 - ✅ GET `/api/analytics/dashboard/`
@@ -563,13 +587,14 @@ Design plan lives in a published artifact ("Glix · Phase 9 · Design System & P
 
 ## Database Models
 
-- ✅ `UserProfile` (auto-created by signal)
-- ✅ `CachedShow` — **Phase 73:** added `airs_time`/`airs_timezone`/`airtime_checked_at` (migration `0014`) — TVmaze-sourced broadcast slot, since TMDB carries no time-of-day at all
-- ✅ `CachedEpisode` — **Phase 73:** added `notified_at` (migration `0014`) — gates the "new episode" push alert so it fires exactly once per episode instead of a condition that could essentially never trigger (see `AUDIT.md`)
+- ✅ `UserProfile` (auto-created by signal) — **Phase 74:** added `is_private` (migration `0016`, "ghost mode"). **Phase 75:** added `total_rewatch_time_watched` (migration `0018`)
+- ✅ `CachedShow` — **Phase 73:** added `airs_time`/`airs_timezone`/`airtime_checked_at` (migration `0014`) — TVmaze-sourced broadcast slot, since TMDB carries no time-of-day at all. **Phase 75:** added `tvmaze_id`/`next_episode_air_datetime` (migration `0017`)
+- ✅ `CachedEpisode` — **Phase 73:** added `notified_at` (migration `0014`) — gates the "new episode" push alert so it fires exactly once per episode instead of a condition that could essentially never trigger (see `AUDIT.md`). **Phase 75:** added `air_datetime` (migration `0017`) — exact UTC instant from TVmaze's per-episode `airstamp`, the fix for missing release times on slot-less streaming shows
 - ✅ `Watchlist` — **Phase 11:** added `ignore_catchup` field
 - ✅ `WatchState`
 - ✅ `EpisodeInteraction`
 - ✅ `Comment` / `CommentLike` / `CommentReport`
+- ✅ `ShowReview` / `MovieReview` — **NEW Phase 52** — private-by-default 5-star + note. **Phase 74:** rating changed `int` → `DecimalField(max_digits=2, decimal_places=1)` + `CheckConstraint` for half-star ratings (migration `0015`)
 - ✅ `WatchStreak`
 - ✅ `NotificationPreference`
 - ✅ `MovieCache`
@@ -577,6 +602,9 @@ Design plan lives in a published artifact ("Glix · Phase 9 · Design System & P
 - ✅ `MovieWatchlist`
 - ✅ `ImportJob` — **Phase 24** — TV Time GDPR import job tracking. **Phase 72:** added `payload_fingerprint` (sha256, migration `0013`)
 - ✅ `SocialAccount` — **NEW Phase 27** — links a User to a verified Google/Apple identity
+- ✅ `CustomList` / `CustomListItem` — **NEW Phase 70** — user-created lists (e.g. "Movies2026"), distinct from Watchlist/MovieWatchlist's built-in trackers
+- ✅ `Follow` — **NEW Phase 74** (migration `0016`) — presence-based follow graph (mirrors `CommentLike`/`WatchState`), `UniqueConstraint(follower, following)` + a self-follow `CheckConstraint`
+- ✅ `ShowRewatch` / `RewatchEpisodeState` / `MovieRewatch` — **NEW Phase 75** (migration `0018`) — a parallel presence-based rewatch system, deliberately not a change to `WatchState`'s own `UNIQUE(user, episode)` (load-bearing across badges/analytics/the "already watched" check). `ShowRewatch` is a "round" (`UNIQUE(user, show, round_number)`); `RewatchEpisodeState` is the per-episode tick within a round; `MovieRewatch` is append-only (no unique constraint — a rewatch can happen more than once a day)
 
 ---
 
@@ -624,6 +652,10 @@ Design plan lives in a published artifact ("Glix · Phase 9 · Design System & P
 - ✅ StatsCard / WatchHeatmap / GenreChart / ActorChart
 - ✅ CompletionRateCard / WatchStreakCard / AchievementCard
 - ✅ MilestoneCard / YearReviewCard / MonthlySummaryCard
+- ✅ StarRatingDisplay — **NEW Phase 74** — read-only half-star display
+- ✅ UserRow / FollowButton / ActivityRow — **NEW Phase 74** — social layer
+- ✅ HubHeadingSwitch — **NEW Phase 75** — large Shows/Anime word-toggle on the Shows Hub header
+- ✅ FilterPill — **NEW Phase 75** — extracted from byte-duplicated copies in `(tabs)/index.tsx`/`(tabs)/movies.tsx`
 
 ---
 
@@ -661,12 +693,13 @@ Design plan lives in a published artifact ("Glix · Phase 9 · Design System & P
 | Reviews & Ratings | 100% (Phase L, 2026-07-23: private-by-default 5-star + note per show/movie, new `ShowReview`/`MovieReview` models) |
 | Analytics & Insights | 100% |
 | Widgets | 95% (Phase 69: fixed the actual Android render bug — the headless handler was calling the wrong native API — plus a persisted-store fallback data source, multi-item day grouping, flat redesign, and a widened resize envelope; Phase 72/73: Upcoming widgets' subtitle round-tripped from countdown → date-only label → countdown restored + a new real local release time sourced from TVmaze (TMDB itself carries no time-of-day), with nothing precomputed at sync time anymore so a widget redraw while the app is closed still resolves correctly. Both platforms still need an EAS build for on-device verification — the one remaining gap) |
-| Infrastructure | 100% (Phase 72: gzip + free-tier Celery/gunicorn hardening, see Infrastructure section) |
+| Infrastructure | 100% (Phase 72: gzip + free-tier Celery/gunicorn hardening; Phase 75: gossip/mingle/heartbeat disabled, throttling moved off Redis to local memory, wider Celery polling interval — **inert until the next Render redeploy**, not yet triggered) |
 | Push Notifications | 100% (Phase 31: end-to-end send path wired; Phase 73: 3 real bugs found and fixed — a new-episode alert condition that could essentially never fire, a fresh-login token-registration gap, and a foreground-display regression from an `expo-notifications` API change — see AUDIT.md) |
 | Recommendations | 100% (Phase 71: real cross-library "For You" feed; Phase 73: split into fully independent tv/movie feeds — was one shared pool, so the Series/Movies tabs showed the identical list) |
-| Testing | 95% (backend `pytest` suite at 118 as of Phase 73 (up from 93; +25 new tests this phase alone), `tsc --noEmit` fully clean, frontend `jest` 7/7 (up from 3) — remaining gap is frontend test-suite breadth, not correctness) |
+| Rewatch | 100% (Phase 75: show-level rounds with per-episode ticks + a movie "watch again" counter, parallel presence-based tables, `WatchState`/badges/streaks/history untouched by design) |
+| Testing | 95% (backend `pytest` suite at 192 as of Phase 75 (up from 148; +44), `tsc --noEmit` fully clean, frontend `jest` 12/12 (up from 7) — remaining gap is frontend test-suite breadth, not correctness) |
 | Documentation | 100% |
-| **Overall** | **99%** (unchanged across both this session's Batch 2 (Phases 54–62) and the prior Batch 1 session — the one real remaining gap, on-device widget/UI confirmation, is untouched by any of Phases 54–62; everything device-independent, including a fully clean `tsc --noEmit` baseline for the first time this engagement, is now genuinely complete) |
+| **Overall** | **99%** (the one real remaining gap across every recent phase is on-device widget/UI/rewatch confirmation — no physical device or emulator has been available this engagement; everything device-independent, including a fully clean `tsc --noEmit` baseline, is genuinely complete) |
 
 ---
 
@@ -674,9 +707,12 @@ Design plan lives in a published artifact ("Glix · Phase 9 · Design System & P
 
 | Task | Priority |
 |------|----------|
-| EAS Build for iOS widget testing (now also needed for the Phase 69 widget-config changes — Android size envelope, headless render fix — and the Trailer/Share buttons) | High |
+| EAS Build for iOS widget testing (now also needed for the Phase 69 widget-config changes — Android size envelope, headless render fix — the Trailer/Share buttons, Phase 75's countdown-removed widget layout, and every new rewatch/anime-split UI surface) | High |
 | Verify `backend/.env.prod`'s malformed `CELERY_BROKER_URL`/`CELERY_RESULT_BACKEND`/`REDIS_CACHE_URL` (each literally contains `REDIS_URL="..."` as a wrapper, and all three are identical despite a comment saying they must differ) against Render's actual live dashboard config — found Phase 74, deliberately not touched since this file may be a stale template rather than the live config (see AUDIT.md Phase 74) | High |
+| Trigger the Render redeploy for Phase 75's Celery/Redis infra savings to take effect, then confirm the Upstash daily command count actually drops over the following 24h — nothing about this is checkable locally | High |
+| Live Django-shell verification of `fetch_episode_airstamps()` against a real network show and a real slot-less streaming show (the Phase 75 plan's own suggested extra check) — not performed this session; covered instead by `test_airtime.py`'s TVmaze-response-branch tests | Medium |
 | Discover Hub's `isLoadingFeed`/`isSearching`/`isLoadingFiltered` are single booleans, not per-segment — switching tabs mid-load can show the wrong spinner state momentarily (flagged Phase 74, not fixed — data itself is never wrong, just a transient loading-indicator flash) | Low |
-| `analytics.tsx` (6 endpoints) / `profile.tsx` (3 endpoints, 2 heavy) refetch unconditionally on every focus rather than gating on staleness — flagged Phase 74 as a real perf item, deferred since a proper fix needs a staleness/TTL tracking layer across many store actions, not a one-line change | Medium |
+| `analytics.tsx` (6 endpoints) / `profile.tsx` (3 endpoints, 2 heavy) refetch unconditionally on every focus rather than gating on staleness — flagged Phase 74 as a real perf item; **Phase 75 added a `analyticsDirtyAt` staleness guard to both**, so this is now resolved rather than deferred | Resolved (Phase 75) |
+| The Movies Hub tab still mixes anime movies in with everything else — only the Shows Hub and My Movies were asked to split into a dedicated Anime surface (Phase 75's own explicitly stated scope boundary) | Low |
 | Analytics: per-user streaming provider tracking | Low |
 | Analytics: director charts (requires crew data per WatchState) | Low |

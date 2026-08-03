@@ -21,7 +21,15 @@ from django.db.models.signals import post_delete, post_save
 from django.dispatch import receiver
 from django.utils import timezone
 
-from core.cache_keys import analytics_movies_cache_key, movie_watchlist_cache_key, watchlist_cache_key
+from core.cache_keys import (
+    analytics_dashboard_cache_key,
+    analytics_monthly_summary_cache_key,
+    analytics_movies_cache_key,
+    analytics_statistics_cache_key,
+    friends_feed_cache_key,
+    movie_watchlist_cache_key,
+    watchlist_cache_key,
+)
 
 from core.badge_constants import (
     ANIME_GENRES,
@@ -59,7 +67,20 @@ from core.badge_constants import (
     TIME_TITAN_MINUTES,
     THOUSAND_EPISODES_THRESHOLD,
 )
-from core.models import MovieWatchlist, MovieWatchState, UserProfile, Watchlist, WatchState, WatchStreak
+from core.models import (
+    Follow,
+    MovieRewatch,
+    MovieReview,
+    MovieWatchlist,
+    MovieWatchState,
+    RewatchEpisodeState,
+    ShowRewatch,
+    ShowReview,
+    UserProfile,
+    Watchlist,
+    WatchState,
+    WatchStreak,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -284,6 +305,19 @@ def _bust_analytics_movies_cache(user_id):
     transaction.on_commit(lambda: cache.delete(analytics_movies_cache_key(user_id)))
 
 
+def _bust_analytics_dashboard_and_statistics_cache(user_id):
+    """Shared by every signal below that represents "the user watched (or
+    unwatched, or rewatched) something" — AnalyticsDashboardView/
+    AnalyticsStatisticsView (Phase 75.8) and the current year's monthly
+    summary all derive from the same underlying WatchState/MovieWatchState/
+    rewatch rows, so one bust point covers all three caches."""
+    def _bust():
+        cache.delete(analytics_dashboard_cache_key(user_id))
+        cache.delete(analytics_statistics_cache_key(user_id))
+        cache.delete(analytics_monthly_summary_cache_key(user_id, timezone.now().year))
+    transaction.on_commit(_bust)
+
+
 @receiver(post_save, sender=Watchlist)
 @receiver(post_delete, sender=Watchlist)
 def invalidate_watchlist_cache(sender, instance, **kwargs):
@@ -294,6 +328,7 @@ def invalidate_watchlist_cache(sender, instance, **kwargs):
 @receiver(post_delete, sender=WatchState)
 def invalidate_watchlist_cache_on_watchstate(sender, instance, **kwargs):
     _bust_watchlist_cache(instance.user_id)
+    _bust_analytics_dashboard_and_statistics_cache(instance.user_id)
 
 
 @receiver(post_save, sender=MovieWatchlist)
@@ -308,3 +343,50 @@ def invalidate_movie_watchlist_cache(sender, instance, **kwargs):
 def invalidate_movie_watchlist_cache_on_watchstate(sender, instance, **kwargs):
     _bust_movie_watchlist_cache(instance.user_id)
     _bust_analytics_movies_cache(instance.user_id)
+    _bust_analytics_dashboard_and_statistics_cache(instance.user_id)
+
+
+@receiver(post_save, sender=ShowRewatch)
+@receiver(post_delete, sender=ShowRewatch)
+def invalidate_analytics_cache_on_show_rewatch(sender, instance, **kwargs):
+    _bust_analytics_dashboard_and_statistics_cache(instance.user_id)
+
+
+@receiver(post_save, sender=RewatchEpisodeState)
+@receiver(post_delete, sender=RewatchEpisodeState)
+def invalidate_analytics_cache_on_rewatch_episode_state(sender, instance, **kwargs):
+    _bust_analytics_dashboard_and_statistics_cache(instance.rewatch.user_id)
+
+
+@receiver(post_save, sender=MovieRewatch)
+@receiver(post_delete, sender=MovieRewatch)
+def invalidate_analytics_cache_on_movie_rewatch(sender, instance, **kwargs):
+    _bust_analytics_dashboard_and_statistics_cache(instance.user_id)
+
+
+def _bust_followers_activity_feed_cache(user_id):
+    """Everyone who follows `user_id` gets their activity feed's first page
+    invalidated — a new/updated/deleted review from someone you follow
+    should appear (or disappear) without waiting out the TTL. Only page 1:
+    friends_feed_cache_key's page-aware keys mean deeper pages would need
+    their own busts too, but a single review essentially never reorders
+    older content that far back, and any staleness there self-heals within
+    FRIENDS_FEED_CACHE_TTL_SECONDS regardless — the same tradeoff that
+    module's own docstring already accepts for page 1."""
+    def _bust():
+        follower_ids = Follow.objects.filter(following_id=user_id).values_list("follower_id", flat=True)
+        for follower_id in follower_ids:
+            cache.delete(friends_feed_cache_key(follower_id, 1))
+    transaction.on_commit(_bust)
+
+
+@receiver(post_save, sender=ShowReview)
+@receiver(post_delete, sender=ShowReview)
+def invalidate_followers_feed_on_show_review(sender, instance, **kwargs):
+    _bust_followers_activity_feed_cache(instance.user_id)
+
+
+@receiver(post_save, sender=MovieReview)
+@receiver(post_delete, sender=MovieReview)
+def invalidate_followers_feed_on_movie_review(sender, instance, **kwargs):
+    _bust_followers_activity_feed_cache(instance.user_id)

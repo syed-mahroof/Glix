@@ -88,6 +88,8 @@ export default function EpisodeDetailScreen() {
   const fetchProfile = useWatchStore((state) => state.fetchProfile);
   const fetchWatchlist = useWatchStore((state) => state.fetchWatchlist);
   const bulkToggleWatchState = useWatchStore((state) => state.bulkToggleWatchState);
+  const fetchShowRewatchDetail = useWatchStore((state) => state.fetchShowRewatchDetail);
+  const toggleRewatchEpisode = useWatchStore((state) => state.toggleRewatchEpisode);
 
   const [episode, setEpisode] = useState<EpisodeDetail | null>(null);
   const [providers, setProviders] = useState<ProviderItem[]>([]);
@@ -102,6 +104,16 @@ export default function EpisodeDetailScreen() {
   const [mvpCharacterName, setMvpCharacterName] = useState<string>('');
   const [isSavingEmotion, setIsSavingEmotion] = useState(false);
   const [isMvpSheetVisible, setIsMvpSheetVisible] = useState(false);
+
+  // Rewatch (Phase 75.7) — this episode's watched checkmark switches to
+  // reflecting the active round's tick instead of the original
+  // `episode.is_watched` whenever the show has one in progress; see
+  // effectiveIsWatched below. `episode` isn't set until loadEpisode
+  // resolves, so this reads null (no active round) until then.
+  const showRewatchDetail = useWatchStore((state) =>
+    episode ? state.showRewatchDetail[episode.show.tmdb_id] ?? null : null
+  );
+  const isRewatchActive = showRewatchDetail != null;
 
   const loadEpisode = useCallback(async () => {
     if (Number.isNaN(episodeId)) {
@@ -152,6 +164,14 @@ export default function EpisodeDetailScreen() {
     loadEpisode();
   }, [loadEpisode]);
 
+  useEffect(() => {
+    if (episode) fetchShowRewatchDetail(episode.show.tmdb_id);
+    // Only re-fetch when the show changes, not on every episode state
+    // update (this effect would otherwise re-run after every optimistic
+    // is_watched patch below).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [episode?.show.tmdb_id]);
+
   /** Marks the given episode ids watched via the batched endpoint —
    *  shared `onFinalize` for the Catch-Up modal's three outcomes. This
    *  screen only ever renders one episode, so it optimistically flips
@@ -172,8 +192,25 @@ export default function EpisodeDetailScreen() {
 
   const catchup = useCatchupCascade(finalizeEpisodeWatch);
 
+  /** Rewatch-mode tap — a presence toggle within the active round, no
+   *  catch-up check and no mutation of `episode.is_watched` (the original
+   *  watch-through's own field, untouched by rewatch by design). The
+   *  store's fetchShowRewatchDetail refetch inside toggleRewatchEpisode is
+   *  what updates showRewatchDetail/effectiveIsWatched after this. */
+  const handleToggleRewatchEpisode = async () => {
+    if (!episode || isTogglingWatched) return;
+    setIsTogglingWatched(true);
+    await toggleRewatchEpisode(episode.tmdb_id, episode.show.tmdb_id);
+    setIsTogglingWatched(false);
+  };
+
   const handleToggleWatched = async () => {
     if (!episode || isTogglingWatched) return;
+
+    if (isRewatchActive) {
+      handleToggleRewatchEpisode();
+      return;
+    }
 
     if (episode.is_watched) {
       // Un-watching: no catch-up concern, immediate single toggle.
@@ -273,7 +310,13 @@ export default function EpisodeDetailScreen() {
     );
   }
 
-  const showOverview = episode.is_watched || isRevealed;
+  // Rewatch mode displays the active round's tick instead of the original
+  // watch-through's is_watched — episode.is_watched itself is never read
+  // for display below this point, only effectiveIsWatched.
+  const effectiveIsWatched = isRewatchActive
+    ? (showRewatchDetail?.watched_episode_ids.includes(episode.tmdb_id) ?? false)
+    : episode.is_watched;
+  const showOverview = effectiveIsWatched || isRevealed;
 
   return (
     <SafeAreaView style={[styles.container, { backgroundColor: c.bg }]} edges={['top']}>
@@ -319,9 +362,18 @@ export default function EpisodeDetailScreen() {
             ) : null}
           </View>
 
+          {isRewatchActive && (
+            <Text style={[styles.metaText, { color: c.accentInk, marginBottom: 8 }]}>
+              Rewatching · Round {showRewatchDetail!.round_number}
+            </Text>
+          )}
+
           {(() => {
             const isAired = hasAired(episode.air_date);
-            const lockedUnaired = !isAired && !episode.is_watched;
+            // Un-watching stays possible in rewatch mode too regardless of
+            // air date, same rule as the normal path — only the "mark
+            // watched" direction is gated on having aired.
+            const lockedUnaired = !isRewatchActive && !isAired && !effectiveIsWatched;
             return (
               <PressableScale
                 onPress={handleToggleWatched}
@@ -329,26 +381,26 @@ export default function EpisodeDetailScreen() {
                 style={[
                   styles.watchButton,
                   { borderColor: c.hairline },
-                  episode.is_watched && { backgroundColor: c.accentFill, borderColor: c.accentFill },
+                  effectiveIsWatched && { backgroundColor: c.accentFill, borderColor: c.accentFill },
                   lockedUnaired && styles.watchButtonDisabled,
                 ]}
               >
                 {isTogglingWatched ? (
                   <ActivityIndicator
                     size="small"
-                    color={episode.is_watched ? c.onAccent : c.accentInk}
+                    color={effectiveIsWatched ? c.onAccent : c.accentInk}
                   />
                 ) : (
                   <>
-                    {episode.is_watched && <Check color={c.onAccent} size={16} strokeWidth={3} />}
+                    {effectiveIsWatched && <Check color={c.onAccent} size={16} strokeWidth={3} />}
                     <Text
                       style={[
                         styles.watchButtonText,
                         { color: c.textPrimary },
-                        episode.is_watched && { color: c.onAccent },
+                        effectiveIsWatched && { color: c.onAccent },
                       ]}
                     >
-                      {episode.is_watched
+                      {effectiveIsWatched
                         ? 'Watched'
                         : lockedUnaired
                         ? "Hasn't Aired Yet"

@@ -63,15 +63,16 @@ export function formatCountdown(
 }
 
 /**
- * Compact "day count" badge for the Upcoming widgets' redesigned right-aligned
- * countdown (Phase 55) — a bigger, glanceable number instead of the full
- * countdown string crammed into a one-line subtitle. The precise per-item
- * countdown text itself still comes from formatCountdown() (precomputed once
- * in store/watchStore.ts's syncWidgetData, since a static widget snapshot
- * can't tick live) — this only supplies the big headline number next to it.
+ * Compact "day count" badge for the Upcoming widgets' right-aligned release
+ * marker (Phase 55; countdown text removed in Phase 75.1 — a widget can't
+ * tick live, so a static countdown was always stale the moment it rendered
+ * and often wrong by up to a day besides). This badge plus
+ * formatLocalAirTime's clock time are the whole release-time line now.
  * Widget items are always strictly future by the time this is called
  * (syncWidgetData filters Overdue out before building the payload), but this
- * stays safe for a same-day item too.
+ * stays safe for a same-day item too. Callers should pass a display-date ISO
+ * from resolveDisplayDateIso, not a raw TMDB air_date, so this never
+ * disagrees with the resolved air instant across a local-midnight boundary.
  */
 export function formatDayBadge(airDate: string, now: Date): string {
   const todayIso = todayLocalIso(now);
@@ -160,19 +161,80 @@ export function airDateTimeInstant(
   }
 }
 
+/** The known air instant for an episode, or null if nothing more precise
+ *  than a bare calendar date is available. Shared by resolveAirInstant()
+ *  (which falls back further, to local midnight) and formatLocalAirTime()
+ *  (which must NOT fall back — no known time means no time line at all). */
+function resolveKnownAirInstant(
+  airDate: string,
+  airDateTime: string | null | undefined,
+  airsTime: string | null | undefined,
+  airsTimezone: string | null | undefined
+): Date | null {
+  if (airDateTime) {
+    const exact = new Date(airDateTime);
+    if (!Number.isNaN(exact.getTime())) return exact;
+  }
+  return airDateTimeInstant(airDate, airsTime, airsTimezone);
+}
+
+/**
+ * The best-known instant an episode airs, in resolution order:
+ * 1. `airDateTime` — an exact instant from TVmaze's per-episode `airstamp`
+ *    (backend: CachedEpisode.air_datetime / CachedShow.next_episode_air_datetime).
+ * 2. `airsTime` + `airsTimezone` — the show's network broadcast slot.
+ * 3. Local midnight of `airDate` — the only fallback when neither source is
+ *    known. A countdown built off this undercounts by up to a day, but it's
+ *    the same thing every call site used to do unconditionally, so this is
+ *    never a regression — only ever an improvement when 1 or 2 apply.
+ *
+ * Every countdown / grouping / badge call site should route through this
+ * (or resolveDisplayDateIso below) so "what time does this air" and "what
+ * calendar day does this display under" can never disagree with each other.
+ */
+export function resolveAirInstant(
+  airDate: string,
+  airDateTime?: string | null,
+  airsTime?: string | null,
+  airsTimezone?: string | null
+): Date {
+  return (
+    resolveKnownAirInstant(airDate, airDateTime, airsTime, airsTimezone) ??
+    new Date(`${airDate}T00:00:00`)
+  );
+}
+
+/**
+ * The local calendar date (YYYY-MM-DD) an item should be bucketed/labeled
+ * under, derived from its resolved air instant rather than the raw TMDB
+ * `air_date` string. The two disagree whenever the resolved instant crosses
+ * local midnight relative to the show's own timezone — e.g. a 9:00 PM
+ * America/New_York episode airing "2026-08-03" is already 2026-08-04 for an
+ * IST viewer, so bucketing off the raw string put it a day early for them.
+ */
+export function resolveDisplayDateIso(
+  airDate: string,
+  airDateTime?: string | null,
+  airsTime?: string | null,
+  airsTimezone?: string | null
+): string {
+  return todayLocalIso(resolveAirInstant(airDate, airDateTime, airsTime, airsTimezone));
+}
+
 /**
  * The device-local clock time an episode airs — "9:30 PM" — or null when
- * the show has no known broadcast slot. This is the piece TMDB simply
- * cannot provide (its episode payload is a bare `air_date` with no time),
- * which is why the countdown it fed always ran to local midnight and so
- * always ended in "00m".
+ * neither an exact instant nor a broadcast slot is known. This is the piece
+ * TMDB simply cannot provide (its episode payload is a bare `air_date` with
+ * no time), which is why the countdown it fed always ran to local midnight
+ * and so always ended in "00m".
  */
 export function formatLocalAirTime(
   airDate: string,
+  airDateTime: string | null | undefined,
   airsTime: string | null | undefined,
   airsTimezone: string | null | undefined
 ): string | null {
-  const instant = airDateTimeInstant(airDate, airsTime, airsTimezone);
+  const instant = resolveKnownAirInstant(airDate, airDateTime, airsTime, airsTimezone);
   if (!instant) return null;
   try {
     return new Intl.DateTimeFormat('en-US', { hour: 'numeric', minute: '2-digit' }).format(instant);
@@ -183,7 +245,8 @@ export function formatLocalAirTime(
 
 /** "3 DAYS AGO" / "YESTERDAY" for an already-aired, unmarked episode — more
  *  useful than a flat "OVERDUE" label now that these are bounded to recent
- *  releases and the user's question is "how far behind am I?". */
+ *  releases and the user's question is "how far behind am I?". Pass a
+ *  display-date ISO from resolveDisplayDateIso, not a raw TMDB air_date. */
 export function formatDaysAgo(airDate: string, now: Date): string {
   const target = new Date(`${airDate}T00:00:00`);
   const todayMidnight = new Date(`${todayLocalIso(now)}T00:00:00`);
@@ -213,6 +276,10 @@ export function isPastUpcomingLabel(label: string): boolean {
  * calendar date land under one shared header), then a single "LATER"
  * catch-all beyond that — day-level grouping stops being useful that far
  * ahead, so those items keep their own relative countdown instead.
+ *
+ * Pass a display-date ISO from resolveDisplayDateIso, not a raw TMDB
+ * air_date — otherwise an episode whose resolved air instant crosses local
+ * midnight buckets under the wrong day for a viewer in a different zone.
  */
 export function formatUpcomingHeaderLabel(airDate: string, now: Date): string {
   const todayIso = todayLocalIso(now);

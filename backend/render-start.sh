@@ -13,8 +13,16 @@
 python manage.py migrate --noinput
 python manage.py collectstatic --noinput
 
-celery -A config beat -l INFO &
-celery -A config worker --concurrency=1 -l INFO &
+# -l WARNING (not INFO): the per-heartbeat/gossip/mingle chatter at INFO was
+# the dominant line count in Render's log tab and, on Upstash, a real chunk
+# of the monthly command budget was just this being *logged*, not the
+# commands themselves. --without-gossip/--without-mingle/--without-heartbeat
+# turn off worker-to-worker cluster coordination Celery ships needing for a
+# multi-worker fleet — this is --concurrency=1, a single solo worker with
+# nothing to coordinate with, so all three are pure BRPOP/PUBLISH overhead
+# with no purpose here (Phase 75.8).
+celery -A config beat -l WARNING &
+celery -A config worker --concurrency=1 -l WARNING --without-gossip --without-mingle --without-heartbeat &
 # --workers 1 (not more): a 2nd worker process would duplicate this whole
 # Django app's memory footprint on a free-tier box that already shares its
 # RAM with the celery worker+beat processes above, in this same container.

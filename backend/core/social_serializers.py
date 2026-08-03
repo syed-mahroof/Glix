@@ -52,6 +52,13 @@ class FollowEdgeSerializer(serializers.Serializer):
     username = serializers.SerializerMethodField()
     profile_picture = serializers.SerializerMethodField()
     is_following = serializers.SerializerMethodField()
+    # Phase 75.6: your own row in your own followers/following list has
+    # is_following always False (Follow's own follow_not_self constraint
+    # forbids a self-follow row existing at all), which rendered a tappable
+    # "Follow" button next to your own username that 400'd on press.
+    # is_self lets the client render that row without a follow button
+    # instead of inferring it client-side.
+    is_self = serializers.SerializerMethodField()
     followed_at = serializers.DateTimeField(source="created_at")
 
     def _user(self, obj):
@@ -70,3 +77,6 @@ class FollowEdgeSerializer(serializers.Serializer):
 
     def get_is_following(self, obj):
         return self._user(obj).id in self.context.get("is_following_ids", set())
+
+    def get_is_self(self, obj):
+        return self._user(obj).id == self.context.get("viewer_id")

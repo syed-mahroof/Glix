@@ -47,6 +47,13 @@ interface RatingReviewCardProps {
    *  backend, with a short human-readable message for the caller's own
    *  screen-level Snackbar. */
   onSaved?: (message: string) => void;
+  /** Whether the backend would currently accept a review for this title —
+   *  at least one episode watched for a show, marked watched for a movie
+   *  (Phase 75.3's gate on ShowReviewView/MovieReviewView.post). When
+   *  false the stars render dimmed and disabled and the note editor is
+   *  replaced with a hint, rather than letting the user compose a review
+   *  the backend will 403 on save. */
+  canReview: boolean;
 }
 
 interface AnimatedStarProps {
@@ -127,7 +134,7 @@ function AnimatedStar({ value, fillLevel, color, inactiveColor, disabled, onSele
   );
 }
 
-export default function RatingReviewCard({ mediaType, tmdbId, onSaved }: RatingReviewCardProps) {
+export default function RatingReviewCard({ mediaType, tmdbId, onSaved, canReview }: RatingReviewCardProps) {
   const { theme } = useAppTheme();
   const c = theme.colors;
   const endpoint = mediaType === 'show' ? `/reviews/shows/${tmdbId}/` : `/reviews/movies/${tmdbId}/`;
@@ -277,41 +284,47 @@ export default function RatingReviewCard({ mediaType, tmdbId, onSaved }: RatingR
               key={value}
               value={value}
               fillLevel={fillLevel}
-              color={c.accentInk}
+              color={canReview ? c.accentInk : c.textTertiary}
               inactiveColor={c.textTertiary}
-              disabled={isSaving}
+              disabled={isSaving || !canReview}
               onSelect={handleSelectStar}
             />
           );
         })}
       </View>
 
-      {rating > 0 && (
-        <View style={styles.noteBlock}>
-          <Text style={[styles.noteCaption, { color: c.textTertiary }]}>Private — only visible to you</Text>
-          <TextInput
-            style={[styles.noteInput, { color: c.textPrimary, borderColor: c.hairline }]}
-            placeholder="Share your thoughts..."
-            placeholderTextColor={c.textTertiary}
-            value={note}
-            onChangeText={setNote}
-            onBlur={handleSaveNote}
-            multiline
-            maxLength={2000}
-          />
-          <PressableScale
-            onPress={handleSaveNote}
-            disabled={isSaving || !isNoteDirty}
-            hitSlop={8}
-            style={styles.saveNoteButton}
-            accessibilityRole="button"
-            accessibilityLabel="Save note"
-          >
-            <Text style={[styles.saveNoteText, { color: isNoteDirty ? c.accentInk : c.textTertiary }]}>
-              {isSaving ? 'Saving…' : 'Save note'}
-            </Text>
-          </PressableScale>
-        </View>
+      {!canReview ? (
+        <Text style={[styles.noteCaption, { color: c.textTertiary }]}>
+          {mediaType === 'show' ? 'Watch an episode to rate' : 'Mark as watched to rate'}
+        </Text>
+      ) : (
+        rating > 0 && (
+          <View style={styles.noteBlock}>
+            <Text style={[styles.noteCaption, { color: c.textTertiary }]}>Private — only visible to you</Text>
+            <TextInput
+              style={[styles.noteInput, { color: c.textPrimary, borderColor: c.hairline }]}
+              placeholder="Share your thoughts..."
+              placeholderTextColor={c.textTertiary}
+              value={note}
+              onChangeText={setNote}
+              onBlur={handleSaveNote}
+              multiline
+              maxLength={2000}
+            />
+            <PressableScale
+              onPress={handleSaveNote}
+              disabled={isSaving || !isNoteDirty}
+              hitSlop={8}
+              style={styles.saveNoteButton}
+              accessibilityRole="button"
+              accessibilityLabel="Save note"
+            >
+              <Text style={[styles.saveNoteText, { color: isNoteDirty ? c.accentInk : c.textTertiary }]}>
+                {isSaving ? 'Saving…' : 'Save note'}
+              </Text>
+            </PressableScale>
+          </View>
+        )
       )}
 
       {error && <Text style={[styles.errorText, { color: c.negative }]}>{error}</Text>}

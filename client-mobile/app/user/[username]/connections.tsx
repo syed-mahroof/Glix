@@ -2,10 +2,11 @@
 // Followers / following list for a given username (Phase 74) —
 // GET /users/<username>/followers/ or /following/, picked by ?tab=.
 
+import { FlashList } from '@shopify/flash-list';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { ArrowLeft } from 'lucide-react-native';
 import React, { useEffect, useState } from 'react';
-import { ActivityIndicator, FlatList, StyleSheet, Text, View } from 'react-native';
+import { ActivityIndicator, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 import ErrorState from '../../../components/ErrorState';
@@ -70,12 +71,17 @@ export default function ConnectionsScreen() {
       ) : error && !data ? (
         <ErrorState message={error} onRetry={() => (tab === 'followers' ? fetchFollowers(username) : fetchFollowing(username))} />
       ) : (
-        <FlatList
+        <FlashList
           data={data ?? []}
           keyExtractor={(item) => String(item.id)}
           contentContainerStyle={styles.list}
           renderItem={({ item }) => (
-            <UserRow username={item.username} profilePicture={item.profile_picture} isFollowing={item.is_following} />
+            <UserRow
+              username={item.username}
+              profilePicture={item.profile_picture}
+              isFollowing={item.is_following}
+              isSelf={item.is_self}
+            />
           )}
           ListEmptyComponent={
             <View style={styles.centered}>

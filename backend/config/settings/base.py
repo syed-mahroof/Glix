@@ -151,8 +151,8 @@ REST_FRAMEWORK = {
     # register/refresh, where a real user makes a handful of calls, not
     # dozens per minute.
     "DEFAULT_THROTTLE_CLASSES": (
-        "rest_framework.throttling.AnonRateThrottle",
-        "rest_framework.throttling.UserRateThrottle",
+        "core.throttling.LocalAnonRateThrottle",
+        "core.throttling.LocalUserRateThrottle",
     ),
     "DEFAULT_THROTTLE_RATES": {
         "anon": "20/min",
@@ -235,7 +235,24 @@ CACHES = {
             "socket_connect_timeout": 3,
             "socket_timeout": 3,
         },
-    }
+    },
+    # DRF throttling (below) checked a Redis GET+SET per throttle class on
+    # every single authenticated request — with AnonRateThrottle and
+    # UserRateThrottle both active, that's 2 extra Redis round trips per
+    # request across the whole API, purely for a per-process rate-limit
+    # counter that doesn't need to survive a restart or be shared with any
+    # other reader. Safe to move to a local in-memory cache specifically
+    # because render-start.sh runs gunicorn with --workers 1 (Phase 75.8) —
+    # a second worker process would each keep its own counter and the limit
+    # would silently double, which is exactly the problem the comment above
+    # this dict already flagged Redis as fixing for a multi-worker fleet.
+    # --max-requests 500 recycles the process periodically, which resets
+    # this cache along with it — an accepted tradeoff for abuse protection,
+    # not a correctness requirement.
+    "throttling": {
+        "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
+        "LOCATION": "throttling",
+    },
 }
 
 # Django's default (2.5MB) is well under what a real TV Time export's JSON
@@ -418,7 +435,35 @@ CELERY_BROKER_CONNECTION_RETRY_ON_STARTUP = True
 # Redelivery window for an acks_late task whose worker died. Must exceed
 # run_tvtime_import's hard time_limit so a chunk that is genuinely still
 # running is never handed to a second worker in parallel.
-CELERY_BROKER_TRANSPORT_OPTIONS = {"visibility_timeout": 900}
+#
+# polling_interval (Phase 75.8): Celery's Redis transport BRPOPs the queue
+# in a tight loop with no polling_interval set at all, which defaults to
+# effectively continuous polling — on Upstash's command-metered free tier
+# this alone was the majority of the ~130K/500K monthly commands, dwarfing
+# every real app request combined. 5 seconds is still well within "a task
+# gets picked up almost immediately" for a background job queue (badges,
+# streaks, push notifications, air-time syncs) — nothing here is latency-
+# sensitive the way a user-facing request is.
+CELERY_BROKER_TRANSPORT_OPTIONS = {"visibility_timeout": 900, "polling_interval": 5.0}
+
+# Nothing in this codebase ever calls AsyncResult(...)/.get() on a task (every
+# call site is .delay()/.apply_async() and moves on) — confirmed via a repo
+# grep before setting this. Every task result Celery would otherwise store in
+# the Redis result backend (CELERY_RESULT_BACKEND) is dead weight: a write
+# nobody ever reads, on the same free-tier command budget as everything else.
+CELERY_TASK_IGNORE_RESULT = True
+
+# Cluster coordination for a fleet of workers — gossip (worker-to-worker
+# presence chatter), mingle (sync state with other workers at startup), and
+# remote control/monitoring (broadcast commands, task-event messages) all
+# assume more than one worker exists to coordinate with. render-start.sh
+# runs exactly one (--concurrency=1, no other worker process anywhere), so
+# every one of these is pure Redis PUBLISH/subscribe overhead with nothing
+# on the other end. (gossip/mingle/heartbeat are also disabled per-process
+# via render-start.sh's celery worker flags — belt and suspenders, since
+# these settings and those CLI flags cover slightly different code paths.)
+CELERY_WORKER_ENABLE_REMOTE_CONTROL = False
+CELERY_WORKER_SEND_TASK_EVENTS = False
 
 # Periodic tasks (requires the celery-beat service in docker-compose.yml
 # to actually be running — a worker alone never fires these on its own).
@@ -439,11 +484,14 @@ CELERY_BEAT_SCHEDULE = {
     # container dies between two links the chain is gone and the job sits
     # at RUNNING forever (observed: a real job stuck at 69/466 for a day).
     # acks_late above covers a chunk that was mid-flight; this covers the
-    # gap where nothing was in flight at all. Every 5 minutes so a stalled
-    # import self-heals rather than needing the user to resubmit.
-    "resume-stalled-imports-every-5-minutes": {
+    # gap where nothing was in flight at all. Every 15 minutes (widened from
+    # 5 — Phase 75.8: a stalled import is a rare failure path, and self-
+    # healing within 15 minutes instead of 5 is still fine for it, at
+    # roughly a third of the beat-tick volume) so a stalled import self-heals
+    # rather than needing the user to resubmit.
+    "resume-stalled-imports-every-15-minutes": {
         "task": "core.tasks.resume_stalled_imports",
-        "schedule": crontab(minute="*/5"),
+        "schedule": crontab(minute="*/15"),
     },
 }
 

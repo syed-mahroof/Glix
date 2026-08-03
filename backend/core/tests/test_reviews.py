@@ -12,7 +12,7 @@ from django.contrib.auth import get_user_model
 from django.urls import reverse
 from rest_framework.test import APIClient
 
-from core.models import CachedShow, MovieCache, MovieReview, ShowReview
+from core.models import CachedEpisode, CachedShow, MovieCache, MovieReview, MovieWatchState, ShowReview, WatchState
 
 User = get_user_model()
 
@@ -27,6 +27,23 @@ def create_user():
     def make_user(username="testuser", password="password"):
         return User.objects.create_user(username=username, password=password)
     return make_user
+
+
+def _mark_show_watched(user, show):
+    """Reviews are gated on having watched at least one episode (Phase
+    75.3) — every test that expects a review POST to succeed needs one."""
+    episode = CachedEpisode.objects.create(
+        tmdb_id=show.tmdb_id * 1000 + 1,
+        show=show,
+        season_number=1,
+        episode_number=1,
+        title="Pilot",
+    )
+    WatchState.objects.create(user=user, episode=episode)
+
+
+def _mark_movie_watched(user, movie):
+    MovieWatchState.objects.create(user=user, movie=movie)
 
 
 @pytest.mark.django_db
@@ -51,6 +68,7 @@ def test_show_review_create_then_update_in_place(api_client, create_user):
     user = create_user()
     api_client.force_authenticate(user=user)
     show = CachedShow.objects.create(tmdb_id=903, title="Great Show", status=CachedShow.Status.ENDED)
+    _mark_show_watched(user, show)
     url = reverse("show-review-detail", args=[show.tmdb_id])
 
     create_response = api_client.post(url, {"rating": 4, "note": "Pretty good"}, format="json")
@@ -90,6 +108,7 @@ def test_show_review_accepts_half_star_rating(api_client, create_user, rating):
     user = create_user()
     api_client.force_authenticate(user=user)
     show = CachedShow.objects.create(tmdb_id=910 if rating == 0.5 else 911, title="Show", status=CachedShow.Status.ENDED)
+    _mark_show_watched(user, show)
     response = api_client.post(
         reverse("show-review-detail", args=[show.tmdb_id]), {"rating": rating}, format="json"
     )
@@ -105,6 +124,7 @@ def test_show_review_delete(api_client, create_user):
     user = create_user()
     api_client.force_authenticate(user=user)
     show = CachedShow.objects.create(tmdb_id=905, title="Show", status=CachedShow.Status.ENDED)
+    _mark_show_watched(user, show)
     url = reverse("show-review-detail", args=[show.tmdb_id])
     api_client.post(url, {"rating": 3}, format="json")
 
@@ -124,6 +144,7 @@ def test_show_review_is_private_to_the_reviewing_user(api_client, create_user):
     user_a = create_user(username="alice")
     user_b = create_user(username="bob")
     show = CachedShow.objects.create(tmdb_id=906, title="Shared Show", status=CachedShow.Status.ENDED)
+    _mark_show_watched(user_a, show)
     url = reverse("show-review-detail", args=[show.tmdb_id])
 
     api_client.force_authenticate(user=user_a)
@@ -165,6 +186,7 @@ def test_movie_review_create_update_delete(api_client, create_user):
     user = create_user()
     api_client.force_authenticate(user=user)
     movie = MovieCache.objects.create(tmdb_id=909, title="Great Movie", runtime_minutes=120)
+    _mark_movie_watched(user, movie)
     url = reverse("movie-review-detail", args=[movie.tmdb_id])
 
     create_response = api_client.post(url, {"rating": 4}, format="json")
@@ -179,3 +201,41 @@ def test_movie_review_create_update_delete(api_client, create_user):
     delete_response = api_client.delete(url)
     assert delete_response.status_code == 204
     assert not MovieReview.objects.filter(user=user, movie=movie).exists()
+
+
+@pytest.mark.django_db
+def test_show_review_blocked_until_an_episode_is_watched(api_client, create_user):
+    """Phase 75.3: a review is a verdict on the show, not a prediction —
+    POSTing before watching anything must 403, and must not create a row;
+    marking one episode watched is enough to unblock it (not full completion,
+    which would be hostile to reviewing mid-season)."""
+    user = create_user()
+    api_client.force_authenticate(user=user)
+    show = CachedShow.objects.create(tmdb_id=912, title="Unwatched Show", status=CachedShow.Status.ENDED)
+    url = reverse("show-review-detail", args=[show.tmdb_id])
+
+    blocked_response = api_client.post(url, {"rating": 4}, format="json")
+    assert blocked_response.status_code == 403
+    assert not ShowReview.objects.filter(user=user, show=show).exists()
+
+    _mark_show_watched(user, show)
+    unblocked_response = api_client.post(url, {"rating": 4}, format="json")
+    assert unblocked_response.status_code == 201
+    assert ShowReview.objects.filter(user=user, show=show).exists()
+
+
+@pytest.mark.django_db
+def test_movie_review_blocked_until_watched(api_client, create_user):
+    user = create_user()
+    api_client.force_authenticate(user=user)
+    movie = MovieCache.objects.create(tmdb_id=913, title="Unwatched Movie", runtime_minutes=100)
+    url = reverse("movie-review-detail", args=[movie.tmdb_id])
+
+    blocked_response = api_client.post(url, {"rating": 4}, format="json")
+    assert blocked_response.status_code == 403
+    assert not MovieReview.objects.filter(user=user, movie=movie).exists()
+
+    _mark_movie_watched(user, movie)
+    unblocked_response = api_client.post(url, {"rating": 4}, format="json")
+    assert unblocked_response.status_code == 201
+    assert MovieReview.objects.filter(user=user, movie=movie).exists()

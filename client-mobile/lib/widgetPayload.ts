@@ -8,7 +8,7 @@
 // widget added before the app ever synced, or storage cleared underneath it.
 // Both must agree exactly, hence one builder rather than two.
 
-import { todayLocalIso } from './dateFormat';
+import { resolveDisplayDateIso, todayLocalIso } from './dateFormat';
 import { buildUpcomingItems, pickNextEpisode } from './upcoming';
 import type { WatchlistEntry } from '../store/watchStore';
 
@@ -27,6 +27,13 @@ export interface WidgetUpcomingItem {
   poster_path: string | null;
   next_episode: string;
   air_date: string;
+  /** Exact UTC instant, from CachedEpisode.air_datetime /
+   *  CachedShow.next_episode_air_datetime — the most precise source the
+   *  widget can resolve from. Preferred over airs_time/airs_timezone below
+   *  when present; see lib/dateFormat.ts's resolveAirInstant. Absent for
+   *  episodes TVmaze hasn't matched yet, and on snapshots written by an app
+   *  build older than this field. */
+  air_datetime?: string | null;
   /** The show's broadcast slot — wall clock ("21:30") plus its IANA zone
    *  ("America/New_York"), from TVmaze via the backend. Deliberately raw
    *  rather than a precomputed "9:30 PM" string: see the note on
@@ -100,7 +107,14 @@ export function buildWidgetPayload(
   const todayIso = todayLocalIso(now);
   const windowEndIso = todayLocalIso(new Date(now.getTime() + UPCOMING_WINDOW_DAYS * 86400000));
   const upcoming: WidgetUpcomingItem[] = buildUpcomingItems(allEntries)
-    .filter((item) => item.airDate >= todayIso && item.airDate <= windowEndIso)
+    .filter((item) => {
+      // Resolved display date, not the raw airDate string — an item whose
+      // true air instant crosses local midnight relative to its show's own
+      // timezone must be judged "future" or "in window" against the day it
+      // actually lands on for this viewer, not TMDB's bare date.
+      const displayDateIso = resolveDisplayDateIso(item.airDate, item.airDateTime, item.airsTime, item.airsTimezone);
+      return displayDateIso >= todayIso && displayDateIso <= windowEndIso;
+    })
     .slice(0, UPCOMING_CAP)
     .map((item) => {
       return {
@@ -110,6 +124,7 @@ export function buildWidgetPayload(
         poster_path: item.posterPath,
         next_episode: `S${item.seasonNumber} E${item.episodeNumber}`,
         air_date: item.airDate,
+        air_datetime: item.airDateTime,
         airs_time: item.airsTime,
         airs_timezone: item.airsTimezone,
       };

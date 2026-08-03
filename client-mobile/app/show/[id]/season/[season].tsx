@@ -44,6 +44,9 @@ export default function SeasonScreen() {
   const fetchProfile = useWatchStore((state) => state.fetchProfile);
   const fetchWatchlist = useWatchStore((state) => state.fetchWatchlist);
   const bulkToggleWatchState = useWatchStore((state) => state.bulkToggleWatchState);
+  const showRewatchDetail = useWatchStore((state) => state.showRewatchDetail[Number(id)] ?? null);
+  const fetchShowRewatchDetail = useWatchStore((state) => state.fetchShowRewatchDetail);
+  const toggleRewatchEpisode = useWatchStore((state) => state.toggleRewatchEpisode);
 
   const [show, setShow] = useState<ShowSummary | null>(null);
   const [episodes, setEpisodes] = useState<Episode[]>([]);
@@ -106,11 +109,30 @@ export default function SeasonScreen() {
   useEffect(() => {
     loadSeason();
     refreshContinueWatching();
-  }, [loadSeason, refreshContinueWatching]);
+    if (isValidParams) fetchShowRewatchDetail(tmdbId);
+  }, [loadSeason, refreshContinueWatching, isValidParams, tmdbId, fetchShowRewatchDetail]);
+
+  // Rewatch (Phase 75.7) — when a round is active for this show, every
+  // episode's DISPLAYED watched state and every checkmark tap route through
+  // RewatchEpisodeState instead of WatchState, without ever touching the
+  // underlying `episodes` array (which still holds the original
+  // watch-through's real is_watched values, untouched).
+  const rewatchWatchedIds = useMemo(
+    () => new Set(showRewatchDetail?.watched_episode_ids ?? []),
+    [showRewatchDetail]
+  );
+  const isRewatchActive = showRewatchDetail != null;
+  const displayEpisodes = useMemo(
+    () =>
+      isRewatchActive
+        ? episodes.map((ep) => ({ ...ep, is_watched: rewatchWatchedIds.has(ep.tmdb_id) }))
+        : episodes,
+    [episodes, isRewatchActive, rewatchWatchedIds]
+  );
 
   const airedEpisodes = useMemo(
-    () => episodes.filter((ep) => hasAired(ep.air_date)),
-    [episodes]
+    () => displayEpisodes.filter((ep) => hasAired(ep.air_date)),
+    [displayEpisodes]
   );
   const watchedCount = useMemo(
     () => airedEpisodes.filter((ep) => ep.is_watched).length,
@@ -184,6 +206,25 @@ export default function SeasonScreen() {
 
   const catchup = useCatchupCascade(finalizeSeasonWatch);
 
+  /** Rewatch-mode checkmark tap — a presence toggle within the active
+   *  round, no catch-up check (rewatching presupposes the whole show is
+   *  already caught up) and no local optimistic patch of `episodes` (that
+   *  array is the original watch-through's own state and must stay
+   *  untouched); the store's fetchShowRewatchDetail refetch after the
+   *  toggle is what updates `showRewatchDetail`/`rewatchWatchedIds`. */
+  const handleToggleRewatchEpisode = useCallback(
+    async (episodeId: number) => {
+      setTogglingIds((prev) => new Set(prev).add(episodeId));
+      await toggleRewatchEpisode(episodeId, tmdbId);
+      setTogglingIds((prev) => {
+        const next = new Set(prev);
+        next.delete(episodeId);
+        return next;
+      });
+    },
+    [toggleRewatchEpisode, tmdbId]
+  );
+
   /** Per-episode checkmark tap (EpisodeRow). Un-watching stays immediate;
    *  only the watch direction runs the chronological check. The check
    *  itself is now an async backend round-trip (CatchupCheckView), so this
@@ -192,6 +233,11 @@ export default function SeasonScreen() {
    *  otherwise look broken for however long the network call takes. */
   const handleToggleEpisode = useCallback(
     async (episodeId: number) => {
+      if (isRewatchActive) {
+        handleToggleRewatchEpisode(episodeId);
+        return;
+      }
+
       const target = episodes.find((ep) => ep.tmdb_id === episodeId);
       if (!target) return;
 
@@ -212,7 +258,7 @@ export default function SeasonScreen() {
         executeImmediateToggle(episodeId);
       }
     },
-    [episodes, catchup, tmdbId, show, executeImmediateToggle]
+    [episodes, catchup, tmdbId, show, executeImmediateToggle, isRewatchActive, handleToggleRewatchEpisode]
   );
 
   const handleMarkSeasonWatched = useCallback(async () => {
@@ -275,7 +321,9 @@ export default function SeasonScreen() {
           <Text style={[styles.headerTitle, { color: c.textPrimary }]}>Season {seasonNumber}</Text>
           {show ? (
             <Text style={[styles.headerSubtitle, { color: c.textSecondary }]} numberOfLines={1}>
-              {show.title}
+              {isRewatchActive
+                ? `${show.title} · Rewatching Round ${showRewatchDetail!.round_number}`
+                : show.title}
             </Text>
           ) : null}
         </View>
@@ -288,7 +336,7 @@ export default function SeasonScreen() {
       )}
 
       <FlatList
-        data={episodes}
+        data={displayEpisodes}
         keyExtractor={(episode) => String(episode.tmdb_id)}
         contentContainerStyle={styles.list}
         ListHeaderComponent={
@@ -306,13 +354,19 @@ export default function SeasonScreen() {
             <GlassSurface radius={16} style={styles.progressCard}>
               <ProgressRing percentage={progressPercentage} size={52} strokeWidth={5} />
               <View style={styles.progressTextColumn}>
-                <Text style={[styles.progressTitle, { color: c.textPrimary }]}>Season Progress</Text>
+                <Text style={[styles.progressTitle, { color: isRewatchActive ? c.accentInk : c.textPrimary }]}>
+                  {isRewatchActive ? 'Rewatch Progress' : 'Season Progress'}
+                </Text>
                 <Text style={[styles.progressSubtitle, { color: c.textSecondary }]}>
                   {watchedCount} of {airedEpisodes.length} aired episodes watched
                 </Text>
               </View>
             </GlassSurface>
 
+            {/* No bulk endpoint for rewatch ticks (RewatchEpisodeToggleView
+                is per-episode only) — hidden during an active round rather
+                than wired to a season-wide action that doesn't exist. */}
+            {!isRewatchActive && (
             <PressableScale
               onPress={handleToggleSeasonWatched}
               disabled={isMarkingSeasonWatched || airedEpisodes.length === 0}
@@ -338,6 +392,7 @@ export default function SeasonScreen() {
                 </>
               )}
             </PressableScale>
+            )}
           </View>
         }
         renderItem={({ item }) => (

@@ -18,6 +18,7 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 
+import FilterPill from '../../components/FilterPill';
 import GlassSurface from '../../components/GlassSurface';
 import LayoutToggle from '../../components/LayoutToggle';
 import MoviePosterCard from '../../components/MoviePosterCard';
@@ -25,7 +26,7 @@ import MovieRow from '../../components/MovieRow';
 import PressableScale from '../../components/PressableScale';
 import { hasAired } from '../../lib/dateFormat';
 import { useAppTheme } from '../../lib/theme';
-import { MovieWatchlistItem, useWatchStore } from '../../store/watchStore';
+import { MovieWatchlistItem, useLayoutFor, useWatchStore } from '../../store/watchStore';
 
 // ─── Filter categories ────────────────────────────────────────────────────────
 
@@ -46,38 +47,6 @@ function formatRuntime(minutes: number): string {
   return `${h}h ${m}m`;
 }
 
-// ─── Filter Pill ──────────────────────────────────────────────────────────────
-
-function FilterPill({
-  label,
-  active,
-  onPress,
-}: {
-  label: string;
-  active: boolean;
-  onPress: () => void;
-}) {
-  const { theme } = useAppTheme();
-  const c = theme.colors;
-
-  return (
-    <PressableScale
-      style={[
-        styles.pill,
-        { backgroundColor: c.glassFill, borderColor: c.hairline },
-        active && { borderColor: c.accentFill, backgroundColor: c.accentFill },
-      ]}
-      onPress={onPress}
-      accessibilityRole="button"
-      accessibilityState={{ selected: active }}
-    >
-      <Text style={[styles.pillText, { color: c.textSecondary }, active && { color: c.onAccent }]}>
-        {label}
-      </Text>
-    </PressableScale>
-  );
-}
-
 // ─── Screen ───────────────────────────────────────────────────────────────────
 
 export default function MoviesScreen() {
@@ -89,7 +58,7 @@ export default function MoviesScreen() {
   const clearError = useWatchStore((s) => s.clearError);
   const fetchMovieWatchlist = useWatchStore((s) => s.fetchMovieWatchlist);
   const toggleMovieWatchState = useWatchStore((s) => s.toggleMovieWatchState);
-  const preferredLayout = useWatchStore((s) => s.preferredLayout);
+  const layout = useLayoutFor('movies');
   const { highlightFilter } = useLocalSearchParams<{ highlightFilter?: string }>();
   const { theme } = useAppTheme();
   const c = theme.colors;
@@ -205,13 +174,12 @@ export default function MoviesScreen() {
       <View style={styles.header}>
         <Text style={[styles.headerTitle, { color: c.textPrimary }]}>Movies</Text>
         <View style={styles.headerRight}>
-          <LayoutToggle />
           <PressableScale
             style={[
               styles.headerIcon,
               { backgroundColor: c.glassFill, borderColor: c.hairline },
             ]}
-            onPress={() => router.push('/lists' as any)}
+            onPress={() => router.push('/lists?media=movie' as any)}
             accessibilityRole="button"
             accessibilityLabel="My Lists"
           >
@@ -246,9 +214,17 @@ export default function MoviesScreen() {
             label={f.label}
             active={filter === f.key}
             onPress={() => setFilter(f.key)}
+            paddingHorizontal={16}
+            letterSpacing={0.6}
           />
         ))}
       </ScrollView>
+
+      {/* ── Layout toggle: right-aligned below the pills, matching the
+          Shows Hub's position for the same control. ── */}
+      <View style={styles.layoutToggleRow}>
+        <LayoutToggle scope="movies" />
+      </View>
 
       {/* ── Content ── */}
       {isLoadingMovies && rows.length === 0 ? (
@@ -280,12 +256,12 @@ export default function MoviesScreen() {
         </View>
       ) : (
         <FlashList
-          key={`movies-${preferredLayout}`}
+          key={`movies-${layout}`}
           data={rows}
           keyExtractor={(item) => String(item.movie.tmdb_id)}
-          renderItem={preferredLayout === 'grid' ? renderGridItem : renderItem}
-          numColumns={preferredLayout === 'grid' ? 3 : 1}
-          extraData={preferredLayout}
+          renderItem={layout === 'grid' ? renderGridItem : renderItem}
+          numColumns={layout === 'grid' ? 3 : 1}
+          extraData={layout}
           contentContainerStyle={styles.listContent}
           refreshControl={
             <RefreshControl
@@ -339,24 +315,17 @@ const styles = StyleSheet.create({
     borderWidth: StyleSheet.hairlineWidth,
   },
   errorText: { fontSize: 13 },
+  layoutToggleRow: {
+    alignItems: 'flex-end',
+    paddingHorizontal: 16,
+    marginBottom: 12,
+  },
   pillsScroll: { flexGrow: 0 },
   pillsContainer: {
     paddingHorizontal: 16,
     paddingBottom: 12,
     gap: 8,
     flexDirection: 'row',
-  },
-  pill: {
-    paddingHorizontal: 16,
-    paddingVertical: 7,
-    borderRadius: 20,
-    borderWidth: StyleSheet.hairlineWidth,
-  },
-  pillText: {
-    fontSize: 11,
-    fontWeight: '700',
-    letterSpacing: 0.6,
-    textTransform: 'uppercase',
   },
   listContent: {
     paddingHorizontal: 14,

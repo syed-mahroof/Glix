@@ -4,7 +4,7 @@
 import { FlashList } from '@shopify/flash-list';
 import { Image } from 'expo-image';
 import { useRouter } from 'expo-router';
-import { ArrowLeft, Clapperboard, Film, Palette, Search, Sparkles, X } from 'lucide-react-native';
+import { ArrowLeft, Clapperboard, Film, Palette, Search, X } from 'lucide-react-native';
 import React, { useEffect, useMemo, useState } from 'react';
 import { ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -18,7 +18,7 @@ import WatchlistFilterSheet from '../../components/WatchlistFilterSheet';
 import { hasAnimationGenreString, isAnimeByGenreStringAndLanguage } from '../../lib/anime';
 import { useAppTheme } from '../../lib/theme';
 import { MovieWatchlistItem } from '../../store/watchStore';
-import { useWatchStore } from '../../store/watchStore';
+import { useLayoutFor, useWatchStore } from '../../store/watchStore';
 
 const POSTER_BASE = 'https://image.tmdb.org/t/p/w185';
 
@@ -72,7 +72,7 @@ function formatRuntime(minutes: number): string {
   return `${h}h ${m}m`;
 }
 
-function MovieListRow({ item }: { item: MovieWatchlistItem }) {
+export function MovieListRow({ item }: { item: MovieWatchlistItem }) {
   const router = useRouter();
   const { theme } = useAppTheme();
   const c = theme.colors;
@@ -151,7 +151,7 @@ function MovieListRow({ item }: { item: MovieWatchlistItem }) {
   );
 }
 
-function MovieGridCard({ item }: { item: MovieWatchlistItem }) {
+export function MovieGridCard({ item }: { item: MovieWatchlistItem }) {
   const { movie } = item;
   // Read-only browse screen (no toggle interaction here, unlike the Movies
   // Hub) — watched state takes the one overlay-badge slot when true, since
@@ -180,14 +180,13 @@ export default function ProfileMoviesScreen() {
   const movieWatchlist = useWatchStore((s) => s.movieWatchlist);
   const isLoadingMovies = useWatchStore((s) => s.isLoadingMovies);
   const fetchMovieWatchlist = useWatchStore((s) => s.fetchMovieWatchlist);
-  const preferredLayout = useWatchStore((s) => s.preferredLayout);
+  const layout = useLayoutFor('myMovies');
   const selectedLanguage = useWatchStore((s) => s.selectedLanguage);
   const setLanguageFilter = useWatchStore((s) => s.setLanguageFilter);
   const [filter, setFilter] = useState<FilterKey>('ALL');
   const [query, setQuery] = useState('');
   const [isLanguageModalVisible, setIsLanguageModalVisible] = useState(false);
   const [isFilterSheetVisible, setIsFilterSheetVisible] = useState(false);
-  const [animeOnly, setAnimeOnly] = useState(false);
   const [animationOnly, setAnimationOnly] = useState(false);
   // Derived from the tab selection, not independent state — see shows.tsx's
   // identical comment (Phase 63).
@@ -197,9 +196,28 @@ export default function ProfileMoviesScreen() {
     fetchMovieWatchlist();
   }, [fetchMovieWatchlist]);
 
-  const allItems = useMemo(() => {
-    return [...movieWatchlist.watch_next, ...movieWatchlist.watched];
-  }, [movieWatchlist]);
+  // Anime movies now live exclusively under My Anime (Phase 75.2) —
+  // excluded here unconditionally at the source, not via an optional
+  // toggle, so every derived list (WATCH_NEXT/WATCHED/ALL) stays consistent
+  // rather than only the ALL branch being filtered.
+  const nonAnimeWatchNext = useMemo(
+    () =>
+      movieWatchlist.watch_next.filter(
+        (item) => !isAnimeByGenreStringAndLanguage(item.movie.genres_string, item.movie.original_language)
+      ),
+    [movieWatchlist.watch_next]
+  );
+  const nonAnimeWatched = useMemo(
+    () =>
+      movieWatchlist.watched.filter(
+        (item) => !isAnimeByGenreStringAndLanguage(item.movie.genres_string, item.movie.original_language)
+      ),
+    [movieWatchlist.watched]
+  );
+  const allItems = useMemo(
+    () => [...nonAnimeWatchNext, ...nonAnimeWatched],
+    [nonAnimeWatchNext, nonAnimeWatched]
+  );
 
   // Distinct languages present in the user's own cached movie watchlist —
   // never TMDB's full language list, and never a new request (client-side only).
@@ -218,19 +236,13 @@ export default function ProfileMoviesScreen() {
     // instead of "movies you've marked watched, most recent first".
     let result =
       filter === 'WATCH_NEXT'
-        ? movieWatchlist.watch_next
+        ? nonAnimeWatchNext
         : filter === 'WATCHED' || filter === 'LAST_WATCHED'
-        ? movieWatchlist.watched
+        ? nonAnimeWatched
         : allItems;
 
     if (selectedLanguage) {
       result = result.filter((item) => item.movie.original_language === selectedLanguage);
-    }
-
-    if (animeOnly) {
-      result = result.filter((item) =>
-        isAnimeByGenreStringAndLanguage(item.movie.genres_string, item.movie.original_language)
-      );
     }
 
     if (animationOnly) {
@@ -248,15 +260,14 @@ export default function ProfileMoviesScreen() {
       result = [...result].sort((a, b) => b.updated_at.localeCompare(a.updated_at));
     }
     return result;
-  }, [allItems, filter, selectedLanguage, animeOnly, animationOnly, movieWatchlist, query, lastWatchedSort]);
+  }, [allItems, nonAnimeWatchNext, nonAnimeWatched, filter, selectedLanguage, animationOnly, query, lastWatchedSort]);
 
   const hasActiveFilters =
-    filter !== 'ALL' || selectedLanguage !== null || animeOnly || animationOnly;
+    filter !== 'ALL' || selectedLanguage !== null || animationOnly;
 
   const handleReset = () => {
     setFilter('ALL');
     setLanguageFilter(null);
-    setAnimeOnly(false);
     setAnimationOnly(false);
   };
 
@@ -274,7 +285,7 @@ export default function ProfileMoviesScreen() {
           <Film color={c.accentInk} size={20} strokeWidth={1.75} />
           <Text style={[styles.headerTitle, { color: c.textPrimary }]}>My Movies</Text>
         </View>
-        <LayoutToggle />
+        <LayoutToggle scope="myMovies" />
       </View>
 
       {/* Status/sort tabs — top-of-screen horizontal pill row (Phase 63),
@@ -343,13 +354,13 @@ export default function ProfileMoviesScreen() {
       ) : (
         <View style={styles.listWrap}>
           <FlashList
-            key={`profile-movies-${preferredLayout}`}
+            key={`profile-movies-${layout}`}
             data={filtered}
             keyExtractor={(item) => String(item.id)}
-            numColumns={preferredLayout === 'grid' ? 3 : 1}
-            extraData={preferredLayout}
+            numColumns={layout === 'grid' ? 3 : 1}
+            extraData={layout}
             renderItem={({ item }) =>
-              preferredLayout === 'grid' ? <MovieGridCard item={item} /> : <MovieListRow item={item} />
+              layout === 'grid' ? <MovieGridCard item={item} /> : <MovieListRow item={item} />
             }
             contentContainerStyle={styles.listContent}
             refreshing={isLoadingMovies}
@@ -371,13 +382,6 @@ export default function ProfileMoviesScreen() {
         onOpenLanguagePicker={() => setIsLanguageModalVisible(true)}
         languageDisplay={selectedLanguage ? languageDisplayName(selectedLanguage) : 'Any Language'}
         tagToggles={[
-          {
-            key: 'anime',
-            label: 'Anime',
-            Icon: Sparkles,
-            active: animeOnly,
-            onPress: () => setAnimeOnly((prev) => !prev),
-          },
           {
             key: 'animation',
             label: 'Animation',

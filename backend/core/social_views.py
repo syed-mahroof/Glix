@@ -34,7 +34,7 @@ from core.cache_keys import (
     friends_feed_cache_key,
     public_profile_cache_key,
 )
-from core.models import Follow, MovieWatchState, Watchlist, WatchState
+from core.models import Follow, MovieReview, MovieWatchState, ShowReview, Watchlist, WatchState
 from core.pagination import StandardResultsPagination
 from core.social_serializers import FollowEdgeSerializer, PublicUserSerializer
 
@@ -161,7 +161,7 @@ def _paginate_edges(request, view, queryset, edge_side: str):
     serializer = FollowEdgeSerializer(
         page,
         many=True,
-        context={"edge_side": edge_side, "is_following_ids": is_following_ids},
+        context={"edge_side": edge_side, "is_following_ids": is_following_ids, "viewer_id": request.user.id},
     )
     return paginator.get_paginated_response(serializer.data)
 
@@ -245,6 +245,16 @@ def _build_public_profile_blob(user) -> dict:
         )
     ]
 
+    # One query for both counts, not two — annotating two different reverse
+    # relations off the same base row in a single aggregate() joins both,
+    # so each is wrapped in Count(..., distinct=True) to cancel out the
+    # join fan-out (each incoming row would otherwise be multiplied by the
+    # user's outgoing count and vice versa).
+    follow_counts = User.objects.filter(pk=user.pk).aggregate(
+        follower_count=Count("incoming_follows", distinct=True),
+        following_count=Count("outgoing_follows", distinct=True),
+    )
+
     return {
         "username": user.username,
         "profile_picture": profile.profile_picture,
@@ -260,8 +270,8 @@ def _build_public_profile_blob(user) -> dict:
         "top_shows": top_shows,
         "recent_movies": recent_movies,
         "public_lists": public_lists,
-        "follower_count": user.incoming_follows.count(),
-        "following_count": user.outgoing_follows.count(),
+        "follower_count": follow_counts["follower_count"],
+        "following_count": follow_counts["following_count"],
     }
 
 
@@ -307,20 +317,30 @@ class UserProfileDetailView(APIView):
 
 class FriendsActivityView(APIView):
     """
-    GET /feed/activity/ — read-time fan-in over followees' recent watch
-    activity. Deliberately NOT a fan-out inbox table: the single Celery
-    worker (--concurrency=1) already shares capacity with TV Time imports
-    and can't absorb a write on every episode/movie watched. Two queries
-    + a Python merge instead, bounded by a 14-day window (load-bearing —
-    without it, ORDER BY watched_at DESC sorts over followees' entire
-    history), MAX_FOLLOWEES, and RAW_ROW_CAP per source.
+    GET /feed/activity/ — read-time fan-in over followees' recent reviews.
+
+    Phase 75.6: this used to surface raw watch activity (every episode/movie
+    a followee watched), which is noisy and not actually what "what did my
+    friends think" means — the feed now shows their ShowReview/MovieReview
+    rows instead, which is a considered opinion, not a checkbox. Private
+    accounts are excluded defensively even though the rest of this module
+    already keeps you from following one in the first place, in case an
+    account you already followed went private afterwards.
+
+    Deliberately NOT a fan-out inbox table: the single Celery worker
+    (--concurrency=1) already shares capacity with TV Time imports and
+    can't absorb a write on every review. Two queries + a Python merge
+    instead, bounded by a 14-day window (load-bearing — without it, ORDER
+    BY updated_at DESC sorts over followees' entire review history),
+    MAX_FOLLOWEES, and RAW_ROW_CAP per source.
     """
 
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
         user = request.user
-        cache_key = friends_feed_cache_key(user.id)
+        page_param = request.query_params.get("page") or "1"
+        cache_key = friends_feed_cache_key(user.id, page_param)
         cached = cache.get(cache_key)
         if cached is not None:
             return Response(cached, status=status.HTTP_200_OK)
@@ -338,59 +358,53 @@ class FriendsActivityView(APIView):
 
         since = timezone.now() - timedelta(days=ACTIVITY_WINDOW_DAYS)
 
-        episode_rows = (
-            WatchState.objects.filter(user_id__in=followee_ids, watched_at__gte=since)
-            .select_related("user", "user__profile", "episode__show")
-            .order_by("-watched_at")[:RAW_ROW_CAP]
+        show_review_rows = (
+            ShowReview.objects.filter(user_id__in=followee_ids, updated_at__gte=since)
+            .exclude(user__profile__is_private=True)
+            .select_related("user", "user__profile", "show")
+            .order_by("-updated_at")[:RAW_ROW_CAP]
         )
-        movie_rows = (
-            MovieWatchState.objects.filter(user_id__in=followee_ids, watched_at__gte=since)
+        movie_review_rows = (
+            MovieReview.objects.filter(user_id__in=followee_ids, updated_at__gte=since)
+            .exclude(user__profile__is_private=True)
             .select_related("user", "user__profile", "movie")
-            .order_by("-watched_at")[:RAW_ROW_CAP]
+            .order_by("-updated_at")[:RAW_ROW_CAP]
         )
 
-        # Collapse multi-episode binges into one card, grouped by
-        # (user, show, local calendar day) — a 12-episode binge is noise
-        # as 12 separate cards.
-        binge_groups: dict = {}
-        for row in episode_rows:
-            day = timezone.localtime(row.watched_at).date()
-            key = (row.user_id, row.episode.show_id, day)
-            group = binge_groups.get(key)
-            if group is None:
-                binge_groups[key] = {
-                    "type": "episodes",
-                    "user_id": row.user_id,
-                    "username": row.user.username,
-                    "profile_picture": getattr(row.user.profile, "profile_picture", None),
-                    "show_id": row.episode.show_id,
-                    "show_title": row.episode.show.title,
-                    "poster_path": row.episode.show.poster_path,
-                    "episode_count": 1,
-                    "watched_at": row.watched_at,
-                }
-            else:
-                group["episode_count"] += 1
-                if row.watched_at > group["watched_at"]:
-                    group["watched_at"] = row.watched_at
+        cards = [
+            {
+                "type": "review",
+                "media_type": "tv",
+                "user_id": row.user_id,
+                "username": row.user.username,
+                "profile_picture": getattr(row.user.profile, "profile_picture", None),
+                "tmdb_id": row.show_id,
+                "title": row.show.title,
+                "poster_path": row.show.poster_path,
+                "rating": row.rating,
+                "note": row.note,
+                "updated_at": row.updated_at,
+            }
+            for row in show_review_rows
+        ]
+        cards.extend(
+            {
+                "type": "review",
+                "media_type": "movie",
+                "user_id": row.user_id,
+                "username": row.user.username,
+                "profile_picture": getattr(row.user.profile, "profile_picture", None),
+                "tmdb_id": row.movie_id,
+                "title": row.movie.title,
+                "poster_path": row.movie.poster_path,
+                "rating": row.rating,
+                "note": row.note,
+                "updated_at": row.updated_at,
+            }
+            for row in movie_review_rows
+        )
 
-        cards = list(binge_groups.values())
-
-        for row in movie_rows:
-            cards.append(
-                {
-                    "type": "movie",
-                    "user_id": row.user_id,
-                    "username": row.user.username,
-                    "profile_picture": getattr(row.user.profile, "profile_picture", None),
-                    "movie_id": row.movie_id,
-                    "movie_title": row.movie.title,
-                    "poster_path": row.movie.poster_path,
-                    "watched_at": row.watched_at,
-                }
-            )
-
-        cards.sort(key=lambda c: c["watched_at"], reverse=True)
+        cards.sort(key=lambda c: c["updated_at"], reverse=True)
 
         paginator = StandardResultsPagination()
         page = paginator.paginate_queryset(cards, request, view=self)
