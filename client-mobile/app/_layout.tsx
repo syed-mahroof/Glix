@@ -2,21 +2,21 @@
 import { ThemeProvider } from '@react-navigation/native';
 import { useFonts } from 'expo-font';
 import { Stack, useRouter } from 'expo-router';
-import * as SecureStore from 'expo-secure-store';
 import * as SplashScreen from 'expo-splash-screen';
 import { StatusBar } from 'expo-status-bar';
 import * as Updates from 'expo-updates';
 import React, { useEffect, useState } from 'react';
-import { ActivityIndicator, AppState, StyleSheet, View } from 'react-native';
+import { ActivityIndicator, AppState, InteractionManager, StyleSheet, View } from 'react-native';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 
 import { BadgeUnlockModal } from '../components/BadgeUnlockModal';
 import CompletionCelebration from '../components/CompletionCelebration';
 import ErrorBoundary from '../components/ErrorBoundary';
-import { ACCESS_TOKEN_KEY, api, setSessionExpiredHandler } from '../lib/api';
+import { api, getAccessToken, setSessionExpiredHandler } from '../lib/api';
 import { BADGE_META } from '../lib/badges';
 import { registerForPushNotificationsAsync } from '../lib/notifications';
+import { flushPersist } from '../lib/persistStorage';
 import { pingHealth } from '../lib/warmup';
 import { AppThemeProvider, useAppTheme, toNavigationTheme } from '../lib/theme';
 import { useWatchStore } from '../store/watchStore';
@@ -43,6 +43,45 @@ SplashScreen.preventAutoHideAsync().catch(() => {});
 // Fire-and-forget: nothing downstream awaits this specific call.
 pingHealth(4000).catch(() => {});
 
+// Phase 83 perf: these four useWatchStore selectors used to live directly in
+// RootLayoutInner. Two are stable action refs (no re-render on their own),
+// but unlockedBadges/completedShow are real state — a badge unlock or a
+// series-finished celebration re-rendered RootLayoutInner itself, which
+// re-created the entire <Stack> below (30 <Stack.Screen> elements) just to
+// flip a modal's `visible` prop. Split into its own sibling component so
+// that re-render is scoped to these two small modals, not the navigator.
+function GlobalOverlays() {
+  const unlockedBadges = useWatchStore((s) => s.unlockedBadges);
+  const popUnlockedBadge = useWatchStore((s) => s.popUnlockedBadge);
+  const completedShow = useWatchStore((s) => s.completedShow);
+  const clearCompletedShow = useWatchStore((s) => s.clearCompletedShow);
+
+  return (
+    <>
+      <BadgeUnlockModal
+        visible={unlockedBadges.length > 0}
+        badgeName={
+          unlockedBadges[0]
+            ? BADGE_META[unlockedBadges[0]]?.label ?? unlockedBadges[0].replace(/_/g, ' ')
+            : 'New Badge'
+        }
+        badgeDescription={
+          unlockedBadges[0]
+            ? BADGE_META[unlockedBadges[0]]?.description ?? "You've earned a new achievement!"
+            : "You've earned a new achievement!"
+        }
+        onClose={popUnlockedBadge}
+      />
+      <CompletionCelebration
+        visible={completedShow !== null}
+        title={completedShow?.title ?? ''}
+        posterPath={completedShow?.posterPath ?? null}
+        onDismiss={clearCompletedShow}
+      />
+    </>
+  );
+}
+
 // The whole tree is wrapped in AppThemeProvider so every screen can read the
 // resolved theme via useAppTheme(). The actual layout lives in RootLayoutInner
 // so it can consume the theme (backgrounds, StatusBar, navigation theme).
@@ -59,23 +98,6 @@ function RootLayoutInner() {
   const router = useRouter();
   const [isAuthChecked, setIsAuthChecked] = useState(false);
   const [isAuthenticated, setIsAuthenticated] = useState(false);
-  // Scoped selectors, not a bare useWatchStore() — this root layout wraps
-  // the entire app, so a bare call would re-render literally every screen
-  // on every store mutation anywhere (toggling an episode, a background
-  // widget sync, etc.). Same fix applied to the tab/profile screens below
-  // that had the same pattern (index.tsx, movies.tsx, profile/shows.tsx,
-  // profile/movies.tsx, community.tsx) — user-reported general navigation
-  // lag (2026-07-21) traced to this being the single highest-leverage
-  // instance of it, since it sits above every other screen in the tree.
-  const unlockedBadges = useWatchStore((s) => s.unlockedBadges);
-  const popUnlockedBadge = useWatchStore((s) => s.popUnlockedBadge);
-  // Phase 67 — mounted at the root, same reasoning as unlockedBadges above:
-  // the mark-watched action that finishes a series can happen from the
-  // Shows Hub row, the season screen, or the episode screen, not just the
-  // show detail screen, so the celebration has to live above all of them
-  // rather than being wired into one screen.
-  const completedShow = useWatchStore((s) => s.completedShow);
-  const clearCompletedShow = useWatchStore((s) => s.clearCompletedShow);
 
   // "Akony" wordmark font (Phase J) — no custom font asset was loaded
   // anywhere in this app before this phase, so this is genuinely new
@@ -97,11 +119,12 @@ function RootLayoutInner() {
     let isMounted = true;
     (async () => {
       try {
-        // Add a 2-second timeout because SecureStore can sometimes hang indefinitely on Android Expo Go
-        const token = await Promise.race([
-          SecureStore.getItemAsync(ACCESS_TOKEN_KEY),
-          new Promise<null>((_, reject) => setTimeout(() => reject(new Error('SecureStore timeout')), 2000))
-        ]);
+        // getAccessToken() (lib/api.ts) carries its own 2s timeout — same
+        // guard this used to inline directly, because SecureStore can
+        // sometimes hang indefinitely on Android Expo Go — and doubles as
+        // this session's cache-priming read, so every request interceptor
+        // call after this one is free.
+        const token = await getAccessToken();
 
         if (!isMounted) return;
         
@@ -162,17 +185,28 @@ function RootLayoutInner() {
     // here collapses that to one relaunch. Updates.isEnabled is false in
     // Expo Go / dev client, so this is a no-op there.
     if (__DEV__ || !Updates.isEnabled) return;
-    (async () => {
-      try {
-        const result = await Updates.checkForUpdateAsync();
-        if (result.isAvailable) {
-          await Updates.fetchUpdateAsync();
-          await Updates.reloadAsync();
-        }
-      } catch {
-        // best-effort — app just continues on the bundle it already has
-      }
-    })();
+    // Phase 83 perf: this used to fire immediately at launch, competing on
+    // a cold network with the boot-critical fetches (auth check, first
+    // watchlist/profile load) for the same limited bandwidth/backend
+    // capacity. The update check is never boot-critical — deferred past
+    // the initial interaction burst (InteractionManager) plus a short fixed
+    // delay so it lands well after those requests are underway.
+    const task = InteractionManager.runAfterInteractions(() => {
+      setTimeout(() => {
+        (async () => {
+          try {
+            const result = await Updates.checkForUpdateAsync();
+            if (result.isAvailable) {
+              await Updates.fetchUpdateAsync();
+              await Updates.reloadAsync();
+            }
+          } catch {
+            // best-effort — app just continues on the bundle it already has
+          }
+        })();
+      }, 3000);
+    });
+    return () => task.cancel();
   }, []);
 
   useEffect(() => {
@@ -196,7 +230,11 @@ function RootLayoutInner() {
     } catch {
       // best-effort, same reasoning as the background flush below
     }
+    let previousAppState = AppState.currentState;
     const subscription = AppState.addEventListener('change', (nextState) => {
+      const wasBackground = previousAppState === 'background';
+      previousAppState = nextState;
+
       if (nextState === 'background') {
         try {
           useWatchStore.getState().syncWidgetData();
@@ -204,6 +242,21 @@ function RootLayoutInner() {
           // best-effort — a stale widget for one background cycle self-heals
           // via Android's own periodic redraw or the next in-app action.
         }
+        // Any debounced watchStore write still pending gets forced out now —
+        // otherwise a suspend before the timer fires drops the last mutation.
+        flushPersist();
+      }
+
+      // Phase 77: a backgrounded app can sit long enough (16+ minutes) for
+      // Render's free-tier dyno to go cold again without the user ever
+      // force-quitting — the exact scenario the module-load ping at the top
+      // of this file exists for, just re-armed for "resumed" instead of
+      // "freshly launched". Fire-and-forget, same as that one: nothing here
+      // gates the screen the user lands back on. Guarded on the actual
+      // background->active edge (not every inactive<->active blip, e.g. iOS
+      // Control Center) via the tracked previous state above.
+      if (wasBackground && nextState === 'active') {
+        pingHealth(4000).catch(() => {});
       }
     });
     return () => subscription.remove();
@@ -225,6 +278,7 @@ function RootLayoutInner() {
                 headerShown: false,
                 contentStyle: { backgroundColor: theme.colors.bg },
                 animation: 'fade',
+                freezeOnBlur: true,
               }}
             >
               <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
@@ -319,26 +373,7 @@ function RootLayoutInner() {
             </Stack>
             </ErrorBoundary>
           )}
-          <BadgeUnlockModal
-            visible={unlockedBadges.length > 0}
-            badgeName={
-              unlockedBadges[0]
-                ? BADGE_META[unlockedBadges[0]]?.label ?? unlockedBadges[0].replace(/_/g, ' ')
-                : 'New Badge'
-            }
-            badgeDescription={
-              unlockedBadges[0]
-                ? BADGE_META[unlockedBadges[0]]?.description ?? "You've earned a new achievement!"
-                : "You've earned a new achievement!"
-            }
-            onClose={popUnlockedBadge}
-          />
-          <CompletionCelebration
-            visible={completedShow !== null}
-            title={completedShow?.title ?? ''}
-            posterPath={completedShow?.posterPath ?? null}
-            onDismiss={clearCompletedShow}
-          />
+          <GlobalOverlays />
         </ThemeProvider>
       </SafeAreaProvider>
     </GestureHandlerRootView>

@@ -1,11 +1,11 @@
 // client-mobile/app/search.tsx
+import { FlashList } from '@shopify/flash-list';
 import { useRouter } from 'expo-router';
 import { Image } from 'expo-image';
 import { ArrowLeft, SearchIcon, X } from 'lucide-react-native';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
-  FlatList,
   StyleSheet,
   Text,
   TextInput,
@@ -134,7 +134,7 @@ export default function SearchScreen() {
           <Text style={[styles.emptyText, { color: c.textSecondary }]}>No shows found for "{query.trim()}".</Text>
         </View>
       ) : (
-        <FlatList
+        <FlashList
           data={results}
           keyExtractor={(item) => String(item.tmdb_id)}
           contentContainerStyle={styles.list}
@@ -151,6 +151,8 @@ export default function SearchScreen() {
                 style={[styles.poster, { backgroundColor: c.bgElevated }]}
                 contentFit="cover"
                 transition={150}
+                recyclingKey={String(item.tmdb_id)}
+                cachePolicy="memory-disk"
               />
               <View style={styles.resultTextColumn}>
                 <Text style={[styles.resultTitle, { color: c.textPrimary }]} numberOfLines={1}>

@@ -33,8 +33,9 @@ ranking), its own RESULT_LIMIT, and its own cache entry, so "Series" and
 """
 
 import logging
+from concurrent.futures import ThreadPoolExecutor
+from typing import Optional
 
-from django.core.cache import cache
 from django.db.models import Count
 from rest_framework.exceptions import ParseError
 from rest_framework.permissions import IsAuthenticated
@@ -42,6 +43,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from core.cache_keys import RECOMMENDATIONS_CACHE_TTL_SECONDS, recommendations_cache_key
+from core.cache_utils import safe_cache_get, safe_cache_set
 from core.models import MovieWatchlist, MovieWatchState, Watchlist, WatchState
 from core.serializers import ForYouRecommendationSerializer
 from core.services import TMDBService, TMDBServiceError
@@ -116,6 +118,24 @@ def _rank_and_serialize(candidates: dict[int, dict], media_type: str) -> list[di
     return results
 
 
+def _fetch_seed_recommendations(tmdb: TMDBService, seed: dict, movie: bool) -> Optional[dict]:
+    """One seed's TMDB recommendations call, or None if TMDB had nothing for
+    it — isolated so ThreadPoolExecutor.map can run every seed's call in
+    parallel below and a single seed's failure doesn't need special
+    handling beyond returning None (the caller already treats a payload
+    with no results the same way)."""
+    try:
+        if movie:
+            return tmdb.get_movie_recommendations(seed["tmdb_id"])
+        return tmdb.get_recommendations(seed["tmdb_id"])
+    except TMDBServiceError:
+        logger.warning(
+            "for_you: recommendations unavailable for %s seed %s",
+            "movie" if movie else "show", seed["tmdb_id"],
+        )
+        return None
+
+
 def _build_show_recommendations(user, tmdb: TMDBService) -> list[dict]:
     show_seeds = _top_watched_shows(user, SHOW_SEED_LIMIT)
     if not show_seeds:
@@ -124,12 +144,18 @@ def _build_show_recommendations(user, tmdb: TMDBService) -> list[dict]:
     tracked_show_ids = set(Watchlist.objects.filter(user=user).values_list("show_id", flat=True))
     seed_show_ids = {s["tmdb_id"] for s in show_seeds}
 
+    # Up to SHOW_SEED_LIMIT independent TMDB calls, one per seed — were run
+    # sequentially, so a cold cache paid the sum of all of them. Same
+    # ThreadPoolExecutor-per-independent-call pattern as DiscoverFeedView/
+    # DiscoverGenresView (core/views.py); pool.map preserves show_seeds'
+    # order in its results regardless of which call actually finishes first,
+    # so the candidate-scoring loop below is unaffected by the change.
+    with ThreadPoolExecutor(max_workers=SHOW_SEED_LIMIT) as pool:
+        payloads = list(pool.map(lambda s: _fetch_seed_recommendations(tmdb, s, movie=False), show_seeds))
+
     candidates: dict[int, dict] = {}
-    for seed in show_seeds:
-        try:
-            payload = tmdb.get_recommendations(seed["tmdb_id"])
-        except TMDBServiceError:
-            logger.warning("for_you: recommendations unavailable for show seed %s", seed["tmdb_id"])
+    for seed, payload in zip(show_seeds, payloads):
+        if payload is None:
             continue
         for item in payload.get("results", []):
             tid = item.get("tmdb_id")
@@ -150,12 +176,13 @@ def _build_movie_recommendations(user, tmdb: TMDBService) -> list[dict]:
     tracked_movie_ids = set(MovieWatchlist.objects.filter(user=user).values_list("movie_id", flat=True))
     seed_movie_ids = {m["tmdb_id"] for m in movie_seeds}
 
+    # Same reasoning as _build_show_recommendations above.
+    with ThreadPoolExecutor(max_workers=MOVIE_SEED_LIMIT) as pool:
+        payloads = list(pool.map(lambda s: _fetch_seed_recommendations(tmdb, s, movie=True), movie_seeds))
+
     candidates: dict[int, dict] = {}
-    for seed in movie_seeds:
-        try:
-            payload = tmdb.get_movie_recommendations(seed["tmdb_id"])
-        except TMDBServiceError:
-            logger.warning("for_you: recommendations unavailable for movie seed %s", seed["tmdb_id"])
+    for seed, payload in zip(movie_seeds, payloads):
+        if payload is None:
             continue
         for item in payload.get("results", []):
             tid = item.get("tmdb_id")
@@ -190,7 +217,7 @@ class ForYouRecommendationsView(APIView):
 
         user = request.user
         cache_key = recommendations_cache_key(user.id, media_type)
-        cached = cache.get(cache_key)
+        cached = safe_cache_get(cache_key)
         if cached is not None:
             return Response(cached)
 
@@ -202,5 +229,5 @@ class ForYouRecommendationsView(APIView):
 
         serializer = ForYouRecommendationSerializer(results, many=True)
         data = serializer.data
-        cache.set(cache_key, data, timeout=RECOMMENDATIONS_CACHE_TTL_SECONDS)
+        safe_cache_set(cache_key, data, timeout=RECOMMENDATIONS_CACHE_TTL_SECONDS)
         return Response(data)

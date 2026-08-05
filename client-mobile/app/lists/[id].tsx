@@ -2,11 +2,12 @@
 // Single custom list's contents — tap an item to open its full detail
 // screen (movie or show, per media_type), or remove it from the list.
 
+import { FlashList } from '@shopify/flash-list';
 import { Image } from 'expo-image';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { ArrowLeft, Film, Trash2, Tv2, X } from 'lucide-react-native';
 import React, { useCallback, useEffect } from 'react';
-import { ActivityIndicator, Alert, FlatList, StyleSheet, Text, View } from 'react-native';
+import { ActivityIndicator, Alert, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 import GlassSurface from '../../components/GlassSurface';
@@ -71,7 +72,13 @@ export default function ListDetailScreen() {
       <PressableScale onPress={() => handleOpenItem(item)}>
         <View style={[styles.poster, { backgroundColor: c.bgElevated }]}>
           {item.poster_path ? (
-            <Image source={{ uri: `${POSTER_BASE_URL}${item.poster_path}` }} style={styles.posterImg} contentFit="cover" />
+            <Image
+              source={{ uri: `${POSTER_BASE_URL}${item.poster_path}` }}
+              style={styles.posterImg}
+              contentFit="cover"
+              recyclingKey={`${item.media_type}-${item.tmdb_id}`}
+              cachePolicy="memory-disk"
+            />
           ) : (
             <View style={styles.posterFallback}>
               {item.media_type === 'movie' ? (
@@ -121,7 +128,7 @@ export default function ListDetailScreen() {
           </Text>
         </View>
       ) : (
-        <FlatList
+        <FlashList
           data={activeListDetail.items}
           keyExtractor={(item) => String(item.id)}
           renderItem={renderItem}

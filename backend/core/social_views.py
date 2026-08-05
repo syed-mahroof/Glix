@@ -16,7 +16,6 @@ from collections import defaultdict
 from datetime import timedelta
 
 from django.contrib.auth import get_user_model
-from django.core.cache import cache
 from django.db import IntegrityError, transaction
 from django.db.models import Case, Count, Exists, IntegerField, OuterRef, Q, Value, When
 from django.http import Http404
@@ -34,6 +33,7 @@ from core.cache_keys import (
     friends_feed_cache_key,
     public_profile_cache_key,
 )
+from core.cache_utils import safe_cache_delete, safe_cache_get, safe_cache_set
 from core.models import Follow, MovieReview, MovieWatchState, ShowReview, Watchlist, WatchState
 from core.pagination import StandardResultsPagination
 from core.social_serializers import FollowEdgeSerializer, PublicUserSerializer
@@ -132,8 +132,8 @@ class FollowToggleView(APIView):
                 # Race: another request from the same user landed first.
                 following = True
 
-        cache.delete(public_profile_cache_key(target.id))
-        cache.delete(public_profile_cache_key(request.user.id))
+        safe_cache_delete(public_profile_cache_key(target.id))
+        safe_cache_delete(public_profile_cache_key(request.user.id))
 
         return Response(
             {
@@ -292,10 +292,10 @@ class UserProfileDetailView(APIView):
         target, is_self = _visible_or_404(username, request.user)
 
         cache_key = public_profile_cache_key(target.id)
-        blob = cache.get(cache_key)
+        blob = safe_cache_get(cache_key)
         if blob is None:
             blob = _build_public_profile_blob(target)
-            cache.set(cache_key, blob, PUBLIC_PROFILE_CACHE_TTL_SECONDS)
+            safe_cache_set(cache_key, blob, PUBLIC_PROFILE_CACHE_TTL_SECONDS)
 
         data = dict(blob)
         data["is_self"] = is_self
@@ -341,7 +341,7 @@ class FriendsActivityView(APIView):
         user = request.user
         page_param = request.query_params.get("page") or "1"
         cache_key = friends_feed_cache_key(user.id, page_param)
-        cached = cache.get(cache_key)
+        cached = safe_cache_get(cache_key)
         if cached is not None:
             return Response(cached, status=status.HTTP_200_OK)
 
@@ -353,7 +353,7 @@ class FriendsActivityView(APIView):
 
         if not followee_ids:
             payload = {"count": 0, "total_pages": 0, "current_page": 1, "next": None, "previous": None, "results": []}
-            cache.set(cache_key, payload, FRIENDS_FEED_CACHE_TTL_SECONDS)
+            safe_cache_set(cache_key, payload, FRIENDS_FEED_CACHE_TTL_SECONDS)
             return Response(payload, status=status.HTTP_200_OK)
 
         since = timezone.now() - timedelta(days=ACTIVITY_WINDOW_DAYS)
@@ -410,5 +410,5 @@ class FriendsActivityView(APIView):
         page = paginator.paginate_queryset(cards, request, view=self)
         response = paginator.get_paginated_response(page)
 
-        cache.set(cache_key, response.data, FRIENDS_FEED_CACHE_TTL_SECONDS)
+        safe_cache_set(cache_key, response.data, FRIENDS_FEED_CACHE_TTL_SECONDS)
         return response

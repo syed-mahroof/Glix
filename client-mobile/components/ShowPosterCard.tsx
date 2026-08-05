@@ -10,10 +10,20 @@
 // checkmark use `accentFill`/`onAccent` instead, since that pair is by
 // design legible over any ground (always bright fill + dark text).
 
+import * as Haptics from 'expo-haptics';
 import { Image } from 'expo-image';
 import { useRouter } from 'expo-router';
-import React, { memo } from 'react';
+import React, { memo, useCallback, useEffect, useRef } from 'react';
 import { StyleSheet, Text, View } from 'react-native';
+import Animated, {
+  interpolateColor,
+  useAnimatedStyle,
+  useSharedValue,
+  withDelay,
+  withSequence,
+  withSpring,
+  withTiming,
+} from 'react-native-reanimated';
 
 import { useAppTheme } from '../lib/theme';
 import PressableScale from './PressableScale';
@@ -40,6 +50,12 @@ export interface ShowPosterCardProps {
     isWatched: boolean;
     disabled?: boolean;
     onPress: () => void;
+    /** Stable identity for the checked item (e.g. the episode's tmdb_id).
+     *  Drives the reset-on-recycle effect below so a FlashList cell reused
+     *  for a different episode snaps to that episode's real state instead
+     *  of inheriting an in-flight tap animation from whatever used to be
+     *  in this slot. */
+    itemId?: number | string;
   };
 }
 
@@ -60,6 +76,86 @@ function ShowPosterCardComponent({
   const { theme } = useAppTheme();
   const c = theme.colors;
 
+  // Grid-mode checkmark animation (mirrors ShowRow's fill/tick/bounce
+  // sequence). Unlike ShowRow, there's no row to collapse — the card stays
+  // in place and its badge/subtitle swap straight to the next episode once
+  // the store commits. Committing on tap (the old behaviour) meant that
+  // swap happened in the same render as the tap: the tick never got a
+  // chance to actually appear before the card jumped to the next episode's
+  // empty checkmark. Deferring the commit lets the fill+tick play out
+  // first, so the swap reads as "confirmed, then advanced" instead of a
+  // jump-cut.
+  const isAnimating = useRef(false);
+  const fillProgress = useSharedValue(checkmark?.isWatched ? 1 : 0);
+  const tickScale = useSharedValue(checkmark?.isWatched ? 1 : 0);
+  const checkBounce = useSharedValue(1);
+
+  // Resets to the current prop state whenever this card starts representing
+  // a different item (FlashList recycle) or the true watched state changes
+  // out from under us — same guard ShowRow uses keyed on episodeId/isWatched.
+  useEffect(() => {
+    isAnimating.current = false;
+    fillProgress.value = checkmark?.isWatched ? 1 : 0;
+    tickScale.value = checkmark?.isWatched ? 1 : 0;
+    checkBounce.value = 1;
+  }, [checkmark?.itemId, checkmark?.isWatched, fillProgress, tickScale, checkBounce]);
+
+  const handleCheckPress = useCallback(() => {
+    if (!checkmark) return;
+    if (isAnimating.current) return;
+
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+
+    if (checkmark.isWatched) {
+      // Un-watching: same item stays put, just reverse the fill — no
+      // commit delay needed since nothing is about to swap underneath it.
+      fillProgress.value = withSpring(0, { damping: 16, stiffness: 200 });
+      tickScale.value = withTiming(0, { duration: 160 });
+      checkBounce.value = withSequence(
+        withSpring(0.88, { damping: 12, stiffness: 300 }),
+        withSpring(1.0, { damping: 14, stiffness: 240 })
+      );
+      checkmark.onPress();
+      return;
+    }
+
+    isAnimating.current = true;
+    checkBounce.value = withSequence(
+      withSpring(0.78, { damping: 10, stiffness: 380 }),
+      withSpring(1.18, { damping: 7, stiffness: 300 }),
+      withSpring(1.0, { damping: 16, stiffness: 260 })
+    );
+    fillProgress.value = withSpring(1, { damping: 14, stiffness: 200 });
+    tickScale.value = withDelay(80, withSpring(1, { damping: 9, stiffness: 320 }));
+
+    // Catch-up modal or not, the tapped episode always ends up watched (see
+    // useCatchupCascade — every modal outcome finalizes it true), so it's
+    // safe to always fire the real commit here; we're just giving the tick
+    // time to be seen first.
+    setTimeout(() => {
+      checkmark.onPress();
+    }, 450);
+  }, [checkmark, fillProgress, tickScale, checkBounce]);
+
+  const checkCircleStyle = useAnimatedStyle(() => ({
+    backgroundColor: interpolateColor(
+      fillProgress.value,
+      [0, 1],
+      ['rgba(0,0,0,0.45)', c.accentFill]
+    ),
+    borderColor: interpolateColor(
+      fillProgress.value,
+      [0, 1],
+      ['rgba(255,255,255,0.7)', c.accentFill]
+    ),
+    transform: [{ scale: checkBounce.value }],
+  }));
+
+  const tickStyle = useAnimatedStyle(() => ({
+    transform: [{ scale: tickScale.value }],
+    opacity: tickScale.value,
+  }));
+
   return (
     <View style={styles.wrap}>
       <PressableScale
@@ -73,6 +169,8 @@ function ShowPosterCardComponent({
             style={styles.poster}
             contentFit="cover"
             transition={150}
+            recyclingKey={String(showId)}
+            cachePolicy="memory-disk"
           />
 
           {overlayBadge && (
@@ -98,7 +196,7 @@ function ShowPosterCardComponent({
 
           {checkmark && (
             <PressableScale
-              onPress={checkmark.onPress}
+              onPress={handleCheckPress}
               disabled={checkmark.disabled}
               hitSlop={8}
               style={[styles.checkBtn, checkmark.disabled && styles.checkBtnDisabled]}
@@ -106,16 +204,9 @@ function ShowPosterCardComponent({
               accessibilityState={{ checked: checkmark.isWatched, disabled: checkmark.disabled }}
               accessibilityLabel={checkmark.isWatched ? 'Mark as unwatched' : 'Mark as watched'}
             >
-              <View
-                style={[
-                  styles.checkCircle,
-                  checkmark.isWatched
-                    ? { backgroundColor: c.accentFill, borderColor: c.accentFill }
-                    : styles.checkCircleEmpty,
-                ]}
-              >
-                {checkmark.isWatched && <Text style={[styles.checkMark, { color: c.onAccent }]}>✓</Text>}
-              </View>
+              <Animated.View style={[styles.checkCircle, checkCircleStyle]}>
+                <Animated.Text style={[styles.checkMark, { color: c.onAccent }, tickStyle]}>✓</Animated.Text>
+              </Animated.View>
             </PressableScale>
           )}
         </View>
@@ -192,10 +283,6 @@ const styles = StyleSheet.create({
     borderWidth: 2,
     alignItems: 'center',
     justifyContent: 'center',
-  },
-  checkCircleEmpty: {
-    backgroundColor: 'rgba(0,0,0,0.45)',
-    borderColor: 'rgba(255,255,255,0.7)',
   },
   checkMark: {
     fontSize: 15,

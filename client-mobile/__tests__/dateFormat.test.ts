@@ -3,8 +3,11 @@ import {
   buildMonthGrid,
   airDateTimeInstant,
   formatLocalAirTime,
+  formatUpcomingHeaderLabel,
+  formatWeekdayShort,
   resolveAirInstant,
   resolveDisplayDateIso,
+  shouldAppendWeekday,
 } from '../lib/dateFormat';
 
 describe('dateFormat', () => {
@@ -75,6 +78,36 @@ describe('airDateTimeInstant / formatLocalAirTime', () => {
     // Slot says 9 PM Eastern; airDateTime says 13:00 UTC — the exact instant wins.
     expect(formatLocalAirTime('2026-01-15', exact, '21:00', 'America/New_York')).toBe(expected);
   });
+
+  // A3/A4 — the platform-estimate tier (core/airtime_platforms.py) rides the
+  // same airs_time/airs_timezone pair as a confirmed TVmaze slot, so it must
+  // resolve to the identical instant; only the displayed string should
+  // differ, by a leading "~" that marks it as a guess rather than a fact.
+  describe('isEstimated "~" prefix', () => {
+    it('prefixes "~" when isEstimated is true and a time resolves', () => {
+      const instant = airDateTimeInstant('2026-01-15', '21:00', 'America/New_York')!;
+      const expected = new Intl.DateTimeFormat('en-US', { hour: 'numeric', minute: '2-digit' }).format(instant);
+      expect(formatLocalAirTime('2026-01-15', null, '21:00', 'America/New_York', true)).toBe(`~${expected}`);
+    });
+
+    it('does not prefix "~" when isEstimated is false', () => {
+      const instant = airDateTimeInstant('2026-01-15', '21:00', 'America/New_York')!;
+      const expected = new Intl.DateTimeFormat('en-US', { hour: 'numeric', minute: '2-digit' }).format(instant);
+      expect(formatLocalAirTime('2026-01-15', null, '21:00', 'America/New_York', false)).toBe(expected);
+    });
+
+    it('does not prefix "~" when isEstimated is omitted (existing call sites unaffected)', () => {
+      const instant = airDateTimeInstant('2026-01-15', '21:00', 'America/New_York')!;
+      const expected = new Intl.DateTimeFormat('en-US', { hour: 'numeric', minute: '2-digit' }).format(instant);
+      expect(formatLocalAirTime('2026-01-15', null, '21:00', 'America/New_York')).toBe(expected);
+    });
+
+    it('stays null when isEstimated is true but no time resolves at all', () => {
+      // A "true" estimate flag can't manufacture a time out of nothing — the
+      // "~" only ever wraps an actually-resolved instant.
+      expect(formatLocalAirTime('2026-01-15', null, null, null, true)).toBeNull();
+    });
+  });
 });
 
 // Phase 75.1: the three-tier resolution order (exact airstamp -> broadcast
@@ -112,5 +145,62 @@ describe('resolveAirInstant / resolveDisplayDateIso', () => {
     const expected = new Date(exact);
     const expectedIso = `${expected.getFullYear()}-${String(expected.getMonth() + 1).padStart(2, '0')}-${String(expected.getDate()).padStart(2, '0')}`;
     expect(displayDate).toBe(expectedIso);
+  });
+});
+
+// A5 — widget day-of-week labels. shouldAppendWeekday must say "yes" only
+// for the two formatUpcomingHeaderLabel branches that don't already spell
+// out a weekday (the absolute-date branch and 'LATER'), and "no" for every
+// other branch, so a widget row never repeats (or contradicts) what its own
+// header already says.
+describe('shouldAppendWeekday', () => {
+  // Fixed reference "now" so every offset below lands on a deterministic
+  // diffDays bucket regardless of when the test suite actually runs.
+  const now = new Date('2026-01-01T00:00:00');
+
+  it('is true for LATER', () => {
+    expect(shouldAppendWeekday('LATER')).toBe(true);
+  });
+
+  it('is true for a real formatUpcomingHeaderLabel absolute-date output', () => {
+    // 10 days out falls in the 7-30 day "absolute date" branch, e.g. "JAN 11, 2026".
+    const label = formatUpcomingHeaderLabel('2026-01-11', now);
+    expect(label).toMatch(/^[A-Z]{3} \d{1,2}, \d{4}$/);
+    expect(shouldAppendWeekday(label)).toBe(true);
+  });
+
+  it('is false for TODAY', () => {
+    expect(shouldAppendWeekday(formatUpcomingHeaderLabel('2026-01-01', now))).toBe(false);
+    expect(shouldAppendWeekday('TODAY')).toBe(false);
+  });
+
+  it('is false for TOMORROW', () => {
+    expect(shouldAppendWeekday(formatUpcomingHeaderLabel('2026-01-02', now))).toBe(false);
+    expect(shouldAppendWeekday('TOMORROW')).toBe(false);
+  });
+
+  it('is false for a weekday-name label (2-6 days out)', () => {
+    // 3 days out falls in the 2-6 day "weekday name" branch, e.g. "TUESDAY".
+    const label = formatUpcomingHeaderLabel('2026-01-04', now);
+    expect(label).not.toBe('LATER');
+    expect(label).not.toMatch(/^[A-Z]{3} \d{1,2}, \d{4}$/);
+    expect(shouldAppendWeekday(label)).toBe(false);
+    expect(shouldAppendWeekday('TUESDAY')).toBe(false);
+  });
+
+  it('is false for each past-window label', () => {
+    expect(shouldAppendWeekday(formatUpcomingHeaderLabel('2025-12-27', now))).toBe(false); // LAST WEEK
+    expect(shouldAppendWeekday(formatUpcomingHeaderLabel('2025-12-10', now))).toBe(false); // LAST MONTH
+    expect(shouldAppendWeekday(formatUpcomingHeaderLabel('2025-01-01', now))).toBe(false); // EARLIER
+    expect(shouldAppendWeekday('LAST WEEK')).toBe(false);
+    expect(shouldAppendWeekday('LAST MONTH')).toBe(false);
+    expect(shouldAppendWeekday('EARLIER')).toBe(false);
+  });
+});
+
+describe('formatWeekdayShort', () => {
+  it('formats a display-date ISO as a short weekday name', () => {
+    // 2026-01-14 is a Wednesday.
+    expect(formatWeekdayShort('2026-01-14')).toBe('Wed');
   });
 });

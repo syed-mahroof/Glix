@@ -58,6 +58,8 @@ function MoviePosterCardComponent({
             style={styles.poster}
             contentFit="cover"
             transition={150}
+            recyclingKey={String(movieId)}
+            cachePolicy="memory-disk"
           />
 
           {ratingBadge && (

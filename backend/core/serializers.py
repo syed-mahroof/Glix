@@ -204,6 +204,13 @@ class CachedShowSerializer(serializers.ModelSerializer):
             # slot for the show, which the client renders as no time line.
             "airs_time",
             "airs_timezone",
+            # Which tier resolved airs_time/airs_timezone above — see
+            # CachedShow.air_time_source's docstring in models.py for the
+            # four possible values. The client uses this to prefix a "~" on
+            # a rendered time that's a platform convention rather than a
+            # confirmed TVmaze value (lib/dateFormat.ts's formatLocalAirTime),
+            # so an estimate is never shown identically to a real time.
+            "air_time_source",
             "episodes",
         ]
 

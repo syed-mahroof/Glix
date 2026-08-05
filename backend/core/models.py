@@ -159,6 +159,20 @@ class CachedShow(models.Model):
         default=list,
         blank=True,
     )
+    # TMDB's `networks` array (e.g. [{"name": "Netflix"}]) from the /tv/{id}
+    # payload — always present in the base response, no append_to_response
+    # needed. Existed in the payload from day one but was discarded until
+    # this field: it's what lets core/airtime_platforms.py's platform-
+    # estimate tier guess a well-known streaming platform's conventional
+    # drop time (e.g. "Netflix originals drop at midnight Pacific") for a
+    # show TVmaze has no schedule for at all. Never used to pick a display
+    # name — `title` already covers that — purely a lookup key into
+    # PLATFORM_AIR_TIME_CONVENTIONS.
+    networks = ArrayField(
+        base_field=models.CharField(max_length=128),
+        default=list,
+        blank=True,
+    )
     # TMDB's /tv/{id} payload includes a `next_episode_to_air` object whenever
     # TMDB knows a premiere date, even before that season's individual
     # episodes are otherwise cached (e.g. a freshly-announced new season with
@@ -178,6 +192,26 @@ class CachedShow(models.Model):
     # doesn't know, or that have no fixed slot (most streaming originals).
     airs_time = models.TimeField(null=True, blank=True)
     airs_timezone = models.CharField(max_length=64, blank=True)
+    # Which tier resolved airs_time/airs_timezone above, so the client can
+    # tell a confirmed broadcast time from a guess rather than rendering
+    # both identically — core/airtime.py's founding principle is "better to
+    # show no time than a wrong one", and an unmarked platform guess would
+    # violate that just as much as a wrong one would. One of:
+    #   "tvmaze_exact"      — TVmaze published a real per-episode airstamp
+    #                          for this show (CachedEpisode.air_datetime /
+    #                          next_episode_air_datetime), the most precise
+    #                          source there is.
+    #   "tvmaze_slot"       — TVmaze knows the show's fixed weekly network
+    #                          slot (schedule.time), but no per-episode
+    #                          instant.
+    #   "platform_estimate" — neither of the above; airs_time/airs_timezone
+    #                          were filled from airtime_platforms.py's
+    #                          conventional-drop-time table instead. The
+    #                          client prefixes its rendered time with "~"
+    #                          for this source (lib/dateFormat.ts's
+    #                          formatLocalAirTime).
+    #   ""                  — no time known from any source.
+    air_time_source = models.CharField(max_length=24, blank=True)
     # When TVmaze was last asked about this show — including when it
     # answered "no schedule". Without it, every 6-hourly refresh_show_cache
     # sweep would re-ask TVmaze about every show forever, and shows with no
@@ -237,6 +271,20 @@ class CachedEpisode(models.Model):
     # to the slot pair, then to local midnight (lib/dateFormat.ts's
     # resolveAirInstant).
     air_datetime = models.DateTimeField(null=True, blank=True, db_index=True)
+    # True when `air_datetime` above was filled by the platform-estimate
+    # tier (core/airtime_platforms.py) rather than a real TVmaze airstamp.
+    # Reserved for a future per-episode estimate — as of this field's
+    # introduction nothing actually sets it True, since the platform-
+    # estimate tier only ever resolves a show-level slot
+    # (CachedShow.airs_time/airs_timezone via air_time_source=
+    # "platform_estimate"), never writes a per-episode air_datetime here.
+    # The client instead derives "is this episode's time an estimate?"
+    # straight from CachedShow.air_time_source plus "this episode has no
+    # air_datetime of its own" (see lib/upcoming.ts) — cheaper than
+    # backfilling this column for a case that can't occur yet, and it
+    # still means something correct once/if a per-episode estimate source
+    # is ever added.
+    air_datetime_estimated = models.BooleanField(default=False)
     runtime_minutes = models.PositiveIntegerField(
         default=0,
         help_text="Used to increment/decrement UserProfile.total_time_watched on toggle.",

@@ -713,6 +713,7 @@ export default function ShowsScreen() {
           checkmark={{
             isWatched: episode.is_watched,
             disabled: !item.isAired && !episode.is_watched,
+            itemId: episode.tmdb_id,
             onPress: () =>
               handleGridCheckPress(
                 episode.tmdb_id,
@@ -773,7 +774,7 @@ export default function ShowsScreen() {
           subtitle={`S${pad(item.seasonNumber)}E${pad(item.episodeNumber)} · ${item.episodeTitle}`}
           checkmark={
             isAired && item.episodeId != null
-              ? { isWatched: false, onPress: () => handleUpcomingMarkWatched(item) }
+              ? { isWatched: false, itemId: item.episodeId, onPress: () => handleUpcomingMarkWatched(item) }
               : undefined
           }
         />

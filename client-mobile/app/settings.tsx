@@ -5,7 +5,6 @@
 
 import axios from 'axios';
 import { useRouter } from 'expo-router';
-import * as SecureStore from 'expo-secure-store';
 import { ArrowLeft, ChevronRight, LayoutGrid, LogOut, Monitor, Moon, Sun } from 'lucide-react-native';
 import React, { useEffect, useMemo, useState } from 'react';
 import { Alert, ScrollView, StyleSheet, Switch, Text, View } from 'react-native';
@@ -16,8 +15,12 @@ import EditProfileSheet from '../components/EditProfileSheet';
 import LogoutConfirmModal from '../components/LogoutConfirmModal';
 import PressableScale from '../components/PressableScale';
 import { SegmentedControl } from '../components/SegmentedControl';
-import { api, API_BASE_URL } from '../lib/api';
+import { api, API_BASE_URL, clearTokens, getRefreshToken } from '../lib/api';
+import { flushPersist } from '../lib/persistStorage';
 import { useAppTheme } from '../lib/theme';
+import { useDiscoverStore } from '../store/discoverStore';
+import { useListsStore } from '../store/listsStore';
+import { useSocialStore } from '../store/socialStore';
 import type { ThemePreference } from '../store/themeStore';
 import { LayoutMode, useWatchStore } from '../store/watchStore';
 
@@ -103,19 +106,31 @@ export default function SettingsScreen() {
   const performLogout = async () => {
     setIsLogoutModalVisible(false);
     setIsLoggingOut(true);
+    // Any debounced watchStore write still pending gets forced out now,
+    // before the session it belongs to goes away.
+    flushPersist();
     try {
-      const refreshToken = await SecureStore.getItemAsync('refresh_token');
+      const refreshToken = await getRefreshToken();
       if (refreshToken) {
         await axios
           .post(`${API_BASE_URL}/auth/logout/`, { refresh: refreshToken })
           .catch(() => undefined);
       }
     } finally {
-      await SecureStore.deleteItemAsync('access_token');
-      await SecureStore.deleteItemAsync('refresh_token');
+      await clearTokens();
       // Otherwise the home-screen widgets keep showing this account's
       // watchlist to whoever uses the device next.
       await useWatchStore.getState().clearWidgetData();
+      // C13's stale-while-revalidate persistence (discoverStore/
+      // socialStore/listsStore) exists specifically to paint instantly on
+      // a cold start — on a shared device that means whoever logs in next
+      // would otherwise see this account's Discover feed/Activity/Lists
+      // for a moment before their own fetch resolves. Same account-switch
+      // reasoning as clearWidgetData() above, just for these three stores'
+      // AsyncStorage-backed snapshots instead of the native widgets.
+      useDiscoverStore.persist.clearStorage();
+      useSocialStore.persist.clearStorage();
+      useListsStore.persist.clearStorage();
       setIsLoggingOut(false);
       router.replace('/login');
     }

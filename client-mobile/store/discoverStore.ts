@@ -1,10 +1,20 @@
 // client-mobile/store/discoverStore.ts
-// Non-persisted, in-memory Zustand store for the Discover Hub.
-// Kept separate from watchStore.ts to avoid polluting the persisted slice.
+// Mostly in-memory Zustand store for the Discover Hub — kept separate from
+// watchStore.ts to avoid polluting that persisted slice.
+//
+// Phase 83 (C13) stale-while-revalidate: the curated feed/For You/genre
+// covers are now persisted (debounced, same storage as watchStore) so a
+// cold start paints the last-seen Discover feed immediately instead of a
+// bare spinner, then silently revalidates once in the background. Search
+// and filtered-browse results stay unpersisted on purpose — they're
+// query-specific snapshots, not something a returning visit should paint
+// stale content for.
 
 import axios from 'axios';
 import { create } from 'zustand';
+import { persist } from 'zustand/middleware';
 import { api } from '../lib/api';
+import { createDebouncedStorage } from '../lib/persistStorage';
 import { extractErrorMessage } from '../lib/errors';
 
 // In-flight request trackers for runSearch/fetchFilteredResults — plain
@@ -17,6 +27,15 @@ import { extractErrorMessage } from '../lib/errors';
 // starting the next fixes both the wasted network calls and the race.
 let searchAbortController: AbortController | null = null;
 let filteredAbortController: AbortController | null = null;
+// Phase 83 perf: fetchFeed/fetchForYou/fetchGenreCovers/loadMore* had none
+// of this — a fast segment toggle (tv/movie/tv) fired a new request on top
+// of whatever the previous toggle was still waiting on, same race
+// runSearch/fetchFilteredResults were already fixed for above.
+let feedAbortController: AbortController | null = null;
+let forYouAbortController: AbortController | null = null;
+let genreCoversAbortController: AbortController | null = null;
+let loadMoreSearchAbortController: AbortController | null = null;
+let loadMoreFilteredAbortController: AbortController | null = null;
 
 // ─── Types ─────────────────────────────────────────────────────────────────────
 
@@ -87,6 +106,19 @@ interface DiscoverState {
 
   // Feed data
   feedData: Record<ActiveSegment, DiscoverFeedResponse | null>;
+  /** When each segment's feedData was last fetched live — persisted
+   *  alongside feedData so a returning session can tell "this is a
+   *  same-session-fresh feed" from "this is last week's snapshot,
+   *  painted immediately while a revalidation is in flight" (C13). Not
+   *  set on rehydration, only on an actual successful fetchFeed(). */
+  feedFetchedAt: Record<ActiveSegment, number | null>;
+  /** Session-scoped "have I done a live fetch for this segment yet" —
+   *  deliberately NOT persisted (excluded in partialize below), unlike
+   *  feedData itself. feedData can be non-null on mount purely from a
+   *  rehydrated snapshot; gating fetchFeed on *that* would skip the one
+   *  live revalidation a cold start actually needs. Same pattern
+   *  hasFetchedForYou below already established for "For You". */
+  hasFetchedFeed: Record<ActiveSegment, boolean>;
   isLoadingFeed: boolean;
   feedError: string | null;
 
@@ -110,6 +142,10 @@ interface DiscoverState {
   // Genre Grid cover images (real TMDB backdrops, one per genre — cached
   // per segment so switching tv/movie and back doesn't re-fetch)
   genreCovers: Record<ActiveSegment, Record<number, GenreCover>>;
+  /** Session-scoped fetch guard, same C13 reasoning as hasFetchedFeed —
+   *  genreCovers is now persisted, so "is it non-empty" alone can no
+   *  longer mean "already fetched this session". */
+  hasFetchedGenreCovers: Record<ActiveSegment, boolean>;
   isLoadingGenreCovers: boolean;
 
   // "For You" cross-library recommendations. Keyed per-segment like
@@ -144,7 +180,9 @@ interface DiscoverState {
   fetchForYou: (segment: ActiveSegment) => Promise<void>;
 }
 
-export const useDiscoverStore = create<DiscoverState>((set, get) => ({
+export const useDiscoverStore = create<DiscoverState>()(
+  persist(
+    (set, get) => ({
   // Initial UI state
   activeSegment: 'tv',
   searchQuery: '',
@@ -156,6 +194,8 @@ export const useDiscoverStore = create<DiscoverState>((set, get) => ({
 
   // Initial data state
   feedData: { tv: null, movie: null },
+  feedFetchedAt: { tv: null, movie: null },
+  hasFetchedFeed: { tv: false, movie: false },
   isLoadingFeed: false,
   feedError: null,
 
@@ -174,6 +214,7 @@ export const useDiscoverStore = create<DiscoverState>((set, get) => ({
   filteredError: null,
 
   genreCovers: { tv: {}, movie: {} },
+  hasFetchedGenreCovers: { tv: false, movie: false },
   isLoadingGenreCovers: false,
 
   forYou: { tv: [], movie: [] },
@@ -198,6 +239,11 @@ export const useDiscoverStore = create<DiscoverState>((set, get) => ({
     // "For You" is per-segment now — switching to Movies must fetch the
     // movie feed the first time, same cache-once guard fetchFeed uses.
     get().fetchForYou(segment);
+    // Genre Grid covers, also per-segment/cache-once. Used to also be
+    // fetched by a separate effect in discover.tsx keyed on activeSegment —
+    // one 4th request stacked on top of the three above every segment
+    // switch. This is now the only place that fires it.
+    get().fetchGenreCovers(segment);
   },
 
   setSearchQuery: (query) => set({ searchQuery: query }),
@@ -252,19 +298,45 @@ export const useDiscoverStore = create<DiscoverState>((set, get) => ({
   closeFilterSheet: () => set({ filterSheetVisible: false }),
 
   fetchFeed: async (segment) => {
-    // Skip if already cached
-    if (get().feedData[segment]) return;
+    // Skip if already fetched live this session — NOT the same check as
+    // "feedData[segment] is non-null" (C13): feedData is now persisted, so
+    // it can be non-null purely from a rehydrated snapshot on a cold
+    // start, before this session has ever actually talked to the backend.
+    // Gating on that would skip the one background revalidation a
+    // stale-while-revalidate cold start is supposed to get.
+    if (get().hasFetchedFeed[segment]) return;
 
+    feedAbortController?.abort();
+    const controller = new AbortController();
+    feedAbortController = controller;
+
+    // Deliberately not clearing feedData/showing a blocking spinner here —
+    // DiscoverFeedBody already renders real content whenever feedData[segment]
+    // is non-null regardless of isLoadingFeed, which is what lets a stale
+    // persisted snapshot stay on screen while this fetch resolves in the
+    // background instead of flashing to a spinner.
     set({ isLoadingFeed: true, feedError: null });
     try {
       const response = await api.get<DiscoverFeedResponse>(
-        `/discover/feed/?type=${segment}`
+        `/discover/feed/?type=${segment}`,
+        { signal: controller.signal }
       );
       set((state) => ({
         feedData: { ...state.feedData, [segment]: response.data },
+        feedFetchedAt: { ...state.feedFetchedAt, [segment]: Date.now() },
+        hasFetchedFeed: { ...state.hasFetchedFeed, [segment]: true },
         isLoadingFeed: false,
       }));
     } catch (err) {
+      // A stale/aborted fetch (e.g. a fast tv->movie->tv toggle, or the
+      // screen unmounting mid-request) must still clear isLoadingFeed —
+      // otherwise it's stuck true in the store forever, since nothing else
+      // is going to resolve and flip it back. No feedError either: this
+      // wasn't a real failure, just a superseded/cancelled request.
+      if (axios.isCancel(err)) {
+        set({ isLoadingFeed: false });
+        return;
+      }
       set({ feedError: extractErrorMessage(err), isLoadingFeed: false });
     }
   },
@@ -275,10 +347,16 @@ export const useDiscoverStore = create<DiscoverState>((set, get) => ({
     // just avoids a redundant request within the same app session, same
     // idea as fetchFeed's per-segment cache.
     if (get().hasFetchedForYou[segment]) return;
+
+    forYouAbortController?.abort();
+    const controller = new AbortController();
+    forYouAbortController = controller;
+
     set({ isLoadingForYou: true, forYouError: null });
     try {
       const response = await api.get<ForYouItem[]>('/recommendations/for-you/', {
         params: { type: segment },
+        signal: controller.signal,
       });
       set((state) => ({
         forYou: { ...state.forYou, [segment]: response.data },
@@ -286,6 +364,10 @@ export const useDiscoverStore = create<DiscoverState>((set, get) => ({
         isLoadingForYou: false,
       }));
     } catch (err) {
+      if (axios.isCancel(err)) {
+        set({ isLoadingForYou: false });
+        return;
+      }
       set({ forYouError: extractErrorMessage(err), isLoadingForYou: false });
     }
   },
@@ -321,11 +403,17 @@ export const useDiscoverStore = create<DiscoverState>((set, get) => ({
   loadMoreSearchResults: async () => {
     const { searchQuery, searchPage, searchTotalPages, isSearching, isLoadingMoreSearch } = get();
     if (isSearching || isLoadingMoreSearch || !searchQuery.trim() || searchPage >= searchTotalPages) return;
+
+    loadMoreSearchAbortController?.abort();
+    const controller = new AbortController();
+    loadMoreSearchAbortController = controller;
+
     set({ isLoadingMoreSearch: true });
     try {
       const nextPage = searchPage + 1;
       const response = await api.get<UniversalSearchResponse>(
-        `/search/universal/?query=${encodeURIComponent(searchQuery)}&page=${nextPage}`
+        `/search/universal/?query=${encodeURIComponent(searchQuery)}&page=${nextPage}`,
+        { signal: controller.signal }
       );
       set((state) => ({
         searchResults: [...state.searchResults, ...response.data.results],
@@ -336,7 +424,9 @@ export const useDiscoverStore = create<DiscoverState>((set, get) => ({
     } catch {
       // Best-effort — a failed "load more" tail request just means the
       // user can trigger it again by scrolling; not worth a full error
-      // state for results that are already on screen.
+      // state for results that are already on screen. Same story for a
+      // cancelled one (a fresh runSearch superseding this page request) —
+      // no error field to skip setting either way.
       set({ isLoadingMoreSearch: false });
     }
   },
@@ -401,6 +491,11 @@ export const useDiscoverStore = create<DiscoverState>((set, get) => ({
       isLoadingMoreFiltered,
     } = get();
     if (isLoadingFiltered || isLoadingMoreFiltered || filteredPage >= filteredTotalPages) return;
+
+    loadMoreFilteredAbortController?.abort();
+    const controller = new AbortController();
+    loadMoreFilteredAbortController = controller;
+
     set({ isLoadingMoreFiltered: true });
     try {
       const params: Record<string, string> = {
@@ -411,7 +506,10 @@ export const useDiscoverStore = create<DiscoverState>((set, get) => ({
       if (selectedGenreId !== null) params.genre = String(selectedGenreId);
       if (selectedLanguage) params.language = selectedLanguage;
       if (animeOnly) params.anime = 'true';
-      const response = await api.get<UniversalSearchResponse>('/discover/filter/', { params });
+      const response = await api.get<UniversalSearchResponse>('/discover/filter/', {
+        params,
+        signal: controller.signal,
+      });
       set((state) => ({
         filteredResults: [...state.filteredResults, ...response.data.results],
         filteredPage: response.data.page,
@@ -435,13 +533,20 @@ export const useDiscoverStore = create<DiscoverState>((set, get) => ({
   },
 
   fetchGenreCovers: async (segment) => {
-    // Skip if already cached for this segment
-    if (Object.keys(get().genreCovers[segment]).length > 0) return;
+    // Skip if already fetched live this session — same C13 reasoning as
+    // fetchFeed's hasFetchedFeed guard above; genreCovers is persisted now,
+    // so "is it non-empty" no longer means "already fetched this session".
+    if (get().hasFetchedGenreCovers[segment]) return;
+
+    genreCoversAbortController?.abort();
+    const controller = new AbortController();
+    genreCoversAbortController = controller;
 
     set({ isLoadingGenreCovers: true });
     try {
       const response = await api.get<GenreCover[]>('/discover/genres/', {
         params: { type: segment },
+        signal: controller.signal,
       });
       const bySegmentId: Record<number, GenreCover> = {};
       for (const cover of response.data) {
@@ -449,11 +554,31 @@ export const useDiscoverStore = create<DiscoverState>((set, get) => ({
       }
       set((state) => ({
         genreCovers: { ...state.genreCovers, [segment]: bySegmentId },
+        hasFetchedGenreCovers: { ...state.hasFetchedGenreCovers, [segment]: true },
         isLoadingGenreCovers: false,
       }));
     } catch {
       // Non-critical — GenreGrid falls back to a solid color card per genre.
+      // Covers a real failure and a cancellation (superseded segment
+      // switch) the same way, since there's no error UI tied to this flag.
       set({ isLoadingGenreCovers: false });
     }
   },
-}));
+    }),
+    {
+      name: 'discover-store',
+      storage: createDebouncedStorage(),
+      // Only the curated feed/For You/genre covers are worth painting
+      // stale on a cold start (C13) — search/filtered results are
+      // query-specific snapshots, and every UI flag/error/pagination field
+      // below must start fresh each session regardless of what the last
+      // one left behind.
+      partialize: (state) => ({
+        feedData: state.feedData,
+        feedFetchedAt: state.feedFetchedAt,
+        forYou: state.forYou,
+        genreCovers: state.genreCovers,
+      }),
+    }
+  )
+);

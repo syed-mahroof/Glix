@@ -14,6 +14,7 @@ import LanguageFilterModal, { languageDisplayName } from '../../components/Langu
 import LayoutToggle from '../../components/LayoutToggle';
 import MoviePosterCard from '../../components/MoviePosterCard';
 import PressableScale from '../../components/PressableScale';
+import TabPill from '../../components/TabPill';
 import WatchlistFilterSheet from '../../components/WatchlistFilterSheet';
 import { hasAnimationGenreString, isAnimeByGenreStringAndLanguage } from '../../lib/anime';
 import { useAppTheme } from '../../lib/theme';
@@ -33,35 +34,6 @@ const FILTERS: { key: FilterKey; label: string }[] = [
   { key: 'WATCHED', label: 'Watched' },
   { key: 'LAST_WATCHED', label: 'Last Watched' },
 ];
-
-function TabPill({
-  label,
-  active,
-  onPress,
-}: {
-  label: string;
-  active: boolean;
-  onPress: () => void;
-}) {
-  const { theme } = useAppTheme();
-  const c = theme.colors;
-  return (
-    <PressableScale
-      style={[
-        styles.tabPill,
-        { backgroundColor: c.glassFill, borderColor: c.hairline },
-        active && { backgroundColor: c.accentFill, borderColor: c.accentFill },
-      ]}
-      onPress={onPress}
-      accessibilityRole="button"
-      accessibilityState={{ selected: active }}
-    >
-      <Text style={[styles.tabPillText, { color: c.textSecondary }, active && { color: c.onAccent }]}>
-        {label}
-      </Text>
-    </PressableScale>
-  );
-}
 
 function formatRuntime(minutes: number): string {
   if (!minutes || minutes <= 0) return '';
@@ -435,16 +407,6 @@ const styles = StyleSheet.create({
   tabsContainer: {
     paddingHorizontal: 16,
     gap: 8,
-  },
-  tabPill: {
-    paddingHorizontal: 14,
-    paddingVertical: 8,
-    borderRadius: 16,
-    borderWidth: StyleSheet.hairlineWidth,
-  },
-  tabPillText: {
-    fontSize: 13,
-    fontWeight: '600',
   },
 
   searchRow: {

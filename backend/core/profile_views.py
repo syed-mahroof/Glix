@@ -10,7 +10,6 @@ update) and is_private ("ghost mode" — see UserProfile.is_private and
 core/social_views.py). email stays read-only.
 """
 
-from django.core.cache import cache
 from django.db import transaction
 from django.db.models import Sum
 from rest_framework import status
@@ -19,6 +18,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from core.cache_keys import movie_watchlist_cache_key, watchlist_cache_key
+from core.cache_utils import safe_cache_delete, safe_cache_get, safe_cache_set
 from core.models import MovieWatchlist, MovieWatchState, UserProfile, Watchlist, WatchState
 from core.serializers import UserProfileSerializer
 from core.services import TMDBService
@@ -83,8 +83,8 @@ class ProfileStatsResyncView(APIView):
         # Best-effort — a resync is explicitly a "make sure I'm looking at
         # the truth right now" action, so serve the next Shows/Movies Hub
         # fetch fresh too rather than whatever's left of the short TTL.
-        cache.delete(watchlist_cache_key(user.id))
-        cache.delete(movie_watchlist_cache_key(user.id))
+        safe_cache_delete(watchlist_cache_key(user.id))
+        safe_cache_delete(movie_watchlist_cache_key(user.id))
 
         return Response(
             {
@@ -123,7 +123,7 @@ class AvatarOptionsView(APIView):
     CACHE_KEY = "profile_avatar_character_options"
 
     def get(self, request):
-        cached = cache.get(self.CACHE_KEY)
+        cached = safe_cache_get(self.CACHE_KEY)
         if cached is not None:
             return Response(cached, status=status.HTTP_200_OK)
 
@@ -131,5 +131,5 @@ class AvatarOptionsView(APIView):
         data = tmdb.get_popular_characters(limit=40)
 
         payload = {"cast": data.get("results", [])}
-        cache.set(self.CACHE_KEY, payload, timeout=self.CACHE_TTL_SECONDS)
+        safe_cache_set(self.CACHE_KEY, payload, timeout=self.CACHE_TTL_SECONDS)
         return Response(payload, status=status.HTTP_200_OK)

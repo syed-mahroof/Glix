@@ -1,9 +1,9 @@
 // client-mobile/store/watchStore.ts
-import AsyncStorage from '@react-native-async-storage/async-storage';
 import React from 'react';
 import { create } from 'zustand';
-import { persist, createJSONStorage } from 'zustand/middleware';
+import { persist } from 'zustand/middleware';
 import { api } from '../lib/api';
+import { createDebouncedStorage } from '../lib/persistStorage';
 import { extractErrorMessage } from '../lib/errors';
 import { Platform } from 'react-native';
 import { requestWidgetUpdate } from 'react-native-android-widget';
@@ -110,6 +110,17 @@ export interface Show {
    *  NOT in the device's timezone. */
   airs_time?: string | null;
   airs_timezone?: string | null;
+  /** Which tier resolved airs_time/airs_timezone above (backend:
+   *  CachedShow.air_time_source, core/airtime.py) — 'tvmaze_exact' when
+   *  TVmaze published a real per-episode airstamp, 'tvmaze_slot' for its
+   *  fixed weekly network slot, 'platform_estimate' for a well-known
+   *  streaming-platform convention (e.g. "Netflix drops at midnight
+   *  Pacific") used only when TVmaze had nothing at all, or '' for no
+   *  known source. Absent (undefined) on shows cached before this field
+   *  existed. A 'platform_estimate' source is what tells
+   *  formatLocalAirTime to prefix its rendered time with "~" — see
+   *  lib/upcoming.ts's UpcomingItem.airTimeSource. */
+  air_time_source?: 'tvmaze_exact' | 'tvmaze_slot' | 'platform_estimate' | '' | null;
   episodes: Episode[];
   /** YouTube video id for the best available trailer/teaser, only present
    *  on the full ShowDetailView response (`GET /shows/{id}/`) — absent
@@ -1735,7 +1746,7 @@ export const useWatchStore = create<WatchStoreState>()(
     }),
     {
       name: 'watchtracker-store',
-      storage: createJSONStorage(() => AsyncStorage),
+      storage: createDebouncedStorage(),
       version: 1,
       // v0 -> v1: preferredLayout/toggleLayout (one global list/grid choice)
       // replaced by defaultLayout + per-scope layoutOverrides (Phase 75.5) —
@@ -1767,14 +1778,13 @@ export const useWatchStore = create<WatchStoreState>()(
         layoutOverrides: state.layoutOverrides,
         selectedLanguage: state.selectedLanguage,
         dashboard: state.dashboard,
-        statistics: state.statistics,
-        genres: state.genres,
-        heatmap: state.heatmap,
         streak: state.streak,
-        yearReview: state.yearReview,
-        monthlyRecap: state.monthlyRecap,
-        achievements: state.achievements,
-        completion: state.completion,
+        // statistics/genres/heatmap/yearReview/monthlyRecap/achievements/
+        // completion are deliberately NOT persisted: analytics.tsx resets
+        // lastFetchedAtRef to 0 on mount, so every one of these is refetched
+        // unconditionally on the first focus after any cold start anyway.
+        // Persisting them (heatmap alone is 365 objects) only grew the blob
+        // JSON.stringify has to walk on every mutation for no benefit.
       }),
     }
   )

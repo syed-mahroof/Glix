@@ -19,7 +19,6 @@ import calendar
 from collections import Counter, defaultdict
 from datetime import date, timedelta
 
-from django.core.cache import cache
 from django.db.models import Avg, Count, Min, Sum
 from django.utils import timezone
 from rest_framework.permissions import IsAuthenticated
@@ -40,6 +39,7 @@ from core.analytics_serializers import (
     StreakSerializer,
     YearReviewSerializer,
 )
+from core.cache_utils import safe_cache_get, safe_cache_set
 from core.cache_keys import (
     ANALYTICS_DASHBOARD_CACHE_TTL_SECONDS,
     ANALYTICS_HEATMAP_ALL_CACHE_TTL_SECONDS,
@@ -516,7 +516,7 @@ class AnalyticsDashboardView(APIView):
 
     def get(self, request):
         cache_key = analytics_dashboard_cache_key(request.user.id)
-        cached = cache.get(cache_key)
+        cached = safe_cache_get(cache_key)
         if cached is not None:
             return Response(cached)
 
@@ -587,7 +587,7 @@ class AnalyticsDashboardView(APIView):
             },
         }
         serialized = DashboardSerializer(data).data
-        cache.set(cache_key, serialized, ANALYTICS_DASHBOARD_CACHE_TTL_SECONDS)
+        safe_cache_set(cache_key, serialized, ANALYTICS_DASHBOARD_CACHE_TTL_SECONDS)
         return Response(serialized)
 
 
@@ -604,7 +604,7 @@ class AnalyticsStatisticsView(APIView):
 
     def get(self, request):
         cache_key = analytics_statistics_cache_key(request.user.id)
-        cached = cache.get(cache_key)
+        cached = safe_cache_get(cache_key)
         if cached is not None:
             return Response(cached)
 
@@ -790,7 +790,7 @@ class AnalyticsStatisticsView(APIView):
             "most_watched_day": most_watched_day,
         }
         serialized = StatisticsSerializer(data).data
-        cache.set(cache_key, serialized, ANALYTICS_STATISTICS_CACHE_TTL_SECONDS)
+        safe_cache_set(cache_key, serialized, ANALYTICS_STATISTICS_CACHE_TTL_SECONDS)
         return Response(serialized)
 
 
@@ -954,7 +954,7 @@ class AnalyticsMoviesView(APIView):
     def get(self, request):
         user = request.user
         cache_key = analytics_movies_cache_key(user.id)
-        cached = cache.get(cache_key)
+        cached = safe_cache_get(cache_key)
         if cached is not None:
             return Response(cached)
 
@@ -1053,7 +1053,7 @@ class AnalyticsMoviesView(APIView):
             "recent_movies": recent_movies,
         }
         serialized = AnalyticsMoviesSerializer(data).data
-        cache.set(cache_key, serialized, ANALYTICS_MOVIES_CACHE_TTL_SECONDS)
+        safe_cache_set(cache_key, serialized, ANALYTICS_MOVIES_CACHE_TTL_SECONDS)
         return Response(serialized)
 
 
@@ -1087,13 +1087,13 @@ class AnalyticsHeatmapView(APIView):
 
     def _all_time(self, user) -> Response:
         cache_key = analytics_heatmap_all_cache_key(user.id)
-        cached = cache.get(cache_key)
+        cached = safe_cache_get(cache_key)
         if cached is not None:
             return Response(cached)
 
         payload = _heatmap_all_time_for_user(user)
         data = HeatmapAllTimeSerializer(payload).data
-        cache.set(cache_key, data, ANALYTICS_HEATMAP_ALL_CACHE_TTL_SECONDS)
+        safe_cache_set(cache_key, data, ANALYTICS_HEATMAP_ALL_CACHE_TTL_SECONDS)
         return Response(data)
 
 
@@ -1286,7 +1286,7 @@ class AnalyticsMonthlySummaryView(APIView):
             year = current_year
 
         cache_key = analytics_monthly_summary_cache_key(request.user.id, year)
-        cached = cache.get(cache_key)
+        cached = safe_cache_get(cache_key)
         if cached is not None:
             return Response(cached)
 
@@ -1347,7 +1347,7 @@ class AnalyticsMonthlySummaryView(APIView):
             )
 
         serialized = MonthlySummaryItemSerializer(results, many=True).data
-        cache.set(cache_key, serialized, ANALYTICS_MONTHLY_SUMMARY_CACHE_TTL_SECONDS)
+        safe_cache_set(cache_key, serialized, ANALYTICS_MONTHLY_SUMMARY_CACHE_TTL_SECONDS)
         return Response(serialized)
 
 

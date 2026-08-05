@@ -1,7 +1,7 @@
 // client-mobile/components/EpisodeRow.tsx
 import { Image } from 'expo-image';
 import { Check, Eye } from 'lucide-react-native';
-import React, { memo, useState } from 'react';
+import React, { memo, useEffect, useState } from 'react';
 import { ActivityIndicator, StyleSheet, Text, View } from 'react-native';
 
 import { hasAired, pad } from '../lib/dateFormat';
@@ -29,6 +29,19 @@ function EpisodeRowComponent({
   // Spoiler protection: overview stays hidden behind a blur/placeholder
   // until the episode is watched, or the user explicitly reveals it.
   const [isRevealed, setIsRevealed] = useState(episode.is_watched);
+
+  // Phase 83 perf (FlashList migration): useState's initializer only runs
+  // once per component instance, but FlashList reuses instances across
+  // rows as it recycles cells during scroll — without this, a cell
+  // manually revealed for one episode kept showing "revealed" after being
+  // recycled for a different, unwatched episode further down the list,
+  // silently leaking its synopsis with no tap. Same reset-on-recycle
+  // pattern as ShowRow.tsx, keyed on the episode identity actually
+  // changing underneath this instance.
+  useEffect(() => {
+    setIsRevealed(episode.is_watched);
+  }, [episode.tmdb_id, episode.is_watched]);
+
   const showOverview = episode.is_watched || isRevealed;
 
   // A future episode can't be marked watched — disable its toggle. Un-watching

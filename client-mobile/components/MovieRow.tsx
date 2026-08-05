@@ -235,6 +235,8 @@ function MovieRowComponent({
           style={[styles.poster, { backgroundColor: c.bgElevated }]}
           contentFit="cover"
           transition={150}
+          recyclingKey={String(movieId)}
+          cachePolicy="memory-disk"
         />
 
         {/* Text column */}

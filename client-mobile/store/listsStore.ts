@@ -1,13 +1,22 @@
 // client-mobile/store/listsStore.ts
-// Non-persisted, in-memory Zustand store for user-created lists
-// ("Movies2026", etc.) — distinct from watchStore.ts's Watchlist/
-// MovieWatchlist ("want to watch" trackers). Kept separate, mirroring
-// discoverStore.ts's precedent, rather than growing the already-1300+-line
-// persisted store further; there is nothing here worth surviving an app
-// restart offline (it's always a cheap, fast re-fetch).
+// Mostly in-memory Zustand store for user-created lists ("Movies2026",
+// etc.) — distinct from watchStore.ts's Watchlist/MovieWatchlist ("want to
+// watch" trackers). Kept separate, mirroring discoverStore.ts's precedent,
+// rather than growing the already-1300+-line persisted store further.
+//
+// Phase 83 (C13) stale-while-revalidate: only the list summaries (`lists`,
+// the "My Lists" hub) are persisted (debounced, same storage as
+// watchStore/discoverStore/socialStore) — app/lists/index.tsx already
+// calls fetchLists() unconditionally on mount, so that becomes the
+// background revalidation for free. activeListDetail/membership stay
+// unpersisted: both are per-navigation snapshots (whichever list/item is
+// currently open), not something a returning visit to the hub should
+// paint stale content for.
 
 import { create } from 'zustand';
+import { persist } from 'zustand/middleware';
 import { api } from '../lib/api';
+import { createDebouncedStorage } from '../lib/persistStorage';
 import { extractErrorMessage } from '../lib/errors';
 
 export type MediaType = 'tv' | 'movie';
@@ -42,6 +51,10 @@ export interface CustomListDetail extends CustomListSummary {
 
 interface ListsStoreState {
   lists: CustomListSummary[];
+  /** When `lists` was last fetched live — persisted alongside it so the
+   *  hub can flag a stale-while-revalidate snapshot instead of silently
+   *  presenting it as fresh (C13). */
+  listsFetchedAt: number | null;
   isLoadingLists: boolean;
   activeListDetail: CustomListDetail | null;
   isLoadingListDetail: boolean;
@@ -64,8 +77,11 @@ function membershipKey(mediaType: MediaType, tmdbId: number) {
   return `${mediaType}:${tmdbId}`;
 }
 
-export const useListsStore = create<ListsStoreState>()((set, get) => ({
+export const useListsStore = create<ListsStoreState>()(
+  persist(
+    (set, get) => ({
   lists: [],
+  listsFetchedAt: null,
   isLoadingLists: false,
   activeListDetail: null,
   isLoadingListDetail: false,
@@ -73,10 +89,15 @@ export const useListsStore = create<ListsStoreState>()((set, get) => ({
   error: null,
 
   fetchLists: async () => {
+    // Deliberately not clearing `lists` here (C13) — the "My Lists" hub
+    // already renders real rows whenever `lists` is non-empty regardless
+    // of isLoadingLists, which is what lets a stale persisted snapshot
+    // stay on screen while this call's own unconditional-on-mount fetch
+    // (app/lists/index.tsx) resolves in the background.
     set({ isLoadingLists: true, error: null });
     try {
       const response = await api.get<CustomListSummary[]>('/lists/');
-      set({ lists: response.data, isLoadingLists: false });
+      set({ lists: response.data, listsFetchedAt: Date.now(), isLoadingLists: false });
     } catch (error) {
       set({ error: extractErrorMessage(error), isLoadingLists: false });
     }
@@ -175,4 +196,17 @@ export const useListsStore = create<ListsStoreState>()((set, get) => ({
       return false;
     }
   },
-}));
+    }),
+    {
+      name: 'lists-store',
+      storage: createDebouncedStorage(),
+      // Only the list summaries are worth painting stale on a cold start
+      // (C13) — activeListDetail/membership are per-navigation snapshots,
+      // and every loading/error field must start fresh each session.
+      partialize: (state) => ({
+        lists: state.lists,
+        listsFetchedAt: state.listsFetchedAt,
+      }),
+    }
+  )
+);

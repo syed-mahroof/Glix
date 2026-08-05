@@ -99,9 +99,20 @@ export default function ListsHubScreen() {
   const initialMediaFilter: MediaFilter = media === 'tv' || media === 'movie' ? media : 'all';
 
   const lists = useListsStore((s) => s.lists);
+  const listsFetchedAt = useListsStore((s) => s.listsFetchedAt);
   const isLoadingLists = useListsStore((s) => s.isLoadingLists);
   const fetchLists = useListsStore((s) => s.fetchLists);
   const createList = useListsStore((s) => s.createList);
+
+  // C13 stale-while-revalidate: `lists` can now paint immediately from a
+  // persisted snapshot on a cold start (store/listsStore.ts) while
+  // fetchLists()'s always-fires-on-mount call below revalidates it in the
+  // background — flag it rather than silently presenting a stale hub.
+  const isRevalidatingStaleSnapshot =
+    isLoadingLists &&
+    lists.length > 0 &&
+    listsFetchedAt !== null &&
+    Date.now() - listsFetchedAt > 30 * 60 * 1000;
 
   const [newListName, setNewListName] = useState('');
   const [isCreating, setIsCreating] = useState(false);
@@ -161,6 +172,13 @@ export default function ListsHubScreen() {
         </View>
       )}
 
+      {isRevalidatingStaleSnapshot && (
+        <View style={styles.updatingBadge}>
+          <ActivityIndicator size="small" color={c.textTertiary} />
+          <Text style={[styles.updatingText, { color: c.textTertiary }]}>Updating…</Text>
+        </View>
+      )}
+
       {isLoadingLists && lists.length === 0 ? (
         <ActivityIndicator color={c.accentInk} style={{ marginTop: 40 }} />
       ) : lists.length === 0 ? (
@@ -217,6 +235,17 @@ const styles = StyleSheet.create({
   filterRow: {
     paddingHorizontal: 20,
     marginBottom: 16,
+  },
+  updatingBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    paddingBottom: 12,
+  },
+  updatingText: {
+    fontSize: 12,
+    fontWeight: '600',
   },
   createRow: {
     flexDirection: 'row',

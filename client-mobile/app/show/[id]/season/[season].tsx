@@ -1,10 +1,10 @@
 // client-mobile/app/show/[id]/season/[season].tsx
+import { FlashList } from '@shopify/flash-list';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { ArrowLeft, CheckCheck, X } from 'lucide-react-native';
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   ActivityIndicator,
-  FlatList,
   StyleSheet,
   Text,
   View,
@@ -335,7 +335,7 @@ export default function SeasonScreen() {
         </View>
       )}
 
-      <FlatList
+      <FlashList
         data={displayEpisodes}
         keyExtractor={(episode) => String(episode.tmdb_id)}
         contentContainerStyle={styles.list}

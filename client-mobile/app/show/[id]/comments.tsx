@@ -1,8 +1,9 @@
 // client-mobile/app/show/[id]/comments.tsx
+import { FlashList } from '@shopify/flash-list';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { ArrowLeft } from 'lucide-react-native';
 import React, { useCallback, useEffect, useState } from 'react';
-import { ActivityIndicator, FlatList, StyleSheet, Text, View } from 'react-native';
+import { ActivityIndicator, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { CommentCard } from '../../../components/CommentCard';
@@ -110,7 +111,7 @@ export default function ShowCommentsScreen() {
           <ActivityIndicator color={c.accentInk} size="large" />
         </View>
       ) : (
-        <FlatList
+        <FlashList
           data={comments}
           keyExtractor={(item) => item.id}
           contentContainerStyle={styles.list}

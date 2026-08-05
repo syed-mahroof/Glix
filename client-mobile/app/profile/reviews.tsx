@@ -5,13 +5,13 @@
 // consumers until now — AI_RULES §5 calls out unreachable features as a
 // repeat failure mode in this repo, and this closes that gap.
 
+import { FlashList } from '@shopify/flash-list';
 import { Image } from 'expo-image';
 import { useRouter } from 'expo-router';
 import { ArrowLeft, NotebookPen } from 'lucide-react-native';
 import React, { useCallback, useEffect, useState } from 'react';
 import {
   ActivityIndicator,
-  FlatList,
   StyleSheet,
   Text,
   View,
@@ -90,6 +90,8 @@ function ReviewRowCard({ tab, item }: { tab: Tab; item: ReviewRow }) {
           style={[styles.poster, { backgroundColor: c.bgElevated }]}
           contentFit="cover"
           transition={150}
+          recyclingKey={`${tab}-${item.tmdbId}`}
+          cachePolicy="memory-disk"
         />
         <View style={styles.rowInfo}>
           <Text style={[styles.rowTitle, { color: c.textPrimary }]} numberOfLines={1}>
@@ -204,7 +206,7 @@ export default function MyReviewsScreen() {
           </Text>
         </View>
       ) : (
-        <FlatList
+        <FlashList
           data={rows}
           keyExtractor={(item) => item.id}
           renderItem={({ item }) => <ReviewRowCard tab={tab} item={item} />}

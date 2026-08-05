@@ -4,7 +4,9 @@ import {
   formatDayBadge,
   formatLocalAirTime,
   formatUpcomingHeaderLabel,
+  formatWeekdayShort,
   resolveDisplayDateIso,
+  shouldAppendWeekday,
 } from '../../lib/dateFormat';
 import type { WidgetPayload, WidgetUpcomingItem } from '../../lib/widgetPayload';
 
@@ -64,12 +66,30 @@ function DayHeader({ label, count }: { label: string; count: number }) {
 // it rendered (and, before the exact per-episode airstamp existed, wrong by
 // up to a day for any slot-less show besides). The day badge plus the
 // resolved local air time are the whole release-time line now.
-function UpcomingRow({ show }: { show: WidgetUpcomingItem }) {
+//
+// `label` is the resolved DayHeader label this row is grouped under
+// (computed once per item by the parent, see `labels` below) — passed down
+// purely so shouldAppendWeekday can decide whether this row's subtitle
+// needs its own "(Wed)" suffix, for rows sitting under a header that
+// doesn't already name a weekday (an absolute date, or 'LATER').
+function UpcomingRow({ show, label }: { show: WidgetUpcomingItem; label: string }) {
   const uri = widgetUri(show);
   const now = new Date();
   const displayDateIso = resolveDisplayDateIso(show.air_date, show.air_datetime, show.airs_time, show.airs_timezone);
   const dayBadge = formatDayBadge(displayDateIso, now);
-  const airTime = formatLocalAirTime(show.air_date, show.air_datetime, show.airs_time, show.airs_timezone);
+  // A platform-estimate slot (backend: CachedShow.air_time_source, see
+  // core/airtime.py) rides the same airs_time/airs_timezone pair as a
+  // confirmed TVmaze slot, so it resolves and orders identically — only
+  // the displayed string needs to own up to being a guess. Excluded the
+  // moment a real per-episode airDateTime is known (even for an otherwise
+  // platform_estimate-sourced show), since that instant is never a guess.
+  const isEstimated =
+    show.airs_time != null &&
+    show.airs_timezone != null &&
+    show.air_time_source === 'platform_estimate' &&
+    show.air_datetime == null;
+  const airTime = formatLocalAirTime(show.air_date, show.air_datetime, show.airs_time, show.airs_timezone, isEstimated);
+  const weekdaySuffix = shouldAppendWeekday(label) ? ` (${formatWeekdayShort(displayDateIso)})` : '';
   return (
     <FlexWidget
       clickAction={uri ? 'OPEN_URI' : 'OPEN_APP'}
@@ -100,7 +120,7 @@ function UpcomingRow({ show }: { show: WidgetUpcomingItem }) {
           maxLines={1}
         />
         <TextWidget
-          text={show.next_episode}
+          text={`${show.next_episode}${weekdaySuffix}`}
           style={{ fontSize: 11, color: SUBTLE, marginTop: 2 }}
           maxLines={1}
         />
@@ -191,7 +211,7 @@ export function UpcomingWidget({ data }: { data: WidgetPayload | null }) {
       children.push(<DayHeader key={`head-${label}`} label={label} count={labelCounts.get(label)!} />);
       lastLabel = label;
     }
-    children.push(<UpcomingRow key={`${show.id}-${show.air_date}-${idx}`} show={show} />);
+    children.push(<UpcomingRow key={`${show.id}-${show.air_date}-${idx}`} show={show} label={label} />);
   });
 
   return (

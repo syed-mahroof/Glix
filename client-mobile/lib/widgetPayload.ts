@@ -42,6 +42,12 @@ export interface WidgetUpcomingItem {
    *  build older than this field — both render as no time line. */
   airs_time?: string | null;
   airs_timezone?: string | null;
+  /** Carried through from Show.air_time_source (see UpcomingItem.airTimeSource
+   *  in lib/upcoming.ts) — which tier resolved airs_time/airs_timezone
+   *  above. Both widget renderers combine this with air_datetime to derive
+   *  isEstimated for their formatLocalAirTime call, so a platform-estimate
+   *  time is shown with a "~" instead of identically to a confirmed one. */
+  air_time_source?: 'tvmaze_exact' | 'tvmaze_slot' | 'platform_estimate' | '' | null;
 }
 
 export interface WidgetPayload {
@@ -127,6 +133,7 @@ export function buildWidgetPayload(
         air_datetime: item.airDateTime,
         airs_time: item.airsTime,
         airs_timezone: item.airsTimezone,
+        air_time_source: item.airTimeSource,
       };
     });
 

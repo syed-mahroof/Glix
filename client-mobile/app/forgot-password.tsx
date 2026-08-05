@@ -1,7 +1,6 @@
 // client-mobile/app/forgot-password.tsx
 import axios from 'axios';
 import { useRouter } from 'expo-router';
-import * as SecureStore from 'expo-secure-store';
 import { ArrowLeft, Lock, Mail, ShieldCheck } from 'lucide-react-native';
 import React, { useEffect, useRef, useState } from 'react';
 import {
@@ -15,7 +14,7 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
-import { ACCESS_TOKEN_KEY, API_BASE_URL, REFRESH_TOKEN_KEY } from '../lib/api';
+import { API_BASE_URL, setTokens } from '../lib/api';
 import PressableScale from '../components/PressableScale';
 import { useAppTheme } from '../lib/theme';
 
@@ -157,8 +156,7 @@ export default function ForgotPasswordScreen() {
         reset_token: resetToken,
         new_password: newPassword,
       });
-      await SecureStore.setItemAsync(ACCESS_TOKEN_KEY, response.data.access);
-      await SecureStore.setItemAsync(REFRESH_TOKEN_KEY, response.data.refresh);
+      await setTokens(response.data.access, response.data.refresh);
       router.replace('/loading');
     } catch (err) {
       setError(extractErrorMessage(err));

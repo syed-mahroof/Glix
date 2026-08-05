@@ -22,12 +22,20 @@ function renderTabIcon(Icon: LucideIcon) {
   );
 }
 
+// Hoisted to module scope (Phase 83 perf) — an inline arrow here gave the
+// Tabs navigator a new `tabBar` closure identity on every render of this
+// component, forcing a tab-bar reconcile each time.
+function renderTabBar(props: React.ComponentProps<typeof LiquidTabBar>) {
+  return <LiquidTabBar {...props} />;
+}
+
 export default function TabsLayout() {
   return (
     <Tabs
-      tabBar={(props) => <LiquidTabBar {...props} />}
+      tabBar={renderTabBar}
       screenOptions={{
         headerShown: false,
+        freezeOnBlur: true,
       }}
     >
       <Tabs.Screen

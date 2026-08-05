@@ -16,15 +16,31 @@ from typing import Any, Optional
 
 import requests
 from django.conf import settings
-from django.core.cache import cache
 from django.utils import timezone
 
+from core.cache_utils import safe_cache_get, safe_cache_set
 from core.models import CachedEpisode, CachedShow, MovieCache
 
 logger = logging.getLogger(__name__)
 
 TMDB_BASE_URL = "https://api.themoviedb.org/3"
 CACHE_TTL = timedelta(hours=12)
+
+# Phase 83 perf (TTL audit): credits and videos (trailer/teaser) for an
+# already-cached show/movie essentially never change day to day — a cast
+# correction or a newly-added trailer is a rare event, not a daily
+# occurrence, so the 12h TTL these shared the *_PROVIDERS_CACHE_TTL below
+# with was needlessly re-fetching identical data from TMDB many times a
+# week per popular title. external_ids already gets this same 30-day
+# treatment (get_external_ids, above) — this just catches up the sibling
+# caches that were still on the generic 12h default.
+TMDB_STATIC_METADATA_CACHE_TTL = 7 * 24 * 3600  # 7 days: credits, videos
+
+# Watch-provider availability is the one of this group that's genuinely
+# volatile — a title can leave or join a streaming service with no notice,
+# and a user seeing a stale "available on X" is a real, noticeable wrong
+# answer (unlike a slightly-stale cast list). Left at the original cadence.
+TMDB_PROVIDERS_CACHE_TTL = 43200  # 12 hours
 
 
 def _parse_tmdb_date(raw: Optional[str]) -> Optional[date]:
@@ -207,7 +223,7 @@ class TMDBService:
             # Hash path + params to get stable cache key
             key_str = f"{path}:{json.dumps(params, sort_keys=True)}"
             cache_key = "tmdb_api_" + hashlib.md5(key_str.encode()).hexdigest()
-            cached = cache.get(cache_key)
+            cached = safe_cache_get(cache_key)
             if cached is not None:
                 return cached
 
@@ -217,7 +233,7 @@ class TMDBService:
             response.raise_for_status()
             data = response.json()
             if use_cache and cache_key:
-                cache.set(cache_key, data, timeout=cache_ttl)
+                safe_cache_set(cache_key, data, timeout=cache_ttl)
             return data
         except requests.exceptions.Timeout:
             logger.error("TMDB request timed out: %s", url)
@@ -267,6 +283,53 @@ class TMDBService:
         # surfaces in the Upcoming tab without waiting on get_season_episodes()
         # to have cached that season at all.
         next_ep = payload.get("next_episode_to_air") or {}
+        next_season_number = next_ep.get("season_number")
+        next_episode_number = next_ep.get("episode_number")
+
+        # Bug fix: next_episode_air_datetime is the exact TVmaze-derived
+        # instant for whichever episode is currently "next" — but it's only
+        # ever WRITTEN by sync_show_air_time (core/airtime.py), which runs
+        # on a much slower cadence than this 12h TMDB refresh (see
+        # AIRTIME_RECHECK_AFTER and friends). Every other next_episode_*
+        # field below is safe to blindly overwrite from the fresh TMDB
+        # payload because TMDB is their only source of truth. This one
+        # isn't: if we put the OLD next_episode_air_datetime value into
+        # `defaults` unconditionally, it would keep being served as the
+        # NEW next episode's air time the moment TMDB advances which
+        # episode is "next" (a new episode airs, a season starts) — a real
+        # wrong-time bug, not just a coverage gap, and one that could
+        # persist for however long it takes the next TVmaze recheck to
+        # land.
+        #
+        # Fix: only carry the stored instant forward when the incoming
+        # (season, episode) pair is UNCHANGED from what's already cached —
+        # then it still describes the same episode and is still correct.
+        # Whenever it changed (including from/to None), null it and try a
+        # no-network re-derivation from CachedEpisode.air_datetime first:
+        # if TVmaze already synced this exact episode as a regular episode
+        # before it became "next" (common — a season's episodes are
+        # usually cached well before the previous one finishes airing),
+        # that row's instant is exactly what next_episode_air_datetime
+        # should be, and this recovers it without waiting on the next
+        # monthly TVmaze sweep.
+        if (
+            cached is not None
+            and cached.next_episode_season_number == next_season_number
+            and cached.next_episode_number == next_episode_number
+        ):
+            next_episode_air_datetime = cached.next_episode_air_datetime
+        else:
+            next_episode_air_datetime = None
+            if next_season_number is not None and next_episode_number is not None:
+                next_episode_air_datetime = (
+                    CachedEpisode.objects.filter(
+                        show_id=tmdb_id,
+                        season_number=next_season_number,
+                        episode_number=next_episode_number,
+                    )
+                    .values_list("air_datetime", flat=True)
+                    .first()
+                )
 
         show, _ = CachedShow.objects.update_or_create(
             tmdb_id=tmdb_id,
@@ -282,19 +345,25 @@ class TMDBService:
                 "total_episodes": payload.get("number_of_episodes", 0),
                 "original_language": payload.get("original_language", ""),
                 "genres": [g["name"] for g in payload.get("genres", [])],
+                "networks": [
+                    name
+                    for n in payload.get("networks", [])
+                    if isinstance(n, dict) and (name := n.get("name"))
+                ],
                 "next_episode_air_date": _parse_tmdb_date(next_ep.get("air_date")),
-                "next_episode_season_number": next_ep.get("season_number"),
-                "next_episode_number": next_ep.get("episode_number"),
+                "next_episode_season_number": next_season_number,
+                "next_episode_number": next_episode_number,
                 "next_episode_name": next_ep.get("name") or None,
+                "next_episode_air_datetime": next_episode_air_datetime,
             },
         )
-        
+
         if "aggregate_credits" in payload:
-            cache.set(f"tmdb_show_credits_{tmdb_id}", payload["aggregate_credits"], timeout=43200)
+            safe_cache_set(f"tmdb_show_credits_{tmdb_id}", payload["aggregate_credits"], timeout=TMDB_STATIC_METADATA_CACHE_TTL)
         if "watch/providers" in payload:
-            cache.set(f"tmdb_show_providers_{tmdb_id}", payload["watch/providers"], timeout=43200)
+            safe_cache_set(f"tmdb_show_providers_{tmdb_id}", payload["watch/providers"], timeout=TMDB_PROVIDERS_CACHE_TTL)
         if "videos" in payload:
-            cache.set(f"tmdb_show_videos_{tmdb_id}", payload["videos"].get("results", []), timeout=43200)
+            safe_cache_set(f"tmdb_show_videos_{tmdb_id}", payload["videos"].get("results", []), timeout=TMDB_STATIC_METADATA_CACHE_TTL)
 
         return show
 
@@ -340,11 +409,11 @@ class TMDBService:
         )
         
         if "credits" in payload:
-            cache.set(f"tmdb_movie_credits_{tmdb_id}", payload["credits"], timeout=43200)
+            safe_cache_set(f"tmdb_movie_credits_{tmdb_id}", payload["credits"], timeout=TMDB_STATIC_METADATA_CACHE_TTL)
         if "watch/providers" in payload:
-            cache.set(f"tmdb_movie_providers_{tmdb_id}", payload["watch/providers"], timeout=43200)
+            safe_cache_set(f"tmdb_movie_providers_{tmdb_id}", payload["watch/providers"], timeout=TMDB_PROVIDERS_CACHE_TTL)
         if "videos" in payload:
-            cache.set(f"tmdb_movie_videos_{tmdb_id}", payload["videos"].get("results", []), timeout=43200)
+            safe_cache_set(f"tmdb_movie_videos_{tmdb_id}", payload["videos"].get("results", []), timeout=TMDB_STATIC_METADATA_CACHE_TTL)
 
         return movie
 
@@ -818,13 +887,13 @@ class TMDBService:
         # from scratch on every attempt. Negative-cache the miss instead — a
         # season's existence doesn't change day to day the way episode details do.
         not_found_key = f"tmdb_season_404_{tmdb_show_id}_{season_number}"
-        if cache.get(not_found_key):
+        if safe_cache_get(not_found_key):
             raise TMDBNotFoundError(f"Season {season_number} of show {tmdb_show_id} not found on TMDB.")
 
         try:
             payload = self._request(f"/tv/{tmdb_show_id}/season/{season_number}")
         except TMDBNotFoundError:
-            cache.set(not_found_key, True, timeout=7 * 24 * 3600)
+            safe_cache_set(not_found_key, True, timeout=7 * 24 * 3600)
             raise
         if payload is None:
             if cached_qs.exists():
@@ -966,7 +1035,7 @@ class TMDBService:
         for cast, episode count for crew), since long-running shows can
         return hundreds of aggregate entries.
         """
-        cached_payload = cache.get(f"tmdb_show_credits_{tmdb_show_id}")
+        cached_payload = safe_cache_get(f"tmdb_show_credits_{tmdb_show_id}")
         payload = cached_payload or self._request(f"/tv/{tmdb_show_id}/aggregate_credits")
         if payload is None:
             raise TMDBServiceError(f"Credits for show {tmdb_show_id} unavailable.")
@@ -1007,7 +1076,7 @@ class TMDBService:
     # Watch providers ("Where to Watch")
     # ------------------------------------------------------------------
     def get_watch_providers(self, tmdb_show_id: int, region: str = "US") -> list[dict[str, Any]]:
-        cached_payload = cache.get(f"tmdb_show_providers_{tmdb_show_id}")
+        cached_payload = safe_cache_get(f"tmdb_show_providers_{tmdb_show_id}")
         payload = cached_payload or self._request(f"/tv/{tmdb_show_id}/watch/providers")
         if payload is None:
             raise TMDBServiceError(f"Watch providers for show {tmdb_show_id} unavailable.")
@@ -1055,24 +1124,24 @@ class TMDBService:
 
     def get_show_trailer(self, tmdb_id: int) -> dict[str, Any] | None:
         """Best YouTube trailer/teaser for a show, from the videos block cached during get_show_details."""
-        cached_payload = cache.get(f"tmdb_show_videos_{tmdb_id}")
+        cached_payload = safe_cache_get(f"tmdb_show_videos_{tmdb_id}")
         if cached_payload is None:
             payload = self._request(f"/tv/{tmdb_id}/videos")
             if payload is None:
                 return None
             cached_payload = payload.get("results", [])
-            cache.set(f"tmdb_show_videos_{tmdb_id}", cached_payload, timeout=43200)
+            safe_cache_set(f"tmdb_show_videos_{tmdb_id}", cached_payload, timeout=TMDB_STATIC_METADATA_CACHE_TTL)
         return self._pick_best_video(cached_payload)
 
     def get_movie_trailer(self, tmdb_id: int) -> dict[str, Any] | None:
         """Best YouTube trailer/teaser for a movie, from the videos block cached during get_movie_details."""
-        cached_payload = cache.get(f"tmdb_movie_videos_{tmdb_id}")
+        cached_payload = safe_cache_get(f"tmdb_movie_videos_{tmdb_id}")
         if cached_payload is None:
             payload = self._request(f"/movie/{tmdb_id}/videos")
             if payload is None:
                 return None
             cached_payload = payload.get("results", [])
-            cache.set(f"tmdb_movie_videos_{tmdb_id}", cached_payload, timeout=43200)
+            safe_cache_set(f"tmdb_movie_videos_{tmdb_id}", cached_payload, timeout=TMDB_STATIC_METADATA_CACHE_TTL)
         return self._pick_best_video(cached_payload)
 
     # ------------------------------------------------------------------
@@ -1134,13 +1203,13 @@ class TMDBService:
         credits block cached during get_movie_details. Falls back to a
         fresh TMDB fetch if the cache miss occurs.
         """
-        cached_payload = cache.get(f"tmdb_movie_credits_{tmdb_id}")
+        cached_payload = safe_cache_get(f"tmdb_movie_credits_{tmdb_id}")
         if cached_payload is None:
             payload = self._request(f"/movie/{tmdb_id}/credits")
             if payload is None:
                 raise TMDBServiceError(f"Credits for movie {tmdb_id} unavailable.")
             cached_payload = payload
-            cache.set(f"tmdb_movie_credits_{tmdb_id}", payload, timeout=43200)
+            safe_cache_set(f"tmdb_movie_credits_{tmdb_id}", payload, timeout=TMDB_STATIC_METADATA_CACHE_TTL)
 
         cast_raw = sorted(
             cached_payload.get("cast", []),
@@ -1173,13 +1242,13 @@ class TMDBService:
 
     def get_movie_watch_providers(self, tmdb_id: int, region: str = "US") -> list[dict[str, Any]]:
         """Watch providers for a movie, served from cached block or fresh fetch."""
-        cached_payload = cache.get(f"tmdb_movie_providers_{tmdb_id}")
+        cached_payload = safe_cache_get(f"tmdb_movie_providers_{tmdb_id}")
         if cached_payload is None:
             payload = self._request(f"/movie/{tmdb_id}/watch/providers")
             if payload is None:
                 raise TMDBServiceError(f"Watch providers for movie {tmdb_id} unavailable.")
             cached_payload = payload
-            cache.set(f"tmdb_movie_providers_{tmdb_id}", payload, timeout=43200)
+            safe_cache_set(f"tmdb_movie_providers_{tmdb_id}", payload, timeout=TMDB_PROVIDERS_CACHE_TTL)
 
         region_data = cached_payload.get("results", {}).get(region, {})
         providers = region_data.get("flatrate", []) + region_data.get("ads", [])

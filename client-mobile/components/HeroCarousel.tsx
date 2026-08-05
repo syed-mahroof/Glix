@@ -1,3 +1,4 @@
+import { useIsFocused } from '@react-navigation/native';
 import { Image } from 'expo-image';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useRouter } from 'expo-router';
@@ -47,8 +48,12 @@ interface Props {
   items: HeroMedia[];
 }
 
-// Custom hook to run interval manually, bypassing the lack of FlashList autoScroll natively
-function useAutoPlay(scrollRef: React.RefObject<Animated.ScrollView | null>, itemsCount: number) {
+// Custom hook to run interval manually, bypassing the lack of FlashList autoScroll natively.
+// Phase 83 perf: this ran forever regardless of whether Discover was even
+// the visible tab — a background setInterval imperatively scrolling a
+// ScrollView that isn't on screen, indefinitely. Gated on `isFocused` so it
+// stops the moment the user leaves this tab and restarts on return.
+function useAutoPlay(scrollRef: React.RefObject<Animated.ScrollView | null>, itemsCount: number, isFocused: boolean) {
   const [currentIndex, setCurrentIndex] = useState(0);
   const timerRef = useRef<NodeJS.Timeout | null>(null);
 
@@ -64,23 +69,24 @@ function useAutoPlay(scrollRef: React.RefObject<Animated.ScrollView | null>, ite
   };
 
   React.useEffect(() => {
-    if (itemsCount > 0) startTimer();
+    if (itemsCount > 0 && isFocused) startTimer();
     return () => {
       if (timerRef.current) clearInterval(timerRef.current);
     };
-  }, [itemsCount]);
+  }, [itemsCount, isFocused]);
 
   return { currentIndex, setCurrentIndex, startTimer };
 }
 
-export default function HeroCarousel({ items }: Props) {
+function HeroCarousel({ items }: Props) {
   const router = useRouter();
   const { theme } = useAppTheme();
   const accentFill = theme.colors.accentFill;
   const scrollX = useSharedValue(0);
   const scrollRef = useRef<Animated.ScrollView>(null);
+  const isFocused = useIsFocused();
 
-  const { setCurrentIndex, startTimer } = useAutoPlay(scrollRef, items.length);
+  const { setCurrentIndex, startTimer } = useAutoPlay(scrollRef, items.length, isFocused);
 
   const scrollHandler = useAnimatedScrollHandler({
     onScroll: (event) => {
@@ -224,6 +230,8 @@ export default function HeroCarousel({ items }: Props) {
     </View>
   );
 }
+
+export default React.memo(HeroCarousel);
 
 const styles = StyleSheet.create({
   container: {

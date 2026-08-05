@@ -284,6 +284,8 @@ function ShowRowComponent({
           style={[styles.poster, { backgroundColor: c.bgElevated }]}
           contentFit="cover"
           transition={150}
+          recyclingKey={String(showId)}
+          cachePolicy="memory-disk"
         />
 
         {/* Text column */}

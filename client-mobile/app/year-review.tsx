@@ -4,6 +4,7 @@
 // and the top-shows/top-genres rows, matching analytics.tsx's dashboard
 // treatment. No TrendChip: this screen doesn't fetch a prior-year figure to
 // compare hours against, so a verdict chip would have nothing real to show.
+import { Image } from 'expo-image';
 import * as Sharing from 'expo-sharing';
 import { useRouter } from 'expo-router';
 import {
@@ -19,7 +20,6 @@ import {
 import React, { useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
-  Image,
   ScrollView,
   StyleSheet,
   Text,
@@ -246,6 +246,9 @@ export default function YearReviewScreen() {
                       <Image
                         source={{ uri: `${TMDB_IMAGE}${show.poster_path}` }}
                         style={[styles.showPoster, { backgroundColor: c.trackRing }]}
+                        contentFit="cover"
+                        transition={150}
+                        cachePolicy="memory-disk"
                       />
                     ) : (
                       <View style={[styles.showPosterPlaceholder, { backgroundColor: c.trackRing }]} />

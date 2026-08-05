@@ -16,6 +16,11 @@ without blocking any request/response cycle:
 - resume_stalled_imports: periodic safety net that re-enqueues an
   ImportJob orphaned mid-run (see run_tvtime_import's self-chaining chunk
   design) instead of leaving it stuck at RUNNING forever.
+- backfill_missing_airtimes: dedicated daily sweep for the narrow, high-
+  value subset of shows whose next episode airs within 14 days but whose
+  air time is still completely unknown — gives that subset extra TVmaze
+  budget beyond whatever tier sync_active_shows' ordinary 6-hourly refresh
+  already has it on (see core/airtime.py's _recheck_interval).
 """
 
 import logging
@@ -314,6 +319,122 @@ def sync_active_shows():
     for tmdb_id in active_ids:
         refresh_show_cache.delay(tmdb_id)
     logger.info("Queued refresh for %d active shows.", len(active_ids))
+
+
+# Per-run cap on how many shows backfill_missing_airtimes will sync. A
+# free-tier Celery worker sharing its single container with gunicorn has
+# no business kicking off an unbounded number of synchronous TVmaze round
+# trips (TVMAZE_TIMEOUT_SECONDS each, core/airtime.py) from one task
+# invocation; the soonest-first ordering below means anything that doesn't
+# fit in today's batch is still first in line for tomorrow's.
+AIRTIME_BACKFILL_BATCH_SIZE = 50
+
+
+@shared_task
+def backfill_missing_airtimes():
+    """
+    Daily beat sweep for shows with an imminent-but-completely-unknown air
+    time — the case sync_active_shows' ordinary 6-hourly refresh reaches
+    too, but only on whatever cadence core/airtime.py's _recheck_interval
+    already has that show on, which can be as wide as 14 days for a show
+    TVmaze has never heard of. That's fine for a show with no episode due
+    soon; it's a real coverage gap for one that's about to air with the
+    Upcoming widget still showing it a blank time line. This task exists
+    to give exactly that subset — next_episode_air_date within 14 days,
+    genuinely no known instant or slot — a dedicated extra pass, ordered
+    soonest-first so whatever budget AIRTIME_BACKFILL_BATCH_SIZE allows
+    goes to the episodes about to air before the ones with more runway.
+
+    Reuses _sync_air_time (the same external-id-fetch-then-TVmaze-sync
+    helper refresh_show_cache already calls) rather than duplicating that
+    sequence. _sync_air_time already swallows every failure internally
+    (an air time is a cosmetic label, never worth failing this sweep
+    over) and mutates `show` in place before returning, which is what
+    lets `found` below read the post-sync fields directly instead of
+    needing a second query per show. The outer try/except is a second,
+    redundant-by-design layer of the same one-bad-show-must-not-abort-the-
+    batch discipline every other per-item loop in this file follows (see
+    run_tvtime_import's per-show/per-movie loop).
+    """
+    today = timezone.now().date()
+    window_end = today + timedelta(days=14)
+    shows = list(
+        CachedShow.objects.filter(
+            next_episode_air_date__gte=today,
+            next_episode_air_date__lte=window_end,
+            next_episode_air_datetime__isnull=True,
+            airs_time__isnull=True,
+        ).order_by("next_episode_air_date")[:AIRTIME_BACKFILL_BATCH_SIZE]
+    )
+
+    tmdb = TMDBService()
+    processed = 0
+    found = 0
+    for show in shows:
+        processed += 1
+        try:
+            _sync_air_time(show, tmdb)
+            if show.airs_time is not None or show.next_episode_air_datetime is not None:
+                found += 1
+        except Exception:  # noqa: BLE001 — one show's failure must not abort the batch
+            logger.warning(
+                "backfill_missing_airtimes: sync failed for show %s", show.tmdb_id, exc_info=True
+            )
+
+    logger.info(
+        "backfill_missing_airtimes: processed %d show(s), found a time for %d",
+        processed, found,
+    )
+    return {"processed": processed, "found": found}
+
+
+@shared_task
+def prewarm_discover_caches():
+    """
+    Phase 83 perf: DiscoverFeedView/DiscoverGenresView are both cached
+    (30 minutes and 24 hours respectively — see core/views.py), but nothing
+    previously kept those caches warm between real visits. Whoever's
+    request happens to land right after a TTL expiry pays the full cost —
+    up to 7 TMDB calls (3-4 for the feed, one per genre for covers, the
+    latter already bounded to an 8-way thread pool) — serialized behind
+    that one unlucky user's response instead of a beat task nobody is
+    waiting on absorbing it.
+    Same 6-hour rhythm as sync_active_shows: comfortably inside both
+    caches' TTLs (this task re-runs several times within a single 24h
+    genre-cover TTL, and always well before the 30-minute feed TTL would
+    otherwise go cold on a quiet period), so a real user should now never
+    be the one to pay a cold Discover fetch.
+
+    Local imports (not module-level): core.views already imports from this
+    module (recalculate_user_badges et al.) for WatchState-toggle
+    side-effects, so a module-level `from core.views import ...` here would
+    be a circular import. Deferred imports resolve fine — by the time this
+    task actually executes, both modules are already fully loaded.
+    """
+    from core.cache_utils import safe_cache_set
+    from core.views import (
+        DISCOVER_FEED_CACHE_TTL_SECONDS,
+        DISCOVER_GENRE_COVERS_CACHE_TTL_SECONDS,
+        build_discover_feed_payload,
+        build_genre_covers_payload,
+    )
+
+    for media_type in ("tv", "movie"):
+        try:
+            feed_payload = build_discover_feed_payload(media_type)
+            safe_cache_set(f"discover_feed_{media_type}", feed_payload, timeout=DISCOVER_FEED_CACHE_TTL_SECONDS)
+        except Exception:  # noqa: BLE001 — one media type's failure must not abort the other
+            logger.warning("prewarm_discover_caches: feed warm failed for %s", media_type, exc_info=True)
+
+        try:
+            covers_payload = build_genre_covers_payload(media_type)
+            safe_cache_set(
+                f"discover_genre_covers_{media_type}", covers_payload, timeout=DISCOVER_GENRE_COVERS_CACHE_TTL_SECONDS
+            )
+        except Exception:  # noqa: BLE001 — same reasoning as the feed warm above
+            logger.warning("prewarm_discover_caches: genre covers warm failed for %s", media_type, exc_info=True)
+
+    logger.info("prewarm_discover_caches: warmed feed + genre covers for tv and movie.")
 
 
 @shared_task

@@ -18,11 +18,16 @@ from django.utils import timezone
 
 from core.airtime import (
     AIRTIME_RECHECK_AFTER,
+    AIRTIME_RECHECK_IMMINENT,
+    AIRTIME_RECHECK_MISSING_EPISODE,
+    AIRTIME_RECHECK_UNKNOWN_SHOW,
     AirTimeResult,
+    _recheck_interval,
     fetch_air_time,
     fetch_episode_airstamps,
     sync_show_air_time,
 )
+from core.airtime_platforms import PLATFORM_AIR_TIME_CONVENTIONS, estimate_platform_air_time
 from core.models import CachedEpisode, CachedShow
 
 
@@ -289,3 +294,216 @@ def test_sync_show_air_time_does_not_backfill_episodes_outside_the_window():
 
     old_episode.refresh_from_db()
     assert old_episode.air_datetime is None
+
+
+# ── A2: tiered _recheck_interval gate ────────────────────────────────────
+# One case per tier, plus the priority rules (has-coverage always wins;
+# the imminent-episode check tightens whichever of the other two applies).
+
+
+@pytest.mark.django_db
+def test_recheck_interval_has_coverage_via_airs_time_uses_30_days():
+    """A show with a working broadcast slot stays on the original 30-day
+    cadence — nothing about it is broken, so there's nothing to chase."""
+    show = CachedShow.objects.create(
+        tmdb_id=7100, title="Covered Show", airs_time=time(20, 0), airs_timezone="America/New_York"
+    )
+    assert _recheck_interval(show) == AIRTIME_RECHECK_AFTER
+
+
+@pytest.mark.django_db
+def test_recheck_interval_has_coverage_via_next_episode_instant_uses_30_days():
+    """Coverage also counts when there's no fixed slot but the CURRENT next
+    episode's exact instant is already known."""
+    show = CachedShow.objects.create(
+        tmdb_id=7101,
+        title="Exact Instant Show",
+        tvmaze_id=999,
+        next_episode_season_number=1,
+        next_episode_number=1,
+        next_episode_air_datetime=timezone.now() + timedelta(days=3),
+    )
+    assert _recheck_interval(show) == AIRTIME_RECHECK_AFTER
+
+
+@pytest.mark.django_db
+def test_recheck_interval_missing_episode_uses_3_days():
+    """TVmaze knows the show (tvmaze_id set) but hasn't published an
+    airstamp for its current next episode yet, and no other tier applies."""
+    show = CachedShow.objects.create(tmdb_id=7102, title="Missing Episode Show", tvmaze_id=1234)
+    assert _recheck_interval(show) == AIRTIME_RECHECK_MISSING_EPISODE
+
+
+@pytest.mark.django_db
+def test_recheck_interval_unknown_show_uses_14_days():
+    """The last lookup found nothing at all (tvmaze_id is None)."""
+    show = CachedShow.objects.create(tmdb_id=7103, title="Unknown Show")
+    assert _recheck_interval(show) == AIRTIME_RECHECK_UNKNOWN_SHOW
+
+
+@pytest.mark.django_db
+def test_recheck_interval_imminent_episode_overrides_missing_episode_tier():
+    """tvmaze_id is known (would otherwise be the 3-day tier on its own),
+    but the next episode airs within 7 days with its instant still
+    unknown — the 1-day imminent tier wins as the shortest applicable."""
+    show = CachedShow.objects.create(
+        tmdb_id=7104,
+        title="Imminent Known Show",
+        tvmaze_id=5555,
+        next_episode_air_date=timezone.now().date() + timedelta(days=2),
+    )
+    assert _recheck_interval(show) == AIRTIME_RECHECK_IMMINENT
+
+
+@pytest.mark.django_db
+def test_recheck_interval_imminent_episode_overrides_unknown_show_tier():
+    """Same as above but tvmaze_id is None (would otherwise be the 14-day
+    tier) — imminent still wins as the shortest applicable interval."""
+    show = CachedShow.objects.create(
+        tmdb_id=7105,
+        title="Imminent Unknown Show",
+        next_episode_air_date=timezone.now().date() + timedelta(days=1),
+    )
+    assert _recheck_interval(show) == AIRTIME_RECHECK_IMMINENT
+
+
+@pytest.mark.django_db
+def test_recheck_interval_has_coverage_wins_even_with_an_imminent_episode():
+    """The "has coverage" tier always wins outright at 30 days, even when
+    the imminent-episode condition would otherwise also apply — a working
+    slot means the pipeline is already correct for this show."""
+    show = CachedShow.objects.create(
+        tmdb_id=7106,
+        title="Covered But Imminent Show",
+        airs_time=time(20, 0),
+        airs_timezone="America/New_York",
+        next_episode_air_date=timezone.now().date() + timedelta(days=1),
+    )
+    assert _recheck_interval(show) == AIRTIME_RECHECK_AFTER
+
+
+@pytest.mark.django_db
+def test_recheck_interval_far_future_next_episode_does_not_trigger_imminent_tier():
+    """next_episode_air_date more than 7 days out must NOT trigger the
+    1-day imminent tier — it falls back to whichever of the other two
+    tiers applies."""
+    show = CachedShow.objects.create(
+        tmdb_id=7107,
+        title="Distant Next Episode Show",
+        tvmaze_id=6666,
+        next_episode_air_date=timezone.now().date() + timedelta(days=20),
+    )
+    assert _recheck_interval(show) == AIRTIME_RECHECK_MISSING_EPISODE
+
+
+# ── A3: platform-estimate fallback table ─────────────────────────────────
+
+
+def test_estimate_platform_air_time_returns_known_network_convention():
+    assert estimate_platform_air_time(["Netflix"]) == PLATFORM_AIR_TIME_CONVENTIONS["Netflix"]
+
+
+def test_estimate_platform_air_time_returns_none_for_unknown_network():
+    assert estimate_platform_air_time(["Some Obscure Regional Channel"]) is None
+
+
+def test_estimate_platform_air_time_returns_none_for_empty_list():
+    assert estimate_platform_air_time([]) is None
+
+
+def test_estimate_platform_air_time_returns_first_match_in_list_order():
+    """A show can carry several networks; the first one this module has a
+    convention for wins, matching estimate_platform_air_time's own
+    first-match docstring."""
+    assert (
+        estimate_platform_air_time(["Some Obscure Regional Channel", "Max"])
+        == PLATFORM_AIR_TIME_CONVENTIONS["Max"]
+    )
+
+
+# ── A3: sync_show_air_time's tier-3 wiring + air_time_source ─────────────
+
+
+@pytest.mark.django_db
+def test_sync_show_air_time_sets_air_time_source_tvmaze_slot():
+    show = CachedShow.objects.create(tmdb_id=7108, title="Slot Source Show")
+    payload = {
+        "schedule": {"time": "20:00", "days": ["Sunday"]},
+        "network": {"country": {"timezone": "America/New_York"}},
+    }
+    with patch("core.airtime.requests.get", return_value=_response(200, payload)):
+        sync_show_air_time(show, tvdb_id=42, imdb_id=None)
+
+    show.refresh_from_db()
+    assert show.air_time_source == "tvmaze_slot"
+
+
+@pytest.mark.django_db
+def test_sync_show_air_time_sets_air_time_source_tvmaze_exact_when_airstamps_found():
+    show = CachedShow.objects.create(tmdb_id=7109, title="Exact Source Show")
+    CachedEpisode.objects.create(
+        tmdb_id=70091,
+        show=show,
+        season_number=1,
+        episode_number=1,
+        title="Pilot",
+        air_date=timezone.now().date(),
+    )
+    lookup_payload = {"id": 777, "schedule": {"time": "", "days": []}}
+    episodes_payload = [{"season": 1, "number": 1, "airstamp": "2026-01-15T21:00:00-05:00"}]
+
+    def fake_get(url, params=None, timeout=None):
+        if "lookup" in url:
+            return _response(200, lookup_payload)
+        return _response(200, episodes_payload)
+
+    with patch("core.airtime.requests.get", side_effect=fake_get):
+        sync_show_air_time(show, tvdb_id=42, imdb_id=None)
+
+    show.refresh_from_db()
+    assert show.air_time_source == "tvmaze_exact"
+
+
+@pytest.mark.django_db
+def test_sync_show_air_time_falls_back_to_platform_estimate_when_tvmaze_has_no_slot():
+    """Tier 3 — only reached when TVmaze itself came back with nothing
+    usable (found the show, but no schedule.time), and only applied
+    because the show carries a network this module has a convention for."""
+    show = CachedShow.objects.create(tmdb_id=7110, title="Streaming Show", networks=["Netflix"])
+    lookup_payload = {"id": 888, "schedule": {"time": "", "days": []}}
+    with patch("core.airtime.requests.get", return_value=_response(200, lookup_payload)):
+        sync_show_air_time(show, tvdb_id=42, imdb_id=None)
+
+    show.refresh_from_db()
+    assert show.air_time_source == "platform_estimate"
+    assert show.airs_time == time(0, 0)
+    assert show.airs_timezone == "America/Los_Angeles"
+
+
+@pytest.mark.django_db
+def test_sync_show_air_time_does_not_use_platform_estimate_when_tvmaze_has_a_slot():
+    """Tier 3 must not run at all when tier 1 already resolved a slot,
+    even if the show also carries a network in the conventions table."""
+    show = CachedShow.objects.create(tmdb_id=7111, title="Broadcast Show", networks=["Netflix"])
+    payload = {
+        "schedule": {"time": "20:00", "days": ["Sunday"]},
+        "network": {"country": {"timezone": "America/New_York"}},
+    }
+    with patch("core.airtime.requests.get", return_value=_response(200, payload)):
+        sync_show_air_time(show, tvdb_id=42, imdb_id=None)
+
+    show.refresh_from_db()
+    assert show.air_time_source == "tvmaze_slot"
+    assert show.airs_timezone == "America/New_York"
+
+
+@pytest.mark.django_db
+def test_sync_show_air_time_no_source_when_nothing_found_anywhere():
+    """No TVmaze coverage and no matching network in the conventions
+    table: air_time_source stays "", exactly as before this feature."""
+    show = CachedShow.objects.create(tmdb_id=7112, title="Nowhere Show")
+    with patch("core.airtime.requests.get", return_value=_response(404)):
+        sync_show_air_time(show, tvdb_id=42, imdb_id=None)
+
+    show.refresh_from_db()
+    assert show.air_time_source == ""

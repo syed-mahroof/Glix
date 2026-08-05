@@ -14,13 +14,13 @@ import logging
 from datetime import timedelta
 
 from django.conf import settings
-from django.core.cache import cache
 from django.db import transaction
 from django.db.models import Count
 from django.db.models.signals import post_delete, post_save
 from django.dispatch import receiver
 from django.utils import timezone
 
+from core.cache_utils import safe_cache_delete
 from core.cache_keys import (
     analytics_dashboard_cache_key,
     analytics_monthly_summary_cache_key,
@@ -285,7 +285,7 @@ def evaluate_movie_badges(sender, instance, created, **kwargs):
 # full-fetch response per user for a short TTL (core/cache_keys.py). These
 # receivers are the primary invalidation path — hooking the 4 models
 # directly covers every view-layer mutation site without threading a
-# manual cache.delete() through each one individually. on_commit (not a
+# manual safe_cache_delete() through each one individually. on_commit (not a
 # plain delete here) matters: busting the key before the write actually
 # commits would let a concurrent GET land in that window and re-cache the
 # now-stale pre-write data. The one deliberate signal-bypass in this
@@ -294,15 +294,15 @@ def evaluate_movie_badges(sender, instance, created, **kwargs):
 # after it calls recalculate_user_badges/recalculate_watch_streak.
 
 def _bust_watchlist_cache(user_id):
-    transaction.on_commit(lambda: cache.delete(watchlist_cache_key(user_id)))
+    transaction.on_commit(lambda: safe_cache_delete(watchlist_cache_key(user_id)))
 
 
 def _bust_movie_watchlist_cache(user_id):
-    transaction.on_commit(lambda: cache.delete(movie_watchlist_cache_key(user_id)))
+    transaction.on_commit(lambda: safe_cache_delete(movie_watchlist_cache_key(user_id)))
 
 
 def _bust_analytics_movies_cache(user_id):
-    transaction.on_commit(lambda: cache.delete(analytics_movies_cache_key(user_id)))
+    transaction.on_commit(lambda: safe_cache_delete(analytics_movies_cache_key(user_id)))
 
 
 def _bust_analytics_dashboard_and_statistics_cache(user_id):
@@ -312,9 +312,9 @@ def _bust_analytics_dashboard_and_statistics_cache(user_id):
     summary all derive from the same underlying WatchState/MovieWatchState/
     rewatch rows, so one bust point covers all three caches."""
     def _bust():
-        cache.delete(analytics_dashboard_cache_key(user_id))
-        cache.delete(analytics_statistics_cache_key(user_id))
-        cache.delete(analytics_monthly_summary_cache_key(user_id, timezone.now().year))
+        safe_cache_delete(analytics_dashboard_cache_key(user_id))
+        safe_cache_delete(analytics_statistics_cache_key(user_id))
+        safe_cache_delete(analytics_monthly_summary_cache_key(user_id, timezone.now().year))
     transaction.on_commit(_bust)
 
 
@@ -376,7 +376,7 @@ def _bust_followers_activity_feed_cache(user_id):
     def _bust():
         follower_ids = Follow.objects.filter(following_id=user_id).values_list("follower_id", flat=True)
         for follower_id in follower_ids:
-            cache.delete(friends_feed_cache_key(follower_id, 1))
+            safe_cache_delete(friends_feed_cache_key(follower_id, 1))
     transaction.on_commit(_bust)
 
 

@@ -24,12 +24,22 @@ wall-clock/zone pair to keep separate for that source.
 Cost control matters here: this runs on a free-tier container that was
 already being OOM-killed under load, so it is deliberately *not* on any
 user request path. `refresh_show_cache` (Celery, every 6h per RETURNING
-show) is the only caller, and `CachedShow.airtime_checked_at` gates it to
-roughly one lookup per show per month — including for shows TVmaze has no
-schedule for, which would otherwise be re-asked hardest of all.
+show) and the dedicated `backfill_missing_airtimes` beat task (tasks.py)
+are the only callers, and `CachedShow.airtime_checked_at` gates each show
+via `_recheck_interval` — no longer a single flat window, but a tiered
+one: roughly a month between lookups for a show that already has real
+coverage (a working slot rarely moves), down to as eager as a day for the
+narrow case of a show whose next episode airs within a week and whose
+exact instant is still unknown. Even at that eager 1-day tier the budget
+stays nowhere near TVmaze's ~20-requests/10s limit, because it only
+applies to that small subset of shows — everything else still sits at the
+3-to-30-day tiers. See _recheck_interval for the full breakdown.
 
-TVmaze needs no API key and asks for ~20 requests/10s; one call per show
-per month spread across a Celery queue is nowhere near that.
+TVmaze needs no API key. A show it has no schedule for at all is
+re-asked least eagerly of all (14 days) — worth an occasional retry since
+new shows sometimes get added to TVmaze late, but not worth spending the
+eager end of the budget on, since a truly-absent show usually stays
+absent.
 """
 
 import logging
@@ -41,6 +51,7 @@ import requests
 from django.utils import timezone as dj_timezone
 from django.utils.dateparse import parse_datetime
 
+from core.airtime_platforms import estimate_platform_air_time
 from core.models import CachedEpisode, CachedShow
 
 logger = logging.getLogger(__name__)
@@ -70,7 +81,26 @@ class AirTimeResult:
 # A network slot changes very rarely (a season move, a channel switch), and
 # a stale slot is a cosmetically-wrong minute label, not a broken feature —
 # so re-checking monthly is the right trade against free-tier request budget.
+# This is the tier a show with real coverage stays on; see _recheck_interval
+# for the other tiers, used for shows this pipeline hasn't fully covered yet.
 AIRTIME_RECHECK_AFTER = timedelta(days=30)
+# TVmaze knows the show (tvmaze_id is set) but hasn't published an airstamp
+# for its current next_episode_* yet — TVmaze often only adds an episode's
+# exact instant as its air date approaches, so this is checked more often
+# than a show with a working slot, but far short of daily.
+AIRTIME_RECHECK_MISSING_EPISODE = timedelta(days=3)
+# The last lookup found nothing at all (tvmaze_id is None — a 404/unknown
+# show as far as TVmaze is concerned). Worth an occasional retry since new
+# shows sometimes get added to TVmaze late, but a truly-absent show usually
+# stays absent, so this stays well short of the missing-episode tier above.
+AIRTIME_RECHECK_UNKNOWN_SHOW = timedelta(days=14)
+# The show's next episode airs within a week and its exact instant is still
+# unknown — the single case where a fresher check is worth the most, since
+# it's the case a user is most likely to actually notice (a countdown with
+# no time line, about to resolve). Still a small subset of all shows, which
+# is what keeps this tier well within TVmaze's request budget even though
+# it's the most eager one.
+AIRTIME_RECHECK_IMMINENT = timedelta(days=1)
 
 
 def _parse_hhmm(raw: Any) -> Optional[time]:
@@ -248,9 +278,65 @@ def _apply_episode_airstamps(show: CachedShow, airstamps: dict[tuple[int, int], 
         CachedEpisode.objects.bulk_update(to_update, ["air_datetime"])
 
 
+def _recheck_interval(show: CachedShow) -> timedelta:
+    """
+    How long sync_show_air_time should wait before asking TVmaze about
+    `show` again — tiered by how much coverage is actually missing,
+    rather than one flat window applied identically to every show.
+
+    A show that already has real coverage (a working slot, or an exact
+    instant for its current next episode) is left on the original 30-day
+    cadence: nothing about it is broken, so there's nothing an eager
+    recheck would improve, and this tier always wins outright over the
+    others below regardless of what else might apply — see the priority
+    note at the end of this docstring.
+
+    Everything else is checked against three narrower windows, evaluated
+    in order and (except for the "has coverage" case above) resolved to
+    whichever applicable one is SHORTEST, i.e. most eager to recheck:
+
+    - tvmaze_id is known but the current next_episode_* has no matching
+      airstamp yet -> AIRTIME_RECHECK_MISSING_EPISODE (3 days). TVmaze
+      often only publishes an episode's exact instant as its air date
+      approaches, so this is worth checking more than monthly.
+    - tvmaze_id is None (TVmaze returned 404/unknown last time) ->
+      AIRTIME_RECHECK_UNKNOWN_SHOW (14 days). Worth an occasional retry
+      (shows are sometimes added to TVmaze late) but not the 3-day
+      cadence, since a truly-absent show usually stays absent.
+    - next_episode_air_date is set, within 7 days of now, and its exact
+      instant is still unknown -> AIRTIME_RECHECK_IMMINENT (1 day). The
+      case a user is most likely to actually notice: a countdown with no
+      time line, about to resolve one way or the other.
+
+    The first two are mutually exclusive (tvmaze_id either is or isn't
+    known); the imminent-episode check is independent and can tighten
+    whichever of those two applies.
+    """
+    now = dj_timezone.now()
+    has_coverage = bool(show.airs_time) or (
+        show.tvmaze_id is not None and show.next_episode_air_datetime is not None
+    )
+    if has_coverage:
+        return AIRTIME_RECHECK_AFTER
+
+    interval = (
+        AIRTIME_RECHECK_UNKNOWN_SHOW if show.tvmaze_id is None else AIRTIME_RECHECK_MISSING_EPISODE
+    )
+
+    if (
+        show.next_episode_air_date is not None
+        and show.next_episode_air_datetime is None
+        and now.date() <= show.next_episode_air_date <= now.date() + timedelta(days=7)
+    ):
+        interval = min(interval, AIRTIME_RECHECK_IMMINENT)
+
+    return interval
+
+
 def sync_show_air_time(show: CachedShow, tvdb_id: Optional[int], imdb_id: Optional[str]) -> bool:
     """
-    Refresh `show`'s air-time fields from TVmaze if they're due a check.
+    Refresh `show`'s air-time fields from TVmaze (and, failing that, the
+    platform-estimate table) if they're due a check per _recheck_interval.
 
     Returns True if a lookup was actually performed (whether or not it
     found anything), False if the existing values were still fresh.
@@ -260,13 +346,27 @@ def sync_show_air_time(show: CachedShow, tvdb_id: Optional[int], imdb_id: Option
     When the lookup succeeds, also fetches per-episode airstamps and
     writes CachedEpisode.air_datetime / CachedShow.next_episode_air_datetime
     — see fetch_episode_airstamps() and _apply_episode_airstamps().
+
+    Three tiers, most to least precise, and `air_time_source` records
+    which one actually resolved airs_time/airs_timezone for this show:
+    1. "tvmaze_exact" — TVmaze published a real per-episode airstamp.
+    2. "tvmaze_slot" — TVmaze knows the show's fixed weekly network slot,
+       but no per-episode instant.
+    3. "platform_estimate" — neither of the above; a conventional
+       streaming-platform drop time from airtime_platforms.py instead,
+       only attempted when tiers 1-2 found nothing at all. Marked
+       distinctly (never "tvmaze_slot") so the client can flag it as an
+       estimate rather than presenting it as a confirmed time — see
+       core/airtime_platforms.py's module docstring.
     """
     now = dj_timezone.now()
-    if show.airtime_checked_at and now - show.airtime_checked_at < AIRTIME_RECHECK_AFTER:
+    if show.airtime_checked_at and now - show.airtime_checked_at < _recheck_interval(show):
         return False
 
     result = fetch_air_time(tvdb_id, imdb_id)
-    update_fields = ["tvmaze_id", "airs_time", "airs_timezone", "airtime_checked_at"]
+    update_fields = ["tvmaze_id", "airs_time", "airs_timezone", "airtime_checked_at", "air_time_source"]
+
+    airstamps_found = False
 
     if result is None:
         show.tvmaze_id = None
@@ -280,6 +380,7 @@ def sync_show_air_time(show: CachedShow, tvdb_id: Optional[int], imdb_id: Option
         if show.tvmaze_id:
             airstamps = fetch_episode_airstamps(show.tvmaze_id)
             if airstamps:
+                airstamps_found = True
                 _apply_episode_airstamps(show, airstamps)
                 if show.next_episode_season_number is not None and show.next_episode_number is not None:
                     next_instant = airstamps.get(
@@ -288,6 +389,37 @@ def sync_show_air_time(show: CachedShow, tvdb_id: Optional[int], imdb_id: Option
                     if next_instant is not None:
                         show.next_episode_air_datetime = next_instant
                         update_fields.append("next_episode_air_datetime")
+
+    # Tier 3 — platform-estimate fallback. Only reached when TVmaze's own
+    # show-level schedule (tier 1, captured in `result`) came back with
+    # nothing usable: a lookup miss (result is None) or a found show with
+    # no fixed weekly slot (result.airs_time is None — most streaming
+    # originals). Per-episode airstamps (tier 2, `airstamps_found`) don't
+    # gate this — a show can have some exact episode instants AND still
+    # want an estimated slot to fall back on for episodes TVmaze hasn't
+    # stamped yet, which is exactly what airs_time/airs_timezone are for.
+    used_platform_estimate = False
+    if (result is None or result.airs_time is None) and show.networks:
+        estimate = estimate_platform_air_time(show.networks)
+        if estimate is not None:
+            estimated_time, estimated_tz = estimate
+            show.airs_time = _parse_hhmm(estimated_time)
+            show.airs_timezone = estimated_tz
+            used_platform_estimate = True
+
+    # air_time_source records which tier actually backs airs_time/
+    # airs_timezone right now, in trustworthiness order — independent of
+    # which branch above happened to touch those two fields, since both
+    # the real TVmaze slot and the platform estimate share the same
+    # storage.
+    if airstamps_found:
+        show.air_time_source = "tvmaze_exact"
+    elif result is not None and result.airs_time is not None:
+        show.air_time_source = "tvmaze_slot"
+    elif used_platform_estimate:
+        show.air_time_source = "platform_estimate"
+    else:
+        show.air_time_source = ""
 
     show.airtime_checked_at = now
     show.save(update_fields=update_fields)

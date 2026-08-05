@@ -2,7 +2,6 @@
 // Glix V2 — Discover Hub (Phase 4 Full Rebuild)
 // Universal search + segmented TV/Movie feed + filter bottom sheet.
 
-import { BlurView } from 'expo-blur';
 import { Image } from 'expo-image';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useRouter } from 'expo-router';
@@ -25,8 +24,10 @@ import {
   Text,
   TextInput,
   View,
+  ViewStyle,
 } from 'react-native';
 import Animated, {
+  AnimatedStyle,
   Extrapolation,
   FadeIn,
   FadeOut,
@@ -42,13 +43,20 @@ import { FlashList } from '@shopify/flash-list';
 
 import DiscoverFilterSheet from '../../components/DiscoverFilterSheet';
 import GenreGrid from '../../components/GenreGrid';
+import GlassBlur from '../../components/GlassBlur';
 import GlassSurface from '../../components/GlassSurface';
 import HeroCarousel from '../../components/HeroCarousel';
 import HorizontalMediaList from '../../components/HorizontalMediaList';
 import PressableScale from '../../components/PressableScale';
 import { useAppTheme } from '../../lib/theme';
 import { useColdStartHint } from '../../lib/warmup';
-import { DiscoverMediaItem, useDiscoverStore } from '../../store/discoverStore';
+import {
+  ActiveSegment,
+  DiscoverFeedResponse,
+  DiscoverMediaItem,
+  ForYouItem,
+  useDiscoverStore,
+} from '../../store/discoverStore';
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
 const POSTER_BASE_URL = 'https://image.tmdb.org/t/p/w342';
@@ -104,7 +112,7 @@ function AnimatedSegmentControl({
           a translucent wash alone was invisible against a bright photo.
           Same two-layer recipe as LiquidTabBar: blur whatever's behind,
           then a theme tint ON TOP of the blur for real contrast. */}
-      <BlurView intensity={70} tint={theme.blurTint} style={StyleSheet.absoluteFill} />
+      <GlassBlur intensity={70} tint={theme.blurTint} style={StyleSheet.absoluteFill} />
       <View style={[StyleSheet.absoluteFill, { backgroundColor: c.glassFill }]} />
       {/* Sliding indicator — solid fill (not a translucent wash), matching
           the same "black icon/text on solid yellow" active-state language
@@ -219,6 +227,8 @@ function SearchResultCard({ item }: { item: DiscoverMediaItem }) {
           style={src.posterImg}
           contentFit="cover"
           transition={200}
+          recyclingKey={`${item.media_type}-${item.tmdb_id}`}
+          cachePolicy="memory-disk"
         />
         <LinearGradient
           colors={['transparent', 'rgba(0,0,0,0.85)']}
@@ -308,41 +318,312 @@ const src = StyleSheet.create({
   },
 });
 
+// ─── Search Header (Phase 83 perf) ─────────────────────────────────────────────
+// Split out of DiscoverScreen's render so a searchQuery keystroke — which
+// only this subtree needs to reflect — doesn't force React to re-diff
+// DiscoverFeedBody's sibling subtree too. Not memoized: it's supposed to
+// re-render on every keystroke, that's what shows the typed text.
+
+interface DiscoverSearchHeaderProps {
+  headerBlurStyle: AnimatedStyle<ViewStyle>;
+  inputRef: React.RefObject<TextInput | null>;
+  isSearchActive: boolean;
+  searchQuery: string;
+  onSearchChange: (query: string) => void;
+  onSearchFocus: () => void;
+  onClearSearch: () => void;
+  filterSheetVisible: boolean;
+  filterActive: boolean;
+  onToggleFilterSheet: () => void;
+  activeSegment: ActiveSegment;
+  onSegmentChange: (segment: ActiveSegment) => void;
+}
+
+function DiscoverSearchHeader({
+  headerBlurStyle,
+  inputRef,
+  isSearchActive,
+  searchQuery,
+  onSearchChange,
+  onSearchFocus,
+  onClearSearch,
+  filterSheetVisible,
+  filterActive,
+  onToggleFilterSheet,
+  activeSegment,
+  onSegmentChange,
+}: DiscoverSearchHeaderProps) {
+  const { theme } = useAppTheme();
+  const c = theme.colors;
+
+  return (
+    <View style={styles.headerContainer} pointerEvents="box-none">
+      {/* Blur background (fades in on scroll) */}
+      <Animated.View style={[StyleSheet.absoluteFill, headerBlurStyle]}>
+        <GlassBlur intensity={80} tint={theme.blurTint} style={StyleSheet.absoluteFill} />
+        <View style={[StyleSheet.absoluteFill, { backgroundColor: c.glassFill }]} />
+        <View style={[styles.headerBorder, { backgroundColor: c.hairline }]} />
+      </Animated.View>
+
+      <SafeAreaView edges={['top']}>
+        {/* Search Row */}
+        <View style={styles.searchRow}>
+          <View
+            style={[
+              styles.searchBar,
+              { backgroundColor: c.glassFill, borderColor: c.hairline },
+              isSearchActive && { borderColor: c.accentInk },
+            ]}
+          >
+            <TextInput
+              ref={inputRef}
+              style={[styles.searchInput, { color: c.textPrimary }]}
+              placeholder="Search shows, movies, actors..."
+              placeholderTextColor={c.textTertiary}
+              value={searchQuery}
+              onChangeText={onSearchChange}
+              onFocus={onSearchFocus}
+              returnKeyType="search"
+              autoCorrect={false}
+              autoCapitalize="none"
+            />
+            {searchQuery.length > 0 && (
+              <PressableScale onPress={onClearSearch} hitSlop={8}>
+                <X color={c.textSecondary} size={16} strokeWidth={2.5} />
+              </PressableScale>
+            )}
+          </View>
+
+          {/* Filter Button */}
+          {!isSearchActive && (
+            <PressableScale
+              style={[
+                styles.filterBtn,
+                { backgroundColor: c.glassFill, borderColor: c.hairline },
+                (filterSheetVisible || filterActive) && {
+                  backgroundColor: c.accentDim,
+                  borderColor: c.accentInk,
+                },
+              ]}
+              onPress={onToggleFilterSheet}
+            >
+              <SlidersHorizontal
+                color={filterSheetVisible || filterActive ? c.accentInk : c.textSecondary}
+                size={18}
+                strokeWidth={2}
+              />
+              {/* A filter is applied but the sheet is closed — without
+                  this dot there was no way to tell a filter was active
+                  once you dismissed the sheet. */}
+              {filterActive && !filterSheetVisible && (
+                <View style={[styles.filterBadge, { backgroundColor: c.accentFill }]} />
+              )}
+            </PressableScale>
+          )}
+
+          {/* Cancel button */}
+          {isSearchActive && (
+            <PressableScale onPress={onClearSearch} style={styles.cancelBtn}>
+              <Text style={[styles.cancelText, { color: c.accentInk }]}>Cancel</Text>
+            </PressableScale>
+          )}
+        </View>
+
+        {/* Segment control (hidden during search) */}
+        {!isSearchActive && (
+          <Animated.View entering={FadeIn.duration(150)} exiting={FadeOut.duration(100)} style={styles.segmentWrapper}>
+            <AnimatedSegmentControl value={activeSegment} onChange={onSegmentChange} />
+          </Animated.View>
+        )}
+      </SafeAreaView>
+    </View>
+  );
+}
+
+// ─── Feed Body (Phase 83 perf) ─────────────────────────────────────────────────
+// Only mounted when neither search nor a filter is active. Memoized because
+// its props (this segment's feed/For You data, isLoadingFeed, feedError)
+// are stable across everything DiscoverSearchHeader re-renders for — a
+// keystroke, opening the filter sheet — so the memo actually holds and this
+// subtree (HeroCarousel + N HorizontalMediaLists + GenreGrid, each already
+// memoized on its own props too) skips re-rendering along with it.
+// handleRefresh/handleRetryFeed are passed down as useCallback-stable
+// references from DiscoverScreen specifically so this memo isn't defeated
+// by a fresh closure identity every render.
+
+// C13 stale-while-revalidate: a persisted feed snapshot older than this is
+// shown immediately (never a blank/spinner cold start) but flagged as
+// possibly out of date while the background revalidation it always gets
+// on mount (discoverStore's hasFetchedFeed session guard) is still in
+// flight — rather than silently presenting week-old "Trending" as current.
+const STALE_FEED_THRESHOLD_MS = 30 * 60 * 1000;
+
+interface DiscoverFeedBodyProps {
+  activeSegment: ActiveSegment;
+  currentFeed: DiscoverFeedResponse | null;
+  feedFetchedAt: number | null;
+  forYouItems: ForYouItem[];
+  isLoadingFeed: boolean;
+  feedError: string | null;
+  isWakingBackend: boolean;
+  isRefreshing: boolean;
+  onRefresh: () => void;
+  scrollHandler: ReturnType<typeof useAnimatedScrollHandler>;
+  onSelectGenre: (genreId: number) => void;
+  onRetry: () => void;
+}
+
+function DiscoverFeedBodyComponent({
+  activeSegment,
+  currentFeed,
+  feedFetchedAt,
+  forYouItems,
+  isLoadingFeed,
+  feedError,
+  isWakingBackend,
+  isRefreshing,
+  onRefresh,
+  scrollHandler,
+  onSelectGenre,
+  onRetry,
+}: DiscoverFeedBodyProps) {
+  const { theme } = useAppTheme();
+  const c = theme.colors;
+
+  const isRevalidatingStaleSnapshot =
+    isLoadingFeed &&
+    currentFeed !== null &&
+    feedFetchedAt !== null &&
+    Date.now() - feedFetchedAt > STALE_FEED_THRESHOLD_MS;
+
+  if (isLoadingFeed && !currentFeed) {
+    return (
+      <View style={styles.loadingContainer}>
+        <ActivityIndicator color={c.accentInk} size="large" />
+        {isWakingBackend && (
+          <Text style={[styles.wakingText, { color: c.textTertiary }]}>
+            Waking up the server — this can take up to a minute.
+          </Text>
+        )}
+      </View>
+    );
+  }
+
+  if (feedError && !currentFeed) {
+    return (
+      <View style={styles.errorContainer}>
+        <GlassSurface radius={18} style={styles.errorCard}>
+          <WifiOff color={c.textTertiary} size={32} strokeWidth={1.5} />
+          <Text style={[styles.errorText, { color: c.textSecondary }]}>{feedError}</Text>
+          <PressableScale
+            style={[styles.retryBtn, { backgroundColor: c.accentDim, borderColor: c.accentInk }]}
+            onPress={onRetry}
+          >
+            <Text style={[styles.retryText, { color: c.accentInk }]}>Retry</Text>
+          </PressableScale>
+        </GlassSurface>
+      </View>
+    );
+  }
+
+  return (
+    <Animated.ScrollView
+      showsVerticalScrollIndicator={false}
+      onScroll={scrollHandler}
+      scrollEventThrottle={16}
+      contentContainerStyle={styles.scrollContent}
+      refreshControl={
+        <RefreshControl
+          refreshing={isRefreshing}
+          onRefresh={onRefresh}
+          tintColor={c.accentInk}
+          progressViewOffset={120}
+        />
+      }
+    >
+      {isRevalidatingStaleSnapshot && (
+        <View style={styles.updatingBadge}>
+          <ActivityIndicator size="small" color={c.textTertiary} />
+          <Text style={[styles.updatingText, { color: c.textTertiary }]}>Updating…</Text>
+        </View>
+      )}
+
+      {/* Hero Carousel */}
+      {currentFeed?.hero && currentFeed.hero.length > 0 && (
+        <HeroCarousel items={currentFeed.hero} />
+      )}
+
+      {/* For You — cross-library recommendations, scoped to the active
+          tv/movie segment (2026-07-31: previously mixed both media types
+          into one shared list regardless of segment). */}
+      <HorizontalMediaList title="For You" items={forYouItems} />
+
+      {/* Sections */}
+      <View style={styles.feedContent}>
+        {currentFeed?.sections?.map((section) => (
+          <HorizontalMediaList key={section.id} title={section.title} items={section.items} />
+        ))}
+
+        {/* Genre Grid */}
+        <GenreGrid activeSegment={activeSegment} onSelectGenre={onSelectGenre} />
+      </View>
+    </Animated.ScrollView>
+  );
+}
+
+const DiscoverFeedBody = React.memo(DiscoverFeedBodyComponent);
+
 // ─── Main Screen ───────────────────────────────────────────────────────────────
 
 export default function DiscoverScreen() {
-  // Scoped selectors, not a bare useDiscoverStore() — see app/_layout.tsx's
-  // note (index.tsx/movies.tsx/profile/*/community.tsx already fixed this
-  // exact pattern; Discover was missed). A bare destructure of ~25 fields
-  // re-rendered this whole screen, including both feed lists, on every
-  // keystroke in search.
+  // House rule (Phase 83 perf): one atomic selector per STATE field below
+  // (so a change to one field doesn't re-render for a change to another),
+  // a single getState() destructure for ACTIONS (their identities never
+  // change, so individually subscribing to all 11 of them — the previous
+  // shape — bought nothing but 11 dead subscriptions), and no store getter
+  // called mid-render. isFilterActive() used to be called directly here,
+  // which reads via get() and therefore never subscribes to anything —
+  // filterActive only actually updated when some unrelated field's own
+  // subscription happened to force a re-render along with it. Replaced
+  // with a real derived-boolean selector below; Object.is gives correct
+  // memoization for a primitive return with no useShallow needed.
   const activeSegment = useDiscoverStore((s) => s.activeSegment);
-  const setActiveSegment = useDiscoverStore((s) => s.setActiveSegment);
   const searchQuery = useDiscoverStore((s) => s.searchQuery);
-  const setSearchQuery = useDiscoverStore((s) => s.setSearchQuery);
   const filterSheetVisible = useDiscoverStore((s) => s.filterSheetVisible);
-  const toggleFilterSheet = useDiscoverStore((s) => s.toggleFilterSheet);
   const feedData = useDiscoverStore((s) => s.feedData);
+  const feedFetchedAt = useDiscoverStore((s) => s.feedFetchedAt);
   const isLoadingFeed = useDiscoverStore((s) => s.isLoadingFeed);
   const feedError = useDiscoverStore((s) => s.feedError);
-  const fetchFeed = useDiscoverStore((s) => s.fetchFeed);
   const searchResults = useDiscoverStore((s) => s.searchResults);
   const isSearching = useDiscoverStore((s) => s.isSearching);
   const isLoadingMoreSearch = useDiscoverStore((s) => s.isLoadingMoreSearch);
-  const loadMoreSearchResults = useDiscoverStore((s) => s.loadMoreSearchResults);
-  const runSearch = useDiscoverStore((s) => s.runSearch);
-  const clearSearch = useDiscoverStore((s) => s.clearSearch);
   const filteredResults = useDiscoverStore((s) => s.filteredResults);
   const isLoadingFiltered = useDiscoverStore((s) => s.isLoadingFiltered);
   const isLoadingMoreFiltered = useDiscoverStore((s) => s.isLoadingMoreFiltered);
-  const loadMoreFilteredResults = useDiscoverStore((s) => s.loadMoreFilteredResults);
   const filteredError = useDiscoverStore((s) => s.filteredError);
-  const isFilterActive = useDiscoverStore((s) => s.isFilterActive);
-  const setSelectedGenreId = useDiscoverStore((s) => s.setSelectedGenreId);
-  const fetchGenreCovers = useDiscoverStore((s) => s.fetchGenreCovers);
   const forYou = useDiscoverStore((s) => s.forYou);
-  const fetchForYou = useDiscoverStore((s) => s.fetchForYou);
-  const filterActive = isFilterActive();
+  const filterActive = useDiscoverStore(
+    (s) =>
+      s.selectedGenreId !== null ||
+      s.sortOrder !== 'trending' ||
+      s.selectedLanguage !== null ||
+      s.animeOnly
+  );
+
+  const {
+    setActiveSegment,
+    setSearchQuery,
+    toggleFilterSheet,
+    fetchFeed,
+    loadMoreSearchResults,
+    runSearch,
+    clearSearch,
+    loadMoreFilteredResults,
+    setSelectedGenreId,
+    fetchGenreCovers,
+    fetchForYou,
+  } = useDiscoverStore.getState();
+
   const { theme } = useAppTheme();
   const c = theme.colors;
 
@@ -365,16 +646,23 @@ export default function DiscoverScreen() {
 
   // ── Effects ────────────────────────────────────────────────────────────────
 
-  // Initial feed fetch
+  // Initial feed/ForYou/genre-covers fetch, for whichever segment is
+  // actually active when this screen first mounts — not hardcoded to 'tv'.
+  // discoverStore is in-memory only (no persistence), so activeSegment is
+  // 'tv' on a cold app launch, but a remount while it's already 'movie'
+  // (e.g. detachInactiveScreens reclaiming this screen under memory
+  // pressure, then Discover getting focused again) used to still kick off
+  // a 'tv' fetch nobody asked for while the segment actually on screen got
+  // nothing. Captured once via ref — every *subsequent* segment switch
+  // already goes through setActiveSegment (discoverStore.ts), which fetches
+  // all three itself; this effect only needs to cover the very first mount.
+  const initialSegmentRef = useRef(activeSegment);
   useEffect(() => {
-    fetchFeed('tv');
-    fetchForYou('tv');
+    const segment = initialSegmentRef.current;
+    fetchFeed(segment);
+    fetchForYou(segment);
+    fetchGenreCovers(segment);
   }, []);
-
-  // Genre Grid cover images — fetched (and cached) per segment
-  useEffect(() => {
-    fetchGenreCovers(activeSegment);
-  }, [activeSegment, fetchGenreCovers]);
 
   // Run search when debounced query changes
   useEffect(() => {
@@ -404,7 +692,7 @@ export default function DiscoverScreen() {
     inputRef.current?.blur();
   };
 
-  const handleRefresh = async () => {
+  const handleRefresh = useCallback(async () => {
     setIsRefreshing(true);
     // Force re-fetch by temporarily clearing cache
     useDiscoverStore.setState((state) => ({
@@ -412,7 +700,18 @@ export default function DiscoverScreen() {
     }));
     await fetchFeed(activeSegment);
     setIsRefreshing(false);
-  };
+  }, [activeSegment, fetchFeed]);
+
+  // Stable identity (not an inline arrow in the JSX below) so DiscoverFeedBody's
+  // React.memo actually holds when the parent re-renders for an unrelated
+  // reason (e.g. the filter sheet opening over the feed).
+  const handleRetryFeed = useCallback(() => {
+    useDiscoverStore.setState((state) => ({
+      feedData: { ...state.feedData, [activeSegment]: null },
+      feedError: null,
+    }));
+    fetchFeed(activeSegment);
+  }, [activeSegment, fetchFeed]);
 
   // ── Animated styles ────────────────────────────────────────────────────────
 
@@ -435,89 +734,20 @@ export default function DiscoverScreen() {
   return (
     <View style={[styles.container, { backgroundColor: c.bg }]}>
       {/* ── Sticky Header ─────────────────────────────────────────────────── */}
-      <View style={styles.headerContainer} pointerEvents="box-none">
-        {/* Blur background (fades in on scroll) */}
-        <Animated.View style={[StyleSheet.absoluteFill, headerBlurStyle]}>
-          <BlurView intensity={80} tint={theme.blurTint} style={StyleSheet.absoluteFill} />
-          <View style={[StyleSheet.absoluteFill, { backgroundColor: c.glassFill }]} />
-          <View style={[styles.headerBorder, { backgroundColor: c.hairline }]} />
-        </Animated.View>
-
-        <SafeAreaView edges={['top']}>
-          {/* Search Row */}
-          <View style={styles.searchRow}>
-            <View
-              style={[
-                styles.searchBar,
-                { backgroundColor: c.glassFill, borderColor: c.hairline },
-                isSearchActive && { borderColor: c.accentInk },
-              ]}
-            >
-              <TextInput
-                ref={inputRef}
-                style={[styles.searchInput, { color: c.textPrimary }]}
-                placeholder="Search shows, movies, actors..."
-                placeholderTextColor={c.textTertiary}
-                value={searchQuery}
-                onChangeText={setSearchQuery}
-                onFocus={handleSearchFocus}
-                returnKeyType="search"
-                autoCorrect={false}
-                autoCapitalize="none"
-              />
-              {searchQuery.length > 0 && (
-                <PressableScale onPress={handleClearSearch} hitSlop={8}>
-                  <X color={c.textSecondary} size={16} strokeWidth={2.5} />
-                </PressableScale>
-              )}
-            </View>
-
-            {/* Filter Button */}
-            {!isSearchActive && (
-              <PressableScale
-                style={[
-                  styles.filterBtn,
-                  { backgroundColor: c.glassFill, borderColor: c.hairline },
-                  (filterSheetVisible || filterActive) && {
-                    backgroundColor: c.accentDim,
-                    borderColor: c.accentInk,
-                  },
-                ]}
-                onPress={toggleFilterSheet}
-              >
-                <SlidersHorizontal
-                  color={filterSheetVisible || filterActive ? c.accentInk : c.textSecondary}
-                  size={18}
-                  strokeWidth={2}
-                />
-                {/* A filter is applied but the sheet is closed — without
-                    this dot there was no way to tell a filter was active
-                    once you dismissed the sheet. */}
-                {filterActive && !filterSheetVisible && (
-                  <View style={[styles.filterBadge, { backgroundColor: c.accentFill }]} />
-                )}
-              </PressableScale>
-            )}
-
-            {/* Cancel button */}
-            {isSearchActive && (
-              <PressableScale onPress={handleClearSearch} style={styles.cancelBtn}>
-                <Text style={[styles.cancelText, { color: c.accentInk }]}>Cancel</Text>
-              </PressableScale>
-            )}
-          </View>
-
-          {/* Segment control (hidden during search) */}
-          {!isSearchActive && (
-            <Animated.View entering={FadeIn.duration(150)} exiting={FadeOut.duration(100)} style={styles.segmentWrapper}>
-              <AnimatedSegmentControl
-                value={activeSegment}
-                onChange={handleSegmentChange}
-              />
-            </Animated.View>
-          )}
-        </SafeAreaView>
-      </View>
+      <DiscoverSearchHeader
+        headerBlurStyle={headerBlurStyle}
+        inputRef={inputRef}
+        isSearchActive={isSearchActive}
+        searchQuery={searchQuery}
+        onSearchChange={setSearchQuery}
+        onSearchFocus={handleSearchFocus}
+        onClearSearch={handleClearSearch}
+        filterSheetVisible={filterSheetVisible}
+        filterActive={filterActive}
+        onToggleFilterSheet={toggleFilterSheet}
+        activeSegment={activeSegment}
+        onSegmentChange={handleSegmentChange}
+      />
 
       {/* ── Body ──────────────────────────────────────────────────────────── */}
 
@@ -594,74 +824,20 @@ export default function DiscoverScreen() {
         </View>
       ) : (
         // ── Feed ───────────────────────────────────────────────────────────
-        isLoadingFeed && !currentFeed ? (
-          <View style={styles.loadingContainer}>
-            <ActivityIndicator color={c.accentInk} size="large" />
-            {isWakingBackend && (
-              <Text style={[styles.wakingText, { color: c.textTertiary }]}>
-                Waking up the server — this can take up to a minute.
-              </Text>
-            )}
-          </View>
-        ) : feedError && !currentFeed ? (
-          <View style={styles.errorContainer}>
-            <GlassSurface radius={18} style={styles.errorCard}>
-              <WifiOff color={c.textTertiary} size={32} strokeWidth={1.5} />
-              <Text style={[styles.errorText, { color: c.textSecondary }]}>{feedError}</Text>
-              <PressableScale
-                style={[styles.retryBtn, { backgroundColor: c.accentDim, borderColor: c.accentInk }]}
-                onPress={() => {
-                  useDiscoverStore.setState((state) => ({
-                    feedData: { ...state.feedData, [activeSegment]: null },
-                    feedError: null,
-                  }));
-                  fetchFeed(activeSegment);
-                }}
-              >
-                <Text style={[styles.retryText, { color: c.accentInk }]}>Retry</Text>
-              </PressableScale>
-            </GlassSurface>
-          </View>
-        ) : (
-          <Animated.ScrollView
-            showsVerticalScrollIndicator={false}
-            onScroll={scrollHandler}
-            scrollEventThrottle={16}
-            contentContainerStyle={styles.scrollContent}
-            refreshControl={
-              <RefreshControl
-                refreshing={isRefreshing}
-                onRefresh={handleRefresh}
-                tintColor={c.accentInk}
-                progressViewOffset={120}
-              />
-            }
-          >
-            {/* Hero Carousel */}
-            {currentFeed?.hero && currentFeed.hero.length > 0 && (
-              <HeroCarousel items={currentFeed.hero} />
-            )}
-
-            {/* For You — cross-library recommendations, scoped to the
-                active tv/movie segment (2026-07-31: previously mixed both
-                media types into one shared list regardless of segment). */}
-            <HorizontalMediaList title="For You" items={forYou[activeSegment]} />
-
-            {/* Sections */}
-            <View style={styles.feedContent}>
-              {currentFeed?.sections?.map((section) => (
-                <HorizontalMediaList
-                  key={section.id}
-                  title={section.title}
-                  items={section.items}
-                />
-              ))}
-
-              {/* Genre Grid */}
-              <GenreGrid activeSegment={activeSegment} onSelectGenre={setSelectedGenreId} />
-            </View>
-          </Animated.ScrollView>
-        )
+        <DiscoverFeedBody
+          activeSegment={activeSegment}
+          currentFeed={currentFeed}
+          feedFetchedAt={feedFetchedAt[activeSegment]}
+          forYouItems={forYou[activeSegment]}
+          isLoadingFeed={isLoadingFeed}
+          feedError={feedError}
+          isWakingBackend={isWakingBackend}
+          isRefreshing={isRefreshing}
+          onRefresh={handleRefresh}
+          scrollHandler={scrollHandler}
+          onSelectGenre={setSelectedGenreId}
+          onRetry={handleRetryFeed}
+        />
       )}
 
       {/* ── Filter Bottom Sheet (rendered above everything) ────────────────── */}
@@ -687,6 +863,17 @@ const styles = StyleSheet.create({
     fontWeight: '500',
     textAlign: 'center',
     paddingHorizontal: 40,
+  },
+  updatingBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    paddingVertical: 8,
+  },
+  updatingText: {
+    fontSize: 12,
+    fontWeight: '600',
   },
 
   // Header

@@ -227,17 +227,32 @@ export function resolveDisplayDateIso(
  * TMDB simply cannot provide (its episode payload is a bare `air_date` with
  * no time), which is why the countdown it fed always ran to local midnight
  * and so always ended in "00m".
+ *
+ * `isEstimated` marks a time that rode in on the same airs_time/
+ * airs_timezone pair as a real broadcast slot, but was actually filled by
+ * the backend's platform-estimate fallback (CachedShow.air_time_source ===
+ * "platform_estimate", core/airtime.py) rather than a confirmed TVmaze
+ * value — a well-documented streaming-platform convention (e.g. "Netflix
+ * drops at midnight Pacific"), not a fact about this specific episode.
+ * Prefixing "~" is the whole of the distinction: resolveKnownAirInstant/
+ * resolveAirInstant/resolveDisplayDateIso deliberately do NOT change
+ * behavior for an estimate, since ordering and day-bucketing off a
+ * reasonable estimate is still correct — only the displayed string needs
+ * to own up to being a guess, per this module's founding principle that
+ * showing no time beats showing a wrong (or, here, unmarked-uncertain) one.
  */
 export function formatLocalAirTime(
   airDate: string,
   airDateTime: string | null | undefined,
   airsTime: string | null | undefined,
-  airsTimezone: string | null | undefined
+  airsTimezone: string | null | undefined,
+  isEstimated?: boolean
 ): string | null {
   const instant = resolveKnownAirInstant(airDate, airDateTime, airsTime, airsTimezone);
   if (!instant) return null;
   try {
-    return new Intl.DateTimeFormat('en-US', { hour: 'numeric', minute: '2-digit' }).format(instant);
+    const formatted = new Intl.DateTimeFormat('en-US', { hour: 'numeric', minute: '2-digit' }).format(instant);
+    return isEstimated ? `~${formatted}` : formatted;
   } catch {
     return null;
   }
@@ -310,6 +325,35 @@ export function formatUpcomingHeaderLabel(airDate: string, now: Date): string {
       .toUpperCase();
   }
   return 'LATER';
+}
+
+/**
+ * True for the two formatUpcomingHeaderLabel outputs that do NOT already
+ * name a weekday — the absolute-date branch ("AUG 12, 2026") and the
+ * 'LATER' catch-all. A row grouped under one of those benefits from a
+ * "(Wed)" suffix on its own subtitle line since the header above it
+ * doesn't say which day of the week it is; a row under 'TODAY' / 'TOMORROW'
+ * / a weekday-name header ('TUESDAY') / a past-window label would just be
+ * repeating (or contradicting the point of) what the header already says.
+ *
+ * The regex matches formatUpcomingHeaderLabel's `{ day: 'numeric', month:
+ * 'short', year: 'numeric' }` branch after `.toUpperCase()` — verified
+ * against real `Intl` output (e.g. "AUG 12, 2026" / "AUG 5, 2026"), not
+ * assumed.
+ */
+export function shouldAppendWeekday(headerLabel: string): boolean {
+  return headerLabel === 'LATER' || /^[A-Z]{3} \d{1,2}, \d{4}$/.test(headerLabel);
+}
+
+/** "Wed" for a display-date ISO — the short weekday name to append (in
+ *  parentheses, by the caller) next to a row's episode info when
+ *  shouldAppendWeekday says its header doesn't already convey that.
+ *  Pass a display-date ISO from resolveDisplayDateIso, not a raw TMDB
+ *  air_date, for the same cross-midnight reasons as every other date
+ *  helper in this file. */
+export function formatWeekdayShort(displayDateIso: string): string {
+  const target = new Date(`${displayDateIso}T00:00:00`);
+  return new Intl.DateTimeFormat('en-US', { weekday: 'short' }).format(target);
 }
 
 /**

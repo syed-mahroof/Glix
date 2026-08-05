@@ -122,6 +122,7 @@ function ActivityTab() {
   const { theme } = useAppTheme();
   const c = theme.colors;
   const activityFeed = useSocialStore((s) => s.activityFeed);
+  const activityFeedFetchedAt = useSocialStore((s) => s.activityFeedFetchedAt);
   const isLoadingFeed = useSocialStore((s) => s.isLoadingFeed);
   const hasMoreFeed = useSocialStore((s) => s.hasMoreFeed);
   const feedPage = useSocialStore((s) => s.feedPage);
@@ -134,6 +135,17 @@ function ActivityTab() {
   }, []);
 
   const isWakingBackend = useColdStartHint(isLoadingFeed && activityFeed.length === 0);
+
+  // C13 stale-while-revalidate: activityFeed can now paint immediately from
+  // a persisted snapshot on a cold start (store/socialStore.ts) while
+  // fetchActivityFeed(1)'s always-fires-on-mount call above revalidates it
+  // in the background — flag it rather than silently presenting old
+  // activity as current.
+  const isRevalidatingStaleSnapshot =
+    isLoadingFeed &&
+    activityFeed.length > 0 &&
+    activityFeedFetchedAt !== null &&
+    Date.now() - activityFeedFetchedAt > 30 * 60 * 1000;
 
   if (isLoadingFeed && activityFeed.length === 0) {
     return (
@@ -163,6 +175,14 @@ function ActivityTab() {
       onEndReached={() => {
         if (hasMoreFeed && !isLoadingFeed) fetchActivityFeed(feedPage + 1);
       }}
+      ListHeaderComponent={
+        isRevalidatingStaleSnapshot ? (
+          <View style={styles.updatingBadge}>
+            <ActivityIndicator size="small" color={c.textTertiary} />
+            <Text style={[styles.updatingText, { color: c.textTertiary }]}>Updating…</Text>
+          </View>
+        ) : null
+      }
       ListEmptyComponent={
         <View style={styles.centered}>
           <Text style={[styles.emptyText, { color: c.textSecondary }]}>
@@ -343,6 +363,17 @@ const styles = StyleSheet.create({
     fontSize: 13,
     fontWeight: '500',
     textAlign: 'center',
+  },
+  updatingBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    paddingVertical: 10,
+  },
+  updatingText: {
+    fontSize: 12,
+    fontWeight: '600',
   },
   list: {
     paddingHorizontal: 16,

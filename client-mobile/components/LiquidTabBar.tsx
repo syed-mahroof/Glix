@@ -1,5 +1,4 @@
 import { BottomTabBarProps } from '@react-navigation/bottom-tabs';
-import { BlurView } from 'expo-blur';
 import React, { useEffect } from 'react';
 import { Dimensions, Platform, Pressable, StyleSheet, View } from 'react-native';
 import Animated, {
@@ -9,6 +8,7 @@ import Animated, {
 } from 'react-native-reanimated';
 
 import { elevation, useAppTheme } from '../lib/theme';
+import GlassBlur from './GlassBlur';
 
 const { width } = Dimensions.get('window');
 const TAB_BAR_WIDTH = width - 40; // 20px padding on each side
@@ -47,7 +47,7 @@ export default function LiquidTabBar({ state, descriptors, navigation }: BottomT
   return (
     <View style={[styles.wrapper, { borderColor: c.hairline }, elevation(theme, 2)]}>
       {/* Layer 1: blur whatever's behind the pill (posters, backdrops). */}
-      <BlurView intensity={100} tint={theme.blurTint} style={StyleSheet.absoluteFill} />
+      <GlassBlur intensity={100} tint={theme.blurTint} style={StyleSheet.absoluteFill} />
       {/* Layer 2: a tint OVER the blur (not just a bg painted under it) —
           this is what actually keeps the bar legible against busy content;
           blur alone still lets bright/high-contrast pixels bleed through. */}

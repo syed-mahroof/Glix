@@ -92,6 +92,79 @@ export function setSessionExpiredHandler(handler: SessionExpiredHandler | null) 
   sessionExpiredHandler = handler;
 }
 
+// In-memory cache over the SecureStore-backed access token. Every request
+// used to pay a native keychain round trip (SecureStore.getItemAsync) even
+// though the token only changes on login/refresh/logout — Profile focus
+// alone is 4 requests, Analytics 6.
+//
+// `undefined` vs `null` is a deliberate three-state cache, not two:
+// undefined = never read yet (or invalidated) → hit SecureStore.
+// null      = definitively absent (logged out) → skip SecureStore entirely.
+// Collapsing the two would make a logged-out app pay the keychain cost on
+// every request forever.
+let cachedAccessToken: string | null | undefined = undefined;
+let inFlightTokenRead: Promise<string | null> | null = null;
+
+const TOKEN_READ_TIMEOUT_MS = 2000;
+
+async function readAccessTokenFromStore(): Promise<string | null> {
+  // Same timeout precedent as app/_layout.tsx's own boot-gate read —
+  // SecureStore can hang indefinitely on Android/Expo Go.
+  const token = await Promise.race([
+    SecureStore.getItemAsync(ACCESS_TOKEN_KEY),
+    new Promise<never>((_, reject) =>
+      setTimeout(() => reject(new Error('SecureStore timeout')), TOKEN_READ_TIMEOUT_MS)
+    ),
+  ]);
+  cachedAccessToken = token;
+  return token;
+}
+
+/**
+ * Single-flighted: concurrent callers during a cold cache share one
+ * keychain read instead of firing one each. Caches only on success — a
+ * timeout/error rejects instead of being cached as `null`, so a transient
+ * keychain hang doesn't get mistaken for "no token" on the next call
+ * (poisoning the cache here would reproduce the "sometimes automatically
+ * logged out" bug already fixed twice in performRefresh below).
+ */
+export async function getAccessToken(): Promise<string | null> {
+  if (cachedAccessToken !== undefined) return cachedAccessToken;
+  if (!inFlightTokenRead) {
+    inFlightTokenRead = readAccessTokenFromStore().finally(() => {
+      inFlightTokenRead = null;
+    });
+  }
+  return inFlightTokenRead;
+}
+
+/**
+ * Assigns the cache synchronously, before either await below — a request
+ * racing this call (e.g. one already queued behind a 401) sees the new
+ * token immediately rather than the stale one, which is what makes
+ * refresh-token rotation correct.
+ */
+export async function setTokens(access: string, refresh?: string): Promise<void> {
+  cachedAccessToken = access;
+  await SecureStore.setItemAsync(ACCESS_TOKEN_KEY, access);
+  if (refresh) {
+    await SecureStore.setItemAsync(REFRESH_TOKEN_KEY, refresh);
+  }
+}
+
+export async function clearTokens(): Promise<void> {
+  cachedAccessToken = null;
+  await SecureStore.deleteItemAsync(ACCESS_TOKEN_KEY);
+  await SecureStore.deleteItemAsync(REFRESH_TOKEN_KEY);
+}
+
+/** Reads the refresh token directly — never cached, since its only caller
+ *  (settings.tsx's logout flow, to invalidate it server-side) needs it
+ *  exactly once per session. */
+export async function getRefreshToken(): Promise<string | null> {
+  return SecureStore.getItemAsync(REFRESH_TOKEN_KEY);
+}
+
 let isRefreshing = false;
 let refreshQueue: Array<(token: string | null) => void> = [];
 
@@ -125,10 +198,7 @@ async function performRefresh(): Promise<RefreshOutcome> {
     });
     const newAccessToken: string = response.data.access;
     const newRefreshToken: string | undefined = response.data.refresh;
-    await SecureStore.setItemAsync(ACCESS_TOKEN_KEY, newAccessToken);
-    if (newRefreshToken) {
-      await SecureStore.setItemAsync(REFRESH_TOKEN_KEY, newRefreshToken);
-    }
+    await setTokens(newAccessToken, newRefreshToken);
     return { status: 'success', token: newAccessToken };
   } catch (err) {
     // Bug fix (2026-08-03, user-reported "sometimes automatically logged
@@ -143,8 +213,7 @@ async function performRefresh(): Promise<RefreshOutcome> {
     // the next natural request just retries the whole flow fresh.
     const status = axios.isAxiosError(err) ? err.response?.status : undefined;
     if (status === 401 || status === 403) {
-      await SecureStore.deleteItemAsync(ACCESS_TOKEN_KEY);
-      await SecureStore.deleteItemAsync(REFRESH_TOKEN_KEY);
+      await clearTokens();
       return { status: 'expired' };
     }
     return { status: 'transient_failure' };
@@ -152,9 +221,16 @@ async function performRefresh(): Promise<RefreshOutcome> {
 }
 
 api.interceptors.request.use(async (config) => {
-  const token = await SecureStore.getItemAsync(ACCESS_TOKEN_KEY);
-  if (token) {
-    config.headers.Authorization = `Bearer ${token}`;
+  try {
+    const token = await getAccessToken();
+    if (token) {
+      config.headers.Authorization = `Bearer ${token}`;
+    }
+  } catch {
+    // Keychain read timed out — proceed without a token. If one was
+    // actually needed the request 401s and the refresh flow below retries
+    // the read fresh, same "safe either way" reasoning as the boot-gate
+    // check in app/_layout.tsx.
   }
   return config;
 });

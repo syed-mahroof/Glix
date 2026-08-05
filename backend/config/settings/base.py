@@ -493,6 +493,22 @@ CELERY_BEAT_SCHEDULE = {
         "task": "core.tasks.resume_stalled_imports",
         "schedule": crontab(minute="*/15"),
     },
+    # Dedicated daily pass for shows with an imminent (within 14 days) next
+    # episode whose air time is still completely unknown — see
+    # core/tasks.py's backfill_missing_airtimes docstring. 3am, off-peak
+    # and distinct from the other entries' times above.
+    "backfill-missing-airtimes-daily": {
+        "task": "core.tasks.backfill_missing_airtimes",
+        "schedule": crontab(minute=0, hour=3),
+    },
+    # Phase 83 perf — see core/tasks.py's prewarm_discover_caches docstring.
+    # Same 6h rhythm as sync-active-shows above so a real user's Discover
+    # visit is never the one paying for a cold DiscoverFeedView/
+    # DiscoverGenresView cache.
+    "prewarm-discover-caches-every-6-hours": {
+        "task": "core.tasks.prewarm_discover_caches",
+        "schedule": crontab(minute=0, hour="*/6"),
+    },
 }
 
 LOGGING = {

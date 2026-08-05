@@ -1,7 +1,6 @@
 // client-mobile/app/register.tsx
 import axios from 'axios';
 import { Link, useRouter } from 'expo-router';
-import * as SecureStore from 'expo-secure-store';
 import { Eye, EyeOff, Lock, Mail, User } from 'lucide-react-native';
 import React, { useState } from 'react';
 import {
@@ -16,7 +15,7 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
-import { ACCESS_TOKEN_KEY, API_BASE_URL, REFRESH_TOKEN_KEY } from '../lib/api';
+import { API_BASE_URL, setTokens } from '../lib/api';
 import PressableScale from '../components/PressableScale';
 import SocialSignInButtons from '../components/SocialSignInButtons';
 import { extractErrorMessage } from '../lib/errors';
@@ -58,8 +57,7 @@ export default function RegisterScreen() {
         email: email.trim(),
         password,
       });
-      await SecureStore.setItemAsync('access_token', response.data.access);
-      await SecureStore.setItemAsync('refresh_token', response.data.refresh);
+      await setTokens(response.data.access, response.data.refresh);
       router.replace({ pathname: '/loading', params: { next: '/onboarding' } });
     } catch (err) {
       setError(extractErrorMessage(err));
@@ -68,8 +66,7 @@ export default function RegisterScreen() {
   };
 
   const handleSocialSuccess = async (result: SocialAuthResponse) => {
-    await SecureStore.setItemAsync(ACCESS_TOKEN_KEY, result.access);
-    await SecureStore.setItemAsync(REFRESH_TOKEN_KEY, result.refresh);
+    await setTokens(result.access, result.refresh);
     router.replace(
       result.created ? { pathname: '/loading', params: { next: '/onboarding' } } : '/loading'
     );

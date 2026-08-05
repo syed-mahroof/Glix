@@ -37,7 +37,7 @@ interface GenreGridProps {
   onSelectGenre: (genreId: number) => void;
 }
 
-export default function GenreGrid({ activeSegment, onSelectGenre }: GenreGridProps) {
+function GenreGrid({ activeSegment, onSelectGenre }: GenreGridProps) {
   const { theme } = useAppTheme();
   const c = theme.colors;
   const genres = activeSegment === 'tv' ? TV_GENRES : MOVIE_GENRES;
@@ -87,6 +87,8 @@ export default function GenreGrid({ activeSegment, onSelectGenre }: GenreGridPro
     </View>
   );
 }
+
+export default React.memo(GenreGrid);
 
 const SPACING = 16;
 const NUM_COLUMNS = 2;

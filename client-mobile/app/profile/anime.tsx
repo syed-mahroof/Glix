@@ -11,7 +11,7 @@ import { FlashList } from '@shopify/flash-list';
 import { useRouter } from 'expo-router';
 import { ArrowLeft, Search, Sparkles, X } from 'lucide-react-native';
 import React, { useEffect, useMemo, useState } from 'react';
-import { StyleSheet, Text, TextInput, View } from 'react-native';
+import { ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 import FloatingFilterButton from '../../components/FloatingFilterButton';
@@ -19,6 +19,7 @@ import LanguageFilterModal, { languageDisplayName } from '../../components/Langu
 import LayoutToggle from '../../components/LayoutToggle';
 import PressableScale from '../../components/PressableScale';
 import { SegmentedControl } from '../../components/SegmentedControl';
+import TabPill from '../../components/TabPill';
 import WatchlistFilterSheet from '../../components/WatchlistFilterSheet';
 import { isAnimeByGenresAndLanguage, isAnimeByGenreStringAndLanguage } from '../../lib/anime';
 import { useAppTheme } from '../../lib/theme';
@@ -27,6 +28,30 @@ import { MovieGridCard, MovieListRow } from './movies';
 import { ShowGridCard, ShowListRow } from './shows';
 
 type AnimeSegment = 'shows' | 'movies';
+
+// Phase 75.3: My Anime's Shows segment mirrors My Shows' pill set
+// (profile/shows.tsx) and its Movies segment mirrors My Movies' pill set
+// (profile/movies.tsx) — predicates copied verbatim from each, not
+// imported, since the two screens' FILTERS/FilterKey aren't exported (each
+// stays the source of truth for its own screen). Two separate state
+// variables so a shows-only key can't leak into the movies branch when the
+// segmented control flips.
+type ShowsFilterKey = 'ALL' | 'TO_WATCH' | 'LAST_WATCHED' | 'ENDED';
+type MoviesFilterKey = 'ALL' | 'WATCH_NEXT' | 'WATCHED' | 'LAST_WATCHED';
+
+const SHOWS_FILTERS: { key: ShowsFilterKey; label: string }[] = [
+  { key: 'ALL', label: 'All' },
+  { key: 'TO_WATCH', label: 'Continuing' },
+  { key: 'LAST_WATCHED', label: 'Last Watched' },
+  { key: 'ENDED', label: 'Ended' },
+];
+
+const MOVIES_FILTERS: { key: MoviesFilterKey; label: string }[] = [
+  { key: 'ALL', label: 'All' },
+  { key: 'WATCH_NEXT', label: 'Watch Next' },
+  { key: 'WATCHED', label: 'Watched' },
+  { key: 'LAST_WATCHED', label: 'Last Watched' },
+];
 
 export default function ProfileAnimeScreen() {
   const router = useRouter();
@@ -44,9 +69,15 @@ export default function ProfileAnimeScreen() {
   const setLanguageFilter = useWatchStore((s) => s.setLanguageFilter);
 
   const [segment, setSegment] = useState<AnimeSegment>('shows');
+  const [showsFilter, setShowsFilter] = useState<ShowsFilterKey>('ALL');
+  const [moviesFilter, setMoviesFilter] = useState<MoviesFilterKey>('ALL');
   const [query, setQuery] = useState('');
   const [isLanguageModalVisible, setIsLanguageModalVisible] = useState(false);
   const [isFilterSheetVisible, setIsFilterSheetVisible] = useState(false);
+  // Derived from the pill selection, not independent state — same
+  // single-select-row convention as shows.tsx/movies.tsx (Phase 63).
+  const showsLastWatchedSort = showsFilter === 'LAST_WATCHED';
+  const moviesLastWatchedSort = moviesFilter === 'LAST_WATCHED';
 
   useEffect(() => {
     fetchWatchlist();
@@ -61,11 +92,22 @@ export default function ProfileAnimeScreen() {
     ].filter((e) => isAnimeByGenresAndLanguage(e.show.genres, e.show.original_language));
   }, [watchlist]);
 
-  const animeMovieItems = useMemo<MovieWatchlistItem[]>(() => {
-    return [...movieWatchlist.watch_next, ...movieWatchlist.watched].filter((item) =>
+  const animeMovieWatchNext = useMemo<MovieWatchlistItem[]>(() => {
+    return movieWatchlist.watch_next.filter((item) =>
       isAnimeByGenreStringAndLanguage(item.movie.genres_string, item.movie.original_language)
     );
-  }, [movieWatchlist]);
+  }, [movieWatchlist.watch_next]);
+
+  const animeMovieWatched = useMemo<MovieWatchlistItem[]>(() => {
+    return movieWatchlist.watched.filter((item) =>
+      isAnimeByGenreStringAndLanguage(item.movie.genres_string, item.movie.original_language)
+    );
+  }, [movieWatchlist.watched]);
+
+  const animeMovieItems = useMemo<MovieWatchlistItem[]>(
+    () => [...animeMovieWatchNext, ...animeMovieWatched],
+    [animeMovieWatchNext, animeMovieWatched]
+  );
 
   // Distinct languages present in the active segment's anime items only —
   // client-side, never a new request, same convention as My Shows/My Movies.
@@ -85,22 +127,52 @@ export default function ProfileAnimeScreen() {
 
   const filteredShows = useMemo(() => {
     let result = animeShowEntries;
+    // Predicates copied verbatim from shows.tsx:222-248.
+    if (showsFilter === 'TO_WATCH') result = result.filter((e) => e.status === 'TO_WATCH' && e.show.status !== 'ENDED');
+    else if (showsFilter === 'ENDED') result = result.filter((e) => e.show.status === 'ENDED');
+
     if (selectedLanguage) result = result.filter((e) => e.show.original_language === selectedLanguage);
     const trimmed = query.trim().toLowerCase();
     if (trimmed) result = result.filter((e) => e.show.title.toLowerCase().includes(trimmed));
+
+    if (showsLastWatchedSort) {
+      result = [...result].sort((a, b) => {
+        if (!a.last_watched_at && !b.last_watched_at) return 0;
+        if (!a.last_watched_at) return 1;
+        if (!b.last_watched_at) return -1;
+        return b.last_watched_at.localeCompare(a.last_watched_at);
+      });
+    }
     return result;
-  }, [animeShowEntries, selectedLanguage, query]);
+  }, [animeShowEntries, showsFilter, selectedLanguage, query, showsLastWatchedSort]);
 
   const filteredMovies = useMemo(() => {
-    let result = animeMovieItems;
+    // Predicates copied verbatim from movies.tsx:232-263.
+    let result =
+      moviesFilter === 'WATCH_NEXT'
+        ? animeMovieWatchNext
+        : moviesFilter === 'WATCHED' || moviesFilter === 'LAST_WATCHED'
+        ? animeMovieWatched
+        : animeMovieItems;
+
     if (selectedLanguage) result = result.filter((item) => item.movie.original_language === selectedLanguage);
     const trimmed = query.trim().toLowerCase();
     if (trimmed) result = result.filter((item) => item.movie.title.toLowerCase().includes(trimmed));
-    return result;
-  }, [animeMovieItems, selectedLanguage, query]);
 
-  const hasActiveFilters = selectedLanguage !== null;
-  const handleReset = () => setLanguageFilter(null);
+    if (moviesLastWatchedSort) {
+      result = [...result].sort((a, b) => b.updated_at.localeCompare(a.updated_at));
+    }
+    return result;
+  }, [animeMovieItems, animeMovieWatchNext, animeMovieWatched, moviesFilter, selectedLanguage, query, moviesLastWatchedSort]);
+
+  const hasActiveFilters =
+    (segment === 'shows' ? showsFilter !== 'ALL' : moviesFilter !== 'ALL') || selectedLanguage !== null;
+
+  const handleReset = () => {
+    if (segment === 'shows') setShowsFilter('ALL');
+    else setMoviesFilter('ALL');
+    setLanguageFilter(null);
+  };
   const isEmpty = segment === 'shows' ? filteredShows.length === 0 : filteredMovies.length === 0;
   const isLoading = segment === 'shows' ? isLoadingWatchlist : isLoadingMovies;
 
@@ -131,6 +203,35 @@ export default function ProfileAnimeScreen() {
           onValueChange={setSegment}
         />
       </View>
+
+      {/* Status/sort tabs — mirrors My Shows' pill row on the Shows segment
+          and My Movies' pill row on the Movies segment (Phase 75.3). Same
+          horizontal single-select convention; tapping the active pill again
+          returns to "All". */}
+      <ScrollView
+        horizontal
+        showsHorizontalScrollIndicator={false}
+        contentContainerStyle={styles.tabsContainer}
+        style={styles.tabsScroll}
+      >
+        {segment === 'shows'
+          ? SHOWS_FILTERS.map((f) => (
+              <TabPill
+                key={f.key}
+                label={f.label}
+                active={showsFilter === f.key}
+                onPress={() => setShowsFilter(showsFilter === f.key ? 'ALL' : f.key)}
+              />
+            ))
+          : MOVIES_FILTERS.map((f) => (
+              <TabPill
+                key={f.key}
+                label={f.label}
+                active={moviesFilter === f.key}
+                onPress={() => setMoviesFilter(moviesFilter === f.key ? 'ALL' : f.key)}
+              />
+            ))}
+      </ScrollView>
 
       {/* Search — client-side over the already-loaded watchlist/movie cache,
           same as My Shows/My Movies. */}
@@ -172,7 +273,9 @@ export default function ProfileAnimeScreen() {
           <Text style={[styles.emptySubtitle, { color: c.textTertiary }]}>
             {query.trim()
               ? `No anime ${segment} match "${query.trim()}".`
-              : `Anime ${segment} you track will show up here.`}
+              : !hasActiveFilters
+              ? `Anime ${segment} you track will show up here.`
+              : `No anime ${segment} match this filter.`}
           </Text>
         </View>
       ) : segment === 'shows' ? (
@@ -263,6 +366,15 @@ const styles = StyleSheet.create({
   segmentWrap: {
     paddingHorizontal: 16,
     marginBottom: 12,
+  },
+
+  tabsScroll: {
+    flexGrow: 0,
+    marginBottom: 12,
+  },
+  tabsContainer: {
+    paddingHorizontal: 16,
+    gap: 8,
   },
 
   searchRow: {

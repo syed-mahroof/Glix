@@ -10,7 +10,6 @@ fast and TMDB-rate-limit-free.
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 
-from django.core.cache import cache
 from django.db import transaction
 from django.db.models import Count, F, Max, OuterRef, Prefetch, Q, Subquery
 from django.shortcuts import get_object_or_404
@@ -20,6 +19,7 @@ from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from core.cache_utils import safe_cache_delete, safe_cache_get, safe_cache_set
 from core.models import (
     CachedEpisode,
     CachedShow,
@@ -74,6 +74,106 @@ class HealthCheckView(APIView):
         return Response({"status": "ok"})
 
 
+DISCOVER_FEED_CACHE_TTL_SECONDS = 30 * 60  # 30 minutes
+
+
+def build_discover_feed_payload(media_type: str) -> dict:
+    """
+    Assembles the hero + sections payload for DiscoverFeedView, independent
+    of the request/response cycle so core.tasks.prewarm_discover_caches can
+    call this exact same path on a beat schedule (see that task's docstring)
+    instead of duplicating the section-building logic.
+    """
+    tmdb = TMDBService()
+
+    if media_type == "tv":
+        # These three TMDB calls are independent of each other but were
+        # run sequentially, so a cold cache (see services.py's use_cache
+        # TTLs) paid the sum of all three request+retry latencies on a
+        # single Discover Feed load. None of them depend on another's
+        # result, so running them on a small thread pool caps this
+        # request's TMDB-bound latency at the slowest single call.
+        with ThreadPoolExecutor(max_workers=3) as pool:
+            trending_future = pool.submit(tmdb.get_trending_shows, time_window="week")
+            popular_future = pool.submit(tmdb.get_popular_shows)
+            airing_future = pool.submit(tmdb.get_airing_today_shows)
+            trending = trending_future.result()
+            popular = popular_future.result()
+            airing = airing_future.result()
+
+        # Hero: first 8 trending with backdrop images
+        hero = [
+            item for item in trending.get("results", [])
+            if item.get("backdrop_path")
+        ][:8]
+
+        sections = [
+            {
+                "id": "trending_shows",
+                "title": "Trending This Week",
+                "items": trending.get("results", [])[:15],
+            },
+            {
+                "id": "airing_today",
+                "title": "Airing Today",
+                "items": airing.get("results", [])[:15],
+            },
+            {
+                "id": "popular_shows",
+                "title": "Popular Shows",
+                "items": popular.get("results", [])[:15],
+            },
+        ]
+    else:  # movie
+        # Same reasoning as the tv branch above — 4 independent TMDB
+        # calls bundled into one response, run concurrently instead of
+        # sequentially.
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            trending_future = pool.submit(tmdb.get_trending, media_type="movie", time_window="week")
+            popular_future = pool.submit(tmdb.get_popular_movies)
+            top_rated_future = pool.submit(tmdb.get_top_rated_movies)
+            coming_soon_future = pool.submit(tmdb.get_anticipated_movies)
+            trending = trending_future.result()
+            popular = popular_future.result()
+            top_rated = top_rated_future.result()
+            coming_soon = coming_soon_future.result()
+
+        # Trending results from the 'all' endpoint include backdrop_path
+        hero = [
+            item for item in trending.get("results", [])
+            if item.get("backdrop_path")
+        ][:8]
+
+        sections = [
+            {
+                "id": "trending_movies",
+                "title": "Trending This Week",
+                "items": trending.get("results", [])[:15],
+            },
+            {
+                "id": "popular_movies",
+                "title": "Popular Movies",
+                "items": popular.get("results", [])[:15],
+            },
+            {
+                "id": "top_rated_movies",
+                "title": "Top Rated",
+                "items": top_rated.get("results", [])[:15],
+            },
+            {
+                "id": "coming_soon",
+                "title": "Coming Soon",
+                "items": coming_soon.get("results", [])[:15],
+            },
+        ]
+
+    return {
+        "type": media_type,
+        "hero": hero,
+        "sections": sections,
+    }
+
+
 class DiscoverFeedView(APIView):
     """
     GET /api/discover/feed/?type=tv|movie  (default: tv)
@@ -91,6 +191,14 @@ class DiscoverFeedView(APIView):
 
     Minimises frontend network requests by bundling the hero + 3 content
     sections into a single response.
+
+    View-level cache (Phase 83 perf): the individual TMDB calls behind this
+    were already cached (services.py's use_cache, 1h TTL), but every single
+    request still paid 3-4 Redis round trips plus the section-assembly work
+    above to rebuild an identical response. 30 minutes — short enough that
+    "Trending This Week" doesn't feel stale, long enough that Discover's
+    first load of a session is one Redis GET instead of several plus
+    rebuilding the same dict every time.
     """
     permission_classes = [IsAuthenticated]
 
@@ -99,94 +207,14 @@ class DiscoverFeedView(APIView):
         if media_type not in ("tv", "movie"):
             media_type = "tv"
 
-        tmdb = TMDBService()
+        cache_key = f"discover_feed_{media_type}"
+        cached = safe_cache_get(cache_key)
+        if cached is not None:
+            return Response(cached)
 
-        if media_type == "tv":
-            # These three TMDB calls are independent of each other but were
-            # run sequentially, so a cold cache (see services.py's use_cache
-            # TTLs) paid the sum of all three request+retry latencies on a
-            # single Discover Feed load. None of them depend on another's
-            # result, so running them on a small thread pool caps this
-            # request's TMDB-bound latency at the slowest single call.
-            with ThreadPoolExecutor(max_workers=3) as pool:
-                trending_future = pool.submit(tmdb.get_trending_shows, time_window="week")
-                popular_future = pool.submit(tmdb.get_popular_shows)
-                airing_future = pool.submit(tmdb.get_airing_today_shows)
-                trending = trending_future.result()
-                popular = popular_future.result()
-                airing = airing_future.result()
-
-            # Hero: first 8 trending with backdrop images
-            hero = [
-                item for item in trending.get("results", [])
-                if item.get("backdrop_path")
-            ][:8]
-
-            sections = [
-                {
-                    "id": "trending_shows",
-                    "title": "Trending This Week",
-                    "items": trending.get("results", [])[:15],
-                },
-                {
-                    "id": "airing_today",
-                    "title": "Airing Today",
-                    "items": airing.get("results", [])[:15],
-                },
-                {
-                    "id": "popular_shows",
-                    "title": "Popular Shows",
-                    "items": popular.get("results", [])[:15],
-                },
-            ]
-        else:  # movie
-            # Same reasoning as the tv branch above — 4 independent TMDB
-            # calls bundled into one response, run concurrently instead of
-            # sequentially.
-            with ThreadPoolExecutor(max_workers=4) as pool:
-                trending_future = pool.submit(tmdb.get_trending, media_type="movie", time_window="week")
-                popular_future = pool.submit(tmdb.get_popular_movies)
-                top_rated_future = pool.submit(tmdb.get_top_rated_movies)
-                coming_soon_future = pool.submit(tmdb.get_anticipated_movies)
-                trending = trending_future.result()
-                popular = popular_future.result()
-                top_rated = top_rated_future.result()
-                coming_soon = coming_soon_future.result()
-
-            # Trending results from the 'all' endpoint include backdrop_path
-            hero = [
-                item for item in trending.get("results", [])
-                if item.get("backdrop_path")
-            ][:8]
-
-            sections = [
-                {
-                    "id": "trending_movies",
-                    "title": "Trending This Week",
-                    "items": trending.get("results", [])[:15],
-                },
-                {
-                    "id": "popular_movies",
-                    "title": "Popular Movies",
-                    "items": popular.get("results", [])[:15],
-                },
-                {
-                    "id": "top_rated_movies",
-                    "title": "Top Rated",
-                    "items": top_rated.get("results", [])[:15],
-                },
-                {
-                    "id": "coming_soon",
-                    "title": "Coming Soon",
-                    "items": coming_soon.get("results", [])[:15],
-                },
-            ]
-
-        return Response({
-            "type": media_type,
-            "hero": hero,
-            "sections": sections,
-        })
+        payload = build_discover_feed_payload(media_type)
+        safe_cache_set(cache_key, payload, timeout=DISCOVER_FEED_CACHE_TTL_SECONDS)
+        return Response(payload)
 
 
 class DiscoverFilterView(APIView):
@@ -327,6 +355,43 @@ class DiscoverFilterView(APIView):
         return Response(data, status=status.HTTP_200_OK)
 
 
+DISCOVER_GENRE_COVERS_CACHE_TTL_SECONDS = 60 * 60 * 24
+DISCOVER_TV_GENRE_IDS = [10759, 16, 35, 80, 99, 18, 10751, 10762, 9648, 10763, 10764, 10765, 10766, 10767, 10768, 37]
+DISCOVER_MOVIE_GENRE_IDS = [28, 12, 16, 35, 80, 99, 18, 10751, 14, 36, 27, 10402, 9648, 10749, 878, 53]
+
+
+def build_genre_covers_payload(media_type: str) -> list[dict]:
+    """
+    Fetches (uncached) the top popular title's backdrop/poster per genre for
+    `media_type`. Split out of DiscoverGenresView so
+    core.tasks.prewarm_discover_caches can populate the same cache key this
+    view reads from without duplicating the fetch logic.
+    """
+    tmdb = TMDBService()
+    genre_ids = DISCOVER_TV_GENRE_IDS if media_type == "tv" else DISCOVER_MOVIE_GENRE_IDS
+
+    # Was a sequential loop — 16 independent TMDB calls on a 24h cache
+    # miss, blocking one of the app's 4 gunicorn threads for the sum of
+    # all 16 instead of the slowest single one. Same ThreadPoolExecutor
+    # pattern as DiscoverFeedView and get_popular_characters() (services.py)
+    # — pool.map preserves genre_ids' order in its results regardless of
+    # completion order.
+    def _fetch_genre_cover(genre_id: int) -> dict:
+        if media_type == "tv":
+            data = tmdb.discover_tv(genre_id=genre_id, sort_by="popularity.desc", page=1)
+        else:
+            data = tmdb.discover_movies(genre_id=genre_id, sort_by="popularity.desc", page=1)
+        top = data["results"][0] if data.get("results") else None
+        return {
+            "id": genre_id,
+            "backdrop_path": top.get("backdrop_path") if top else None,
+            "poster_path": top.get("poster_path") if top else None,
+        }
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        return list(pool.map(_fetch_genre_cover, genre_ids))
+
+
 class DiscoverGenresView(APIView):
     """
     GET /api/discover/genres/?type=tv|movie
@@ -349,10 +414,7 @@ class DiscoverGenresView(APIView):
     """
 
     permission_classes = [IsAuthenticated]
-    CACHE_TTL_SECONDS = 60 * 60 * 24
-
-    TV_GENRE_IDS = [10759, 16, 35, 80, 99, 18, 10751, 10762, 9648, 10763, 10764, 10765, 10766, 10767, 10768, 37]
-    MOVIE_GENRE_IDS = [28, 12, 16, 35, 80, 99, 18, 10751, 14, 36, 27, 10402, 9648, 10749, 878, 53]
+    CACHE_TTL_SECONDS = DISCOVER_GENRE_COVERS_CACHE_TTL_SECONDS
 
     def get(self, request):
         media_type = request.query_params.get("type", "tv").lower()
@@ -360,35 +422,12 @@ class DiscoverGenresView(APIView):
             media_type = "tv"
 
         cache_key = f"discover_genre_covers_{media_type}"
-        cached = cache.get(cache_key)
+        cached = safe_cache_get(cache_key)
         if cached is not None:
             return Response(cached, status=status.HTTP_200_OK)
 
-        tmdb = TMDBService()
-        genre_ids = self.TV_GENRE_IDS if media_type == "tv" else self.MOVIE_GENRE_IDS
-
-        # Was a sequential loop — 16 independent TMDB calls on a 24h cache
-        # miss, blocking one of the app's 4 gunicorn threads for the sum of
-        # all 16 instead of the slowest single one. Same ThreadPoolExecutor
-        # pattern as DiscoverFeedView (:109) and get_popular_characters()
-        # (services.py) — pool.map preserves genre_ids' order in its
-        # results regardless of completion order.
-        def _fetch_genre_cover(genre_id: int) -> dict:
-            if media_type == "tv":
-                data = tmdb.discover_tv(genre_id=genre_id, sort_by="popularity.desc", page=1)
-            else:
-                data = tmdb.discover_movies(genre_id=genre_id, sort_by="popularity.desc", page=1)
-            top = data["results"][0] if data.get("results") else None
-            return {
-                "id": genre_id,
-                "backdrop_path": top.get("backdrop_path") if top else None,
-                "poster_path": top.get("poster_path") if top else None,
-            }
-
-        with ThreadPoolExecutor(max_workers=8) as pool:
-            results = list(pool.map(_fetch_genre_cover, genre_ids))
-
-        cache.set(cache_key, results, timeout=self.CACHE_TTL_SECONDS)
+        results = build_genre_covers_payload(media_type)
+        safe_cache_set(cache_key, results, timeout=self.CACHE_TTL_SECONDS)
         return Response(results, status=status.HTTP_200_OK)
 
 
@@ -418,7 +457,7 @@ class WatchlistView(APIView):
         fetch_all = request.query_params.get("page_size") == "all"
         cache_key = watchlist_cache_key(request.user.id)
         if fetch_all:
-            cached = cache.get(cache_key)
+            cached = safe_cache_get(cache_key)
             if cached is not None:
                 return Response(cached, status=status.HTTP_200_OK)
 
@@ -613,7 +652,7 @@ class WatchlistView(APIView):
                 }
 
         if fetch_all:
-            cache.set(cache_key, paginated, timeout=CACHE_TTL_SECONDS)
+            safe_cache_set(cache_key, paginated, timeout=CACHE_TTL_SECONDS)
 
         return Response(paginated, status=status.HTTP_200_OK)
 
@@ -817,7 +856,7 @@ class BulkWatchStateToggleView(APIView):
                     # way signals.py's own receivers do.
                     recalculate_user_badges(request.user.id)
                     recalculate_watch_streak(request.user.id)
-                    transaction.on_commit(lambda: cache.delete(watchlist_cache_key(request.user.id)))
+                    transaction.on_commit(lambda: safe_cache_delete(watchlist_cache_key(request.user.id)))
             else:
                 # Only delete states that currently exist
                 to_delete = [ep for ep in episodes if ep.pk in existing_states]
@@ -1426,7 +1465,7 @@ class MovieWatchlistView(APIView):
         # cache_keys.py and signals.py's invalidation receivers. This
         # endpoint is always a full unpaginated fetch, so no fetch_all gate.
         cache_key = movie_watchlist_cache_key(request.user.id)
-        cached = cache.get(cache_key)
+        cached = safe_cache_get(cache_key)
         if cached is not None:
             return Response(cached, status=status.HTTP_200_OK)
 
@@ -1469,7 +1508,7 @@ class MovieWatchlistView(APIView):
             "watch_next": MovieWatchlistSerializer(watch_next, many=True, context=context).data,
             "watched": MovieWatchlistSerializer(watched, many=True, context=context).data,
         }
-        cache.set(cache_key, payload, timeout=CACHE_TTL_SECONDS)
+        safe_cache_set(cache_key, payload, timeout=CACHE_TTL_SECONDS)
         return Response(payload, status=status.HTTP_200_OK)
 
 

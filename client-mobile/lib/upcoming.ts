@@ -56,6 +56,14 @@ export interface UpcomingItem {
    *  device-local time — see formatLocalAirTime. */
   airsTime: string | null;
   airsTimezone: string | null;
+  /** Carried through from Show.air_time_source (backend: CachedShow,
+   *  core/airtime.py) — which tier resolved airsTime/airsTimezone above.
+   *  'platform_estimate' means the pair is a well-known streaming-platform
+   *  convention (e.g. "Netflix drops at midnight Pacific"), not a
+   *  confirmed TVmaze value; consumers combine this with airDateTime to
+   *  decide whether to mark a rendered time with formatLocalAirTime's "~"
+   *  — see the isEstimated computation at both widget renderers. */
+  airTimeSource?: 'tvmaze_exact' | 'tvmaze_slot' | 'platform_estimate' | '' | null;
 }
 
 const PAST_WINDOW_MS = PAST_WINDOW_DAYS * 24 * 60 * 60 * 1000;
@@ -109,6 +117,7 @@ export function buildUpcomingItems(entries: WatchlistEntry[]): UpcomingItem[] {
         episodeId: missed.tmdb_id,
         airsTime: show.airs_time ?? null,
         airsTimezone: show.airs_timezone ?? null,
+        airTimeSource: show.air_time_source,
       });
     }
 
@@ -128,6 +137,7 @@ export function buildUpcomingItems(entries: WatchlistEntry[]): UpcomingItem[] {
         episodeId: episode.tmdb_id,
         airsTime: show.airs_time ?? null,
         airsTimezone: show.airs_timezone ?? null,
+        airTimeSource: show.air_time_source,
       });
     }
     // TMDB's next_episode_to_air (see Show.next_episode_*) surfaces a real
@@ -158,6 +168,7 @@ export function buildUpcomingItems(entries: WatchlistEntry[]): UpcomingItem[] {
         episodeId: null,
         airsTime: show.airs_time ?? null,
         airsTimezone: show.airs_timezone ?? null,
+        airTimeSource: show.air_time_source,
       });
     }
   }

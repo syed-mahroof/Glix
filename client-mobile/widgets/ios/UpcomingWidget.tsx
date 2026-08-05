@@ -8,7 +8,9 @@ import {
   formatDayBadge,
   formatLocalAirTime,
   formatUpcomingHeaderLabel,
+  formatWeekdayShort,
   resolveDisplayDateIso,
+  shouldAppendWeekday,
 } from '../../lib/dateFormat';
 
 export interface UpcomingWidgetShow {
@@ -29,6 +31,12 @@ export interface UpcomingWidgetShow {
    *  pre-existing cached snapshots. */
   airs_time?: string | null;
   airs_timezone?: string | null;
+  /** Carried through from Show.air_time_source (see UpcomingItem.airTimeSource
+   *  in lib/upcoming.ts) — which tier resolved airs_time/airs_timezone
+   *  above. Combined with air_datetime below to derive isEstimated for the
+   *  formatLocalAirTime call, so a platform-estimate time renders with a
+   *  "~" instead of identically to a confirmed one. */
+  air_time_source?: 'tvmaze_exact' | 'tvmaze_slot' | 'platform_estimate' | '' | null;
 }
 
 export interface UpcomingWidgetProps {
@@ -65,11 +73,29 @@ const NullState = ({ upcoming, loggedOut }: UpcomingWidgetProps) => {
 // well after the app last ran and never re-renders live, so a static
 // countdown was stale the instant it appeared. The day badge plus the
 // resolved local air time are the whole release-time line now.
-function UpcomingRowView({ show, compact }: { show: UpcomingWidgetShow; compact?: boolean }) {
+//
+// `label` is the resolved DayLabel label this row is grouped under
+// (computed once per visible row by Layout, see `labels` below) — passed
+// down purely so shouldAppendWeekday can decide whether this row's
+// subtitle needs its own "(Wed)" suffix, for rows sitting under a header
+// that doesn't already name a weekday (an absolute date, or 'LATER').
+function UpcomingRowView({ show, compact, label }: { show: UpcomingWidgetShow; compact?: boolean; label: string }) {
   const now = new Date();
   const displayDateIso = resolveDisplayDateIso(show.air_date, show.air_datetime, show.airs_time, show.airs_timezone);
   const dayBadge = formatDayBadge(displayDateIso, now);
-  const airTime = formatLocalAirTime(show.air_date, show.air_datetime, show.airs_time, show.airs_timezone);
+  // A platform-estimate slot (backend: CachedShow.air_time_source, see
+  // core/airtime.py) rides the same airs_time/airs_timezone pair as a
+  // confirmed TVmaze slot, so it resolves and orders identically — only
+  // the displayed string needs to own up to being a guess. Excluded the
+  // moment a real per-episode airDateTime is known (even for an otherwise
+  // platform_estimate-sourced show), since that instant is never a guess.
+  const isEstimated =
+    show.airs_time != null &&
+    show.airs_timezone != null &&
+    show.air_time_source === 'platform_estimate' &&
+    show.air_datetime == null;
+  const airTime = formatLocalAirTime(show.air_date, show.air_datetime, show.airs_time, show.airs_timezone, isEstimated);
+  const weekdaySuffix = shouldAppendWeekday(label) ? ` (${formatWeekdayShort(displayDateIso)})` : '';
   return (
     <HStack alignment="center" spacing={10} modifiers={[padding({ vertical: compact ? 4 : 6 })]}>
       {/* @expo/ui's SwiftUI `Image` bridge (installed ~0.2.0-beta.9) only
@@ -92,7 +118,7 @@ function UpcomingRowView({ show, compact }: { show: UpcomingWidgetShow; compact?
         <Text
           modifiers={[foregroundColor('rgba(255, 255, 255, 0.55)'), font({ size: compact ? 11 : 12 }), lineLimit(1)]}
         >
-          {show.next_episode}
+          {`${show.next_episode}${weekdaySuffix}`}
         </Text>
       </VStack>
       <Spacer />
@@ -183,7 +209,9 @@ function Layout(props: UpcomingWidgetProps, environment: WidgetEnvironment) {
       rows.push(<DayLabel key={`head-${label}`} label={label} count={labelCounts.get(label)!} />);
       lastLabel = label;
     }
-    rows.push(<UpcomingRowView key={`${show.title}-${show.air_date}-${idx}`} show={show} compact={compact} />);
+    rows.push(
+      <UpcomingRowView key={`${show.title}-${show.air_date}-${idx}`} show={show} compact={compact} label={label} />
+    );
   });
 
   return (

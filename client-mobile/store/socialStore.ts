@@ -1,12 +1,23 @@
 // client-mobile/store/socialStore.ts
-// Non-persisted, in-memory Zustand store for the follow graph, user
-// search, public profiles, and the friends activity feed (Phase 74) —
-// mirrors listsStore.ts's precedent rather than growing the already
-// 1300+-line persisted watchStore.ts further. Nothing here is worth
-// surviving an app restart offline.
+// Mostly in-memory Zustand store for the follow graph, user search, public
+// profiles, and the friends activity feed (Phase 74) — mirrors
+// listsStore.ts's precedent rather than growing the already 1300+-line
+// persisted watchStore.ts further.
+//
+// Phase 83 (C13) stale-while-revalidate: only activityFeed's first page is
+// now persisted (debounced, same storage as watchStore/discoverStore), so
+// Community's Activity tab paints the last-seen feed immediately on a cold
+// start instead of a bare spinner. community.tsx's ActivityTab already
+// calls fetchActivityFeed(1) unconditionally on every mount — that becomes
+// the background revalidation for free, no new session-guard needed the
+// way discoverStore required. Search results, profiles, followers/
+// following, and deeper feed pages stay unpersisted: all per-navigation
+// snapshots, not something a returning visit should paint stale.
 
 import { create } from 'zustand';
+import { persist } from 'zustand/middleware';
 import { api } from '../lib/api';
+import { createDebouncedStorage } from '../lib/persistStorage';
 import { extractErrorMessage } from '../lib/errors';
 
 export interface PublicUser {
@@ -114,6 +125,11 @@ interface SocialStoreState {
   isLoadingConnections: boolean;
 
   activityFeed: ActivityCard[];
+  /** When activityFeed's page 1 was last fetched live — persisted
+   *  alongside it so the UI can flag a stale-while-revalidate snapshot
+   *  instead of silently presenting it as fresh (C13). Only meaningful for
+   *  page 1; deeper pages are never persisted. */
+  activityFeedFetchedAt: number | null;
   isLoadingFeed: boolean;
   feedPage: number;
   hasMoreFeed: boolean;
@@ -129,7 +145,9 @@ interface SocialStoreState {
   fetchActivityFeed: (page?: number) => Promise<void>;
 }
 
-export const useSocialStore = create<SocialStoreState>()((set, get) => ({
+export const useSocialStore = create<SocialStoreState>()(
+  persist(
+    (set, get) => ({
   searchResults: [],
   isSearching: false,
   searchError: null,
@@ -142,6 +160,7 @@ export const useSocialStore = create<SocialStoreState>()((set, get) => ({
   isLoadingConnections: false,
 
   activityFeed: [],
+  activityFeedFetchedAt: null,
   isLoadingFeed: false,
   feedPage: 1,
   hasMoreFeed: true,
@@ -272,6 +291,11 @@ export const useSocialStore = create<SocialStoreState>()((set, get) => ({
   },
 
   fetchActivityFeed: async (page = 1) => {
+    // Deliberately not clearing activityFeed/showing a blocking spinner
+    // here (C13) — ActivityTab (community.tsx) already renders real cards
+    // whenever activityFeed is non-empty regardless of isLoadingFeed,
+    // which is what lets a stale persisted page-1 snapshot stay on screen
+    // while this call's own unconditional-on-mount fetch resolves.
     set({ isLoadingFeed: true, error: null });
     try {
       const response = await api.get<PaginatedResponse<ActivityCard>>('/feed/activity/', {
@@ -279,6 +303,7 @@ export const useSocialStore = create<SocialStoreState>()((set, get) => ({
       });
       set((state) => ({
         activityFeed: page === 1 ? response.data.results : [...state.activityFeed, ...response.data.results],
+        activityFeedFetchedAt: page === 1 ? Date.now() : state.activityFeedFetchedAt,
         feedPage: page,
         hasMoreFeed: response.data.next !== null,
         isLoadingFeed: false,
@@ -287,4 +312,18 @@ export const useSocialStore = create<SocialStoreState>()((set, get) => ({
       set({ error: extractErrorMessage(error), isLoadingFeed: false });
     }
   },
-}));
+    }),
+    {
+      name: 'social-store',
+      storage: createDebouncedStorage(),
+      // Only activityFeed's first page is worth painting stale on a cold
+      // start (C13) — search/profile/follower lookups are per-navigation
+      // snapshots, and every loading/error/pagination field must start
+      // fresh each session.
+      partialize: (state) => ({
+        activityFeed: state.activityFeed,
+        activityFeedFetchedAt: state.activityFeedFetchedAt,
+      }),
+    }
+  )
+);

@@ -2,7 +2,7 @@
 import { Image } from 'expo-image';
 import { useRouter } from 'expo-router';
 import { ChevronDown, ChevronUp, X } from 'lucide-react-native';
-import React, { memo, useCallback, useState } from 'react';
+import React, { memo, useCallback, useEffect, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
@@ -70,6 +70,33 @@ function CommentCardComponent({ comment: initialComment, onPress }: CommentCardP
   const [areRepliesLoaded, setAreRepliesLoaded] = useState(false);
   const [areRepliesExpanded, setAreRepliesExpanded] = useState(false);
   const [isLoadingReplies, setIsLoadingReplies] = useState(false);
+
+  // Phase 83 perf (FlashList migration): every piece of state above is
+  // local to whichever comment this cell currently shows — useState's
+  // initializer only runs once per component *instance*, but FlashList
+  // reuses instances across rows as it recycles cells during scroll.
+  // Without this, a cell recycled for a different comment kept showing the
+  // previous comment's optimistic like state, open reply composer,
+  // expanded/loaded replies, and even its stale `comment` body — not just
+  // a cosmetic glitch, since is_liked_by_user/reply_count could genuinely
+  // belong to the wrong comment. Same reset-on-recycle pattern as
+  // ShowRow.tsx/EpisodeRow.tsx, keyed on the comment identity actually
+  // changing underneath this instance (not on every prop update — an
+  // in-place refresh of the same comment intentionally leaves in-progress
+  // local state, e.g. optimistic like/edit, untouched, matching this
+  // component's pre-existing behavior for that case).
+  useEffect(() => {
+    setComment(initialComment);
+    setIsReplying(false);
+    setIsEditing(false);
+    setIsReportVisible(false);
+    setError(null);
+    setReplies([]);
+    setAreRepliesLoaded(false);
+    setAreRepliesExpanded(false);
+    setIsLoadingReplies(false);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initialComment.id]);
 
   const handleToggleLike = useCallback(async () => {
     const previous = comment;

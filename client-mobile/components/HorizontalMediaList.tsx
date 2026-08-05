@@ -36,7 +36,7 @@ interface Props {
   items: MediaItem[];
 }
 
-export default function HorizontalMediaList({ title, items }: Props) {
+function HorizontalMediaList({ title, items }: Props) {
   const router = useRouter();
   const { theme } = useAppTheme();
   const c = theme.colors;
@@ -83,6 +83,8 @@ export default function HorizontalMediaList({ title, items }: Props) {
                     style={styles.poster}
                     contentFit="cover"
                     transition={200}
+                    recyclingKey={`${item.media_type}-${item.tmdb_id}`}
+                    cachePolicy="memory-disk"
                   />
                   {/* Rating badge bottom-left — sits on the poster photo itself,
                       so it keeps a fixed dark scrim in both themes (same as
@@ -107,6 +109,8 @@ export default function HorizontalMediaList({ title, items }: Props) {
     </View>
   );
 }
+
+export default React.memo(HorizontalMediaList);
 
 const styles = StyleSheet.create({
   container: {
