@@ -29,7 +29,8 @@ from datetime import timezone as dt_timezone
 
 from celery import shared_task
 from django.core.cache import cache
-from django.db.models import Count, F
+from django.db.models import Count, F, IntegerField, JSONField
+from django.db.models.expressions import RawSQL
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 
@@ -863,6 +864,67 @@ def _import_one_movie(tmdb: TMDBService, user, item: dict, errors: list):
 IMPORT_CHUNK_SIZE = 10  # shows+movies processed per invocation, see docstring below
 
 
+def _payload_counts(job_id: str) -> tuple[int, int]:
+    """(len(payload["shows"]), len(payload["movies"])) computed in Postgres.
+
+    Returns two integers instead of shipping the whole ~3MB jsonb over the
+    wire just to call len() on it — see _payload_slice.
+    """
+    row = (
+        ImportJob.objects.filter(pk=job_id)
+        .annotate(
+            n_shows=RawSQL(
+                "coalesce(jsonb_array_length(payload -> 'shows'), 0)",
+                (),
+                output_field=IntegerField(),
+            ),
+            n_movies=RawSQL(
+                "coalesce(jsonb_array_length(payload -> 'movies'), 0)",
+                (),
+                output_field=IntegerField(),
+            ),
+        )
+        .values("n_shows", "n_movies")
+        .first()
+    )
+    if row is None:
+        return 0, 0
+    return row["n_shows"], row["n_movies"]
+
+
+def _payload_slice(job_id: str, key: str, start: int, end: int) -> list:
+    """payload[key][start:end], sliced inside Postgres.
+
+    The whole reason run_tvtime_import defers `payload`: a chunk needs
+    IMPORT_CHUNK_SIZE items but ImportJob.objects.get() shipped the entire
+    multi-MB jsonb out of the database on every one of a job's ~N/10
+    invocations (and again on every resume_stalled_imports re-enqueue),
+    which was the dominant source of this project's Postgres egress bill.
+    jsonpath ranges are inclusive at both ends, hence `end - 1`; callers
+    clamp start/end against _payload_counts so the range is never
+    out of bounds.
+    """
+    if end <= start:
+        return []
+    row = (
+        ImportJob.objects.filter(pk=job_id)
+        .annotate(
+            chunk=RawSQL(
+                "coalesce("
+                "  jsonb_path_query_array("
+                "    payload -> %s,"
+                "    ('$[' || %s::int || ' to ' || %s::int || ']')::jsonpath"
+                "  ), '[]'::jsonb)",
+                (key, start, end - 1),
+                output_field=JSONField(),
+            )
+        )
+        .values("chunk")
+        .first()
+    )
+    return (row or {}).get("chunk") or []
+
+
 @shared_task(bind=True, soft_time_limit=300, time_limit=330)
 def run_tvtime_import(self, job_id: str):
     """
@@ -914,15 +976,13 @@ def run_tvtime_import(self, job_id: str):
     mirroring the F() pattern WatchStateToggleView already uses.
     """
     try:
-        job = ImportJob.objects.get(pk=job_id)
+        job = ImportJob.objects.defer("payload").get(pk=job_id)
     except ImportJob.DoesNotExist:
         logger.warning("run_tvtime_import: job %s vanished before start", job_id)
         return
 
-    payload = job.payload or {}
-    shows = payload.get("shows") or []
-    movies = payload.get("movies") or []
-    total_items = len(shows) + len(movies)
+    n_shows, n_movies = _payload_counts(job_id)
+    total_items = n_shows + n_movies
 
     if job.status == ImportJob.Status.PENDING:
         job.status = ImportJob.Status.RUNNING
@@ -936,10 +996,22 @@ def run_tvtime_import(self, job_id: str):
     start = job.processed
     chunk_end = min(start + IMPORT_CHUNK_SIZE, total_items)
 
+    # Only this chunk's items leave Postgres. Same traversal order as
+    # before: absolute indices 0..n_shows-1 are shows, the rest movies.
+    chunk = [
+        ("show", item)
+        for item in _payload_slice(job_id, "shows", start, min(chunk_end, n_shows))
+    ] + [
+        ("movie", item)
+        for item in _payload_slice(
+            job_id, "movies", max(start - n_shows, 0), max(chunk_end - n_shows, 0)
+        )
+    ]
+
     try:
-        for idx in range(start, chunk_end):
-            if idx < len(shows):
-                item = shows[idx]
+        for offset, (kind, item) in enumerate(chunk):
+            idx = start + offset
+            if kind == "show":
                 try:
                     imported, marked, runtime = _import_one_show(tmdb, user, item, errors)
                     if imported:
@@ -954,7 +1026,6 @@ def run_tvtime_import(self, job_id: str):
                         errors.append(f"Error importing show '{item.get('title')}': {exc}")
                     job.shows_skipped += 1
             else:
-                item = movies[idx - len(shows)]
                 try:
                     imported, runtime = _import_one_movie(tmdb, user, item, errors)
                     if imported:

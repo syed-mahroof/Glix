@@ -1829,7 +1829,8 @@ class TVTimeImportView(APIView):
             )
 
         in_flight = (
-            ImportJob.objects.filter(
+            ImportJob.objects.defer("payload")
+            .filter(
                 user=request.user,
                 status__in=[ImportJob.Status.PENDING, ImportJob.Status.RUNNING],
             )
@@ -1870,7 +1871,8 @@ class TVTimeImportView(APIView):
         # falling through to a fresh job below — correct, if not optimally
         # resumed, and self-healing after one such job ages out.
         resumable = (
-            ImportJob.objects.filter(
+            ImportJob.objects.defer("payload")
+            .filter(
                 user=request.user,
                 status=ImportJob.Status.FAILED,
                 payload_fingerprint=submitted_fingerprint,
@@ -1916,5 +1918,13 @@ class ImportJobStatusView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request, job_id):
-        job = get_object_or_404(ImportJob, pk=job_id, user=request.user)
+        # .defer("payload"): this view is polled every 1.5s for the
+        # duration of an import (client-mobile/lib/migration.ts's
+        # pollImportJob) and ImportJobSerializer never exposes `payload`
+        # (multi-MB staged input) — fetching it from Postgres on every
+        # poll was pure wasted egress, the dominant source of it in
+        # practice, with zero effect on the response.
+        job = get_object_or_404(
+            ImportJob.objects.defer("payload"), pk=job_id, user=request.user
+        )
         return Response(ImportJobSerializer(job).data, status=status.HTTP_200_OK)
