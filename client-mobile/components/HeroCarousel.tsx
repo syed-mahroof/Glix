@@ -8,6 +8,7 @@ import Animated, {
   Extrapolation,
   interpolate,
   runOnJS,
+  SharedValue,
   useAnimatedScrollHandler,
   useAnimatedStyle,
   useSharedValue,
@@ -18,6 +19,11 @@ import { useAppTheme } from '../lib/theme';
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
 const HEIGHT = 450;
+// Full-bleed at SCREEN_WIDTH: on a 3x-density phone (iPhone Pro / most
+// Android flagships, ~390-430pt wide) that's ~1170-1290 physical pixels —
+// w1280 is the correctly-sized TMDB backdrop tier for this, not oversized.
+// (A smaller tier here would visibly soften the one image in the app most
+// meant to be admired full-screen; left at TMDB's native choice.)
 const POSTER_BASE_URL = 'https://image.tmdb.org/t/p/w1280';
 
 // This component renders entirely over a full-bleed backdrop photo with a
@@ -78,6 +84,100 @@ function useAutoPlay(scrollRef: React.RefObject<Animated.ScrollView | null>, ite
   return { currentIndex, setCurrentIndex, startTimer };
 }
 
+// Bug fix (2026-08-07): this body used to live inline inside HeroCarousel's
+// `items.map(...)`, calling useAnimatedStyle() once per item — a
+// Rules-of-Hooks violation (the number of hooks HeroCarousel itself calls
+// changed whenever items.length did, e.g. the Discover feed hero
+// refreshing from a persisted snapshot to a server response), which throws
+// "Rendered more/fewer hooks than during the previous render" and, short of
+// throwing, forces every item's shared-value subscription to be torn down
+// and rebuilt on every render regardless. Extracting one hook call per
+// component instance is the actual fix, not just a style preference —
+// React tracks hook identity per component instance/key here, so
+// items.length changing just mounts/unmounts whole HeroSlide instances.
+interface HeroSlideProps {
+  item: HeroMedia;
+  index: number;
+  scrollX: SharedValue<number>;
+  onPress: (item: HeroMedia) => void;
+}
+
+const HeroSlide = React.memo(function HeroSlide({ item, index, scrollX, onPress }: HeroSlideProps) {
+  const animatedStyle = useAnimatedStyle(() => {
+    const inputRange = [(index - 1) * SCREEN_WIDTH, index * SCREEN_WIDTH, (index + 1) * SCREEN_WIDTH];
+    const translateX = interpolate(
+      scrollX.value,
+      inputRange,
+      [SCREEN_WIDTH * 0.4, 0, -SCREEN_WIDTH * 0.4],
+      Extrapolation.CLAMP
+    );
+    return {
+      transform: [{ translateX }],
+    };
+  });
+
+  return (
+    <View style={styles.slide}>
+      <Animated.View style={[styles.imageContainer, animatedStyle]}>
+        <Image
+          source={{ uri: `${POSTER_BASE_URL}${item.backdrop_path}` }}
+          style={styles.image}
+          contentFit="cover"
+          transition={200}
+          cachePolicy="memory-disk"
+        />
+      </Animated.View>
+
+      {/* Gradient Overlay */}
+      <LinearGradient
+        colors={['transparent', 'rgba(0,0,0,0.4)', 'rgba(0,0,0,0.95)', '#000000']}
+        locations={[0, 0.4, 0.8, 1]}
+        style={styles.gradient}
+      />
+
+      {/* Content */}
+      <View style={styles.content}>
+        <View style={styles.badge}>
+          <Text style={styles.badgeText}>{item.media_type === 'movie' ? 'MOVIE' : 'SERIES'}</Text>
+        </View>
+        <Text style={styles.title} numberOfLines={2}>
+          {item.title}
+        </Text>
+        <Text style={styles.overview} numberOfLines={2}>
+          {item.overview}
+        </Text>
+
+        <PressableScale style={styles.btn} onPress={() => onPress(item)}>
+          <Text style={styles.btnText}>View Details</Text>
+        </PressableScale>
+      </View>
+    </View>
+  );
+});
+
+interface HeroDotProps {
+  index: number;
+  scrollX: SharedValue<number>;
+  accentFill: string;
+}
+
+const HeroDot = React.memo(function HeroDot({ index, scrollX, accentFill }: HeroDotProps) {
+  const dotStyle = useAnimatedStyle(() => {
+    const inputRange = [(index - 1) * SCREEN_WIDTH, index * SCREEN_WIDTH, (index + 1) * SCREEN_WIDTH];
+    const width = interpolate(scrollX.value, inputRange, [8, 20, 8], Extrapolation.CLAMP);
+    const opacity = interpolate(scrollX.value, inputRange, [0.3, 1, 0.3], Extrapolation.CLAMP);
+    const isActive =
+      scrollX.value >= index * SCREEN_WIDTH - SCREEN_WIDTH / 2 &&
+      scrollX.value <= index * SCREEN_WIDTH + SCREEN_WIDTH / 2;
+    return {
+      width,
+      opacity,
+      backgroundColor: isActive ? accentFill : 'rgba(255,255,255,0.8)',
+    };
+  });
+  return <Animated.View style={[styles.dot, dotStyle]} />;
+});
+
 function HeroCarousel({ items }: Props) {
   const router = useRouter();
   const { theme } = useAppTheme();
@@ -86,7 +186,7 @@ function HeroCarousel({ items }: Props) {
   const scrollRef = useRef<Animated.ScrollView>(null);
   const isFocused = useIsFocused();
 
-  const { setCurrentIndex, startTimer } = useAutoPlay(scrollRef, items.length, isFocused);
+  const { setCurrentIndex } = useAutoPlay(scrollRef, items.length, isFocused);
 
   const scrollHandler = useAnimatedScrollHandler({
     onScroll: (event) => {
@@ -123,109 +223,23 @@ function HeroCarousel({ items }: Props) {
         showsHorizontalScrollIndicator={false}
         onScroll={scrollHandler}
         scrollEventThrottle={16}
-        onTouchStart={() => {
-          // Pause autoplay on touch? Can get complex. Usually just fine to let user scroll.
-        }}
       >
-        {items.map((item, index) => {
-          // Calculate parallax transformation for each item
-          const animatedStyle = useAnimatedStyle(() => {
-            const inputRange = [
-              (index - 1) * SCREEN_WIDTH,
-              index * SCREEN_WIDTH,
-              (index + 1) * SCREEN_WIDTH,
-            ];
-            const translateX = interpolate(
-              scrollX.value,
-              inputRange,
-              [SCREEN_WIDTH * 0.4, 0, -SCREEN_WIDTH * 0.4],
-              Extrapolation.CLAMP
-            );
-            return {
-              transform: [{ translateX }],
-            };
-          });
-
-          return (
-            <View style={styles.slide} key={`${item.media_type}-${item.tmdb_id}`}>
-              <Animated.View style={[styles.imageContainer, animatedStyle]}>
-                <Image
-                  source={{ uri: `${POSTER_BASE_URL}${item.backdrop_path}` }}
-                  style={styles.image}
-                  contentFit="cover"
-                  transition={200}
-                />
-              </Animated.View>
-
-              {/* Gradient Overlay */}
-              <LinearGradient
-                colors={['transparent', 'rgba(0,0,0,0.4)', 'rgba(0,0,0,0.95)', '#000000']}
-                locations={[0, 0.4, 0.8, 1]}
-                style={styles.gradient}
-              />
-
-              {/* Content */}
-              <View style={styles.content}>
-                <View style={styles.badge}>
-                  <Text style={styles.badgeText}>
-                    {item.media_type === 'movie' ? 'MOVIE' : 'SERIES'}
-                  </Text>
-                </View>
-                <Text style={styles.title} numberOfLines={2}>
-                  {item.title}
-                </Text>
-                <Text style={styles.overview} numberOfLines={2}>
-                  {item.overview}
-                </Text>
-
-                <PressableScale
-                  style={styles.btn}
-                  onPress={() => handlePress(item)}
-                >
-                  <Text style={styles.btnText}>View Details</Text>
-                </PressableScale>
-              </View>
-            </View>
-          );
-        })}
+        {items.map((item, index) => (
+          <HeroSlide
+            key={`${item.media_type}-${item.tmdb_id}`}
+            item={item}
+            index={index}
+            scrollX={scrollX}
+            onPress={handlePress}
+          />
+        ))}
       </Animated.ScrollView>
 
       {/* Pagination dots */}
       <View style={styles.pagination}>
-        {items.map((_, i) => {
-          const dotStyle = useAnimatedStyle(() => {
-            const inputRange = [
-              (i - 1) * SCREEN_WIDTH,
-              i * SCREEN_WIDTH,
-              (i + 1) * SCREEN_WIDTH,
-            ];
-            const width = interpolate(
-              scrollX.value,
-              inputRange,
-              [8, 20, 8],
-              Extrapolation.CLAMP
-            );
-            const opacity = interpolate(
-              scrollX.value,
-              inputRange,
-              [0.3, 1, 0.3],
-              Extrapolation.CLAMP
-            );
-            const backgroundColor = interpolate(
-              scrollX.value,
-              inputRange,
-              [0, 1, 0],
-              Extrapolation.CLAMP
-            ) === 1 ? accentFill : 'rgba(255,255,255,0.8)';
-
-            return {
-              width,
-              opacity,
-              backgroundColor: scrollX.value >= i * SCREEN_WIDTH - SCREEN_WIDTH/2 && scrollX.value <= i * SCREEN_WIDTH + SCREEN_WIDTH/2 ? accentFill : 'rgba(255,255,255,0.8)',
-            };
-          });
-          return <Animated.View key={i} style={[styles.dot, dotStyle]} />;
-        })}
+        {items.map((_, i) => (
+          <HeroDot key={i} index={i} scrollX={scrollX} accentFill={accentFill} />
+        ))}
       </View>
     </View>
   );

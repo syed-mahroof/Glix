@@ -256,7 +256,9 @@ export default function MoviesScreen() {
         </View>
       ) : (
         <FlashList
-          key={`movies-${layout}`}
+          // Perf fix (2026-08-07): see the identical note on (tabs)/index.tsx's
+          // watchlist FlashList — FlashList v2 handles a numColumns change on
+          // its existing layout manager instance, no remount needed.
           data={rows}
           keyExtractor={(item) => String(item.movie.tmdb_id)}
           renderItem={layout === 'grid' ? renderGridItem : renderItem}

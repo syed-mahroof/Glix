@@ -195,12 +195,27 @@ function ShowRowComponent({
       );
       rowMargin.value = withDelay(
         COLLAPSE_DELAY,
-        withTiming(0, { duration: COLLAPSE_DURATION, easing: Easing.out(Easing.ease) }, (finished) => {
-          if (finished) {
-            runOnJS(notifyComplete)(episodeId);
-          }
-        })
+        withTiming(0, { duration: COLLAPSE_DURATION, easing: Easing.out(Easing.ease) })
       );
+      // Bug fix (2026-08-07): the commit used to live in this withTiming's
+      // own completion callback, gated on `finished`. A FlashList recycle
+      // (or the store changing this exact episode from elsewhere) during
+      // the 420-760ms collapse window hits the reset effect below, which
+      // assigns rowMargin.value directly — cancelling this in-flight
+      // withTiming, which then fires its callback with finished=false, so
+      // the commit never happened and the tap was silently lost with no
+      // feedback (the checkmark had already visibly filled). The deferral's
+      // whole purpose is cosmetic — let the tick be seen before the row
+      // leaves — it was never meant to gate whether the mark actually
+      // reaches the store. A plain timer fires unconditionally: episodeId
+      // was captured at tap time, so delivering it is always correct
+      // regardless of what this row instance ends up displaying by the
+      // time the timer fires (and if two taps land in the same slot across
+      // a recycle, each timer independently commits its own correct id —
+      // there's no shared state between them to race over).
+      setTimeout(() => {
+        notifyComplete(episodeId);
+      }, COLLAPSE_DELAY + COLLAPSE_DURATION);
     } else {
       // Un-watching: just reverse fill smoothly
       fillProgress.value = withSpring(0, { damping: 16, stiffness: 200 });

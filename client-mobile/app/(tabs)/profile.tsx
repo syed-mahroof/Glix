@@ -389,7 +389,11 @@ export default function ProfileScreen() {
         <View style={styles.avatarBlock}>
           <PressableScale onPress={() => setAvatarPickerVisible(true)}>
             {profile?.profile_picture ? (
-              <Image source={{ uri: profile.profile_picture }} style={[styles.avatar, { borderColor: c.accentInk }]} />
+              <Image
+                source={{ uri: profile.profile_picture }}
+                style={[styles.avatar, { borderColor: c.accentInk }]}
+                cachePolicy="memory-disk"
+              />
             ) : (
               <View style={[styles.avatarFallback, { backgroundColor: c.glassFill, borderColor: c.accentInk }]}>
                 <Text style={[styles.avatarInitials, { color: c.accentInk }]}>{initials}</Text>

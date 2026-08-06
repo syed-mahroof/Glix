@@ -14,9 +14,11 @@ import * as Haptics from 'expo-haptics';
 import { Image } from 'expo-image';
 import { useRouter } from 'expo-router';
 import React, { memo, useCallback, useEffect, useRef } from 'react';
-import { StyleSheet, Text, View } from 'react-native';
+import { Pressable, StyleSheet, Text, View } from 'react-native';
 import Animated, {
+  Easing,
   interpolateColor,
+  runOnJS,
   useAnimatedStyle,
   useSharedValue,
   withDelay,
@@ -25,10 +27,26 @@ import Animated, {
   withTiming,
 } from 'react-native-reanimated';
 
+import { isReduceMotionEnabled } from '../lib/motion';
 import { useAppTheme } from '../lib/theme';
 import PressableScale from './PressableScale';
 
 const POSTER_BASE_URL = 'https://image.tmdb.org/t/p/w342';
+
+// Matches ShowRow's COLLAPSE_DELAY (components/ShowRow.tsx) — same job:
+// hold the tapped episode's data still long enough for the tick to actually
+// be seen. ShowRow can afford to commit late because its row physically
+// leaves the list once it collapses; this card can't leave — buildRows()
+// swaps it in place to the show's NEXT episode — so this deferral is the
+// only thing standing between the tick appearing and the badge/subtitle/
+// checkmark changing underneath it. See handleCheckPress below for why
+// committing at t=0 instead (removing this entirely) is NOT the fix for
+// grid mode's lag: the fix is not awaiting the network check before
+// committing (see app/(tabs)/index.tsx's handleGridCheckPress) — that
+// alone drops the lag from "up to a cold-start RTT" to this fixed 420ms.
+const ADVANCE_DELAY = 420;
+const CLEAR_TICK_MS = 130;
+const CLEAR_FILL_MS = 200;
 
 export interface ShowPosterCardProps {
   showId: number;
@@ -78,27 +96,73 @@ function ShowPosterCardComponent({
 
   // Grid-mode checkmark animation (mirrors ShowRow's fill/tick/bounce
   // sequence). Unlike ShowRow, there's no row to collapse — the card stays
-  // in place and its badge/subtitle swap straight to the next episode once
-  // the store commits. Committing on tap (the old behaviour) meant that
-  // swap happened in the same render as the tap: the tick never got a
-  // chance to actually appear before the card jumped to the next episode's
-  // empty checkmark. Deferring the commit lets the fill+tick play out
-  // first, so the swap reads as "confirmed, then advanced" instead of a
-  // jump-cut.
+  // in place and its badge/subtitle swap to the next episode once the store
+  // commits (buildRows advances this show to its next unwatched episode).
   const isAnimating = useRef(false);
+  const advanceTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const isMounted = useRef(true);
+  // Set true right before the deferred commit below fires, cleared by the
+  // very next run of the reset effect. That run is OUR OWN commit's
+  // consequence (checkmark.itemId changing to the next episode) — the
+  // effect must not hard-snap over it, or the tick vanishes in the same
+  // frame the badge changes underneath it (a jump-cut, exactly what the
+  // deferral above exists to avoid). Every OTHER run of the effect (a
+  // FlashList recycle, or the store changing this episode from elsewhere)
+  // must still hard-snap — a cell recycled onto a different item must never
+  // inherit whatever animation state its previous occupant left behind.
+  // Props can't tell these two cases apart (checkmark.itemId changes in
+  // both), so the card flags its own commit instead.
+  const advancing = useRef(false);
+  // Bumped every time the reset effect actually resets — a deferred commit
+  // compares against the value it captured at tap time to tell whether this
+  // cell still represents the item that was tapped (FlashList can recycle
+  // this exact instance to a completely different show while the 420ms
+  // timer is pending).
+  const generation = useRef(0);
+
   const fillProgress = useSharedValue(checkmark?.isWatched ? 1 : 0);
   const tickScale = useSharedValue(checkmark?.isWatched ? 1 : 0);
   const checkBounce = useSharedValue(1);
 
+  useEffect(() => {
+    isMounted.current = true;
+    return () => {
+      isMounted.current = false;
+      if (advanceTimer.current) clearTimeout(advanceTimer.current);
+    };
+  }, []);
+
   // Resets to the current prop state whenever this card starts representing
   // a different item (FlashList recycle) or the true watched state changes
   // out from under us — same guard ShowRow uses keyed on episodeId/isWatched.
+  // See `advancing` above for why one specific run of this effect must skip
+  // the reset instead.
   useEffect(() => {
+    if (advancing.current) {
+      advancing.current = false;
+      return;
+    }
+    generation.current += 1;
     isAnimating.current = false;
+    if (advanceTimer.current) {
+      clearTimeout(advanceTimer.current);
+      advanceTimer.current = null;
+    }
     fillProgress.value = checkmark?.isWatched ? 1 : 0;
     tickScale.value = checkmark?.isWatched ? 1 : 0;
     checkBounce.value = 1;
   }, [checkmark?.itemId, checkmark?.isWatched, fillProgress, tickScale, checkBounce]);
+
+  // Both flags converge to false within CLEAR_FILL_MS of a commit — this
+  // fires from the clearing animation below regardless of whether the reset
+  // effect above ever runs again for this instance (e.g. an optimistic
+  // toggle that gets rolled back to the same itemId/isWatched wouldn't
+  // otherwise re-run it, which used to leave isAnimating stuck true and the
+  // checkmark permanently dead on a failed request).
+  const endAdvance = useCallback(() => {
+    advancing.current = false;
+    isAnimating.current = false;
+  }, []);
 
   const handleCheckPress = useCallback(() => {
     if (!checkmark) return;
@@ -119,6 +183,14 @@ function ShowPosterCardComponent({
       return;
     }
 
+    const onPress = checkmark.onPress;
+    const tappedGeneration = generation.current;
+
+    if (isReduceMotionEnabled()) {
+      onPress();
+      return;
+    }
+
     isAnimating.current = true;
     checkBounce.value = withSequence(
       withSpring(0.78, { damping: 10, stiffness: 380 }),
@@ -131,11 +203,39 @@ function ShowPosterCardComponent({
     // Catch-up modal or not, the tapped episode always ends up watched (see
     // useCatchupCascade — every modal outcome finalizes it true), so it's
     // safe to always fire the real commit here; we're just giving the tick
-    // time to be seen first.
-    setTimeout(() => {
-      checkmark.onPress();
-    }, 450);
-  }, [checkmark, fillProgress, tickScale, checkBounce]);
+    // time to be seen first — see ADVANCE_DELAY's comment for why this
+    // deferral stays even though the actual network check no longer blocks
+    // it (app/(tabs)/index.tsx's handleGridCheckPress fires it unawaited).
+    advanceTimer.current = setTimeout(() => {
+      advanceTimer.current = null;
+      const stale = !isMounted.current || generation.current !== tappedGeneration;
+      // Claimed BEFORE the commit so the reset effect's own dependency
+      // change (triggered by onPress() below) can never race ahead of this
+      // flag being set.
+      if (!stale) advancing.current = true;
+
+      onPress(); // Unconditional: the tap happened, it must reach the store.
+
+      if (stale) {
+        isAnimating.current = false;
+        return;
+      }
+
+      // Clear the tick as the data swaps under it — "confirmed, then
+      // cleared, ready for the next one." Not gated on the animation
+      // actually finishing: an interrupted clear (another recycle mid-fade)
+      // must still release the flags below, and there's nothing to lose by
+      // clearing early since the commit already happened above.
+      tickScale.value = withTiming(0, { duration: CLEAR_TICK_MS, easing: Easing.in(Easing.quad) });
+      fillProgress.value = withTiming(
+        0,
+        { duration: CLEAR_FILL_MS, easing: Easing.out(Easing.quad) },
+        () => {
+          runOnJS(endAdvance)();
+        }
+      );
+    }, ADVANCE_DELAY);
+  }, [checkmark, fillProgress, tickScale, checkBounce, endAdvance]);
 
   const checkCircleStyle = useAnimatedStyle(() => ({
     backgroundColor: interpolateColor(
@@ -195,7 +295,13 @@ function ShowPosterCardComponent({
           )}
 
           {checkmark && (
-            <PressableScale
+            // Plain Pressable, not PressableScale: the checkmark already has
+            // its own checkBounce spring on the same 30px circle — stacking
+            // PressableScale's press-in scale on top just fought it for the
+            // same transform with no visible effect under checkBounce's
+            // 0.78→1.18→1.0 sequence. ShowRow/MovieRow's list-mode checkmark
+            // buttons are plain Pressables for the same reason.
+            <Pressable
               onPress={handleCheckPress}
               disabled={checkmark.disabled}
               hitSlop={8}
@@ -207,7 +313,7 @@ function ShowPosterCardComponent({
               <Animated.View style={[styles.checkCircle, checkCircleStyle]}>
                 <Animated.Text style={[styles.checkMark, { color: c.onAccent }, tickStyle]}>✓</Animated.Text>
               </Animated.View>
-            </PressableScale>
+            </Pressable>
           )}
         </View>
       </PressableScale>

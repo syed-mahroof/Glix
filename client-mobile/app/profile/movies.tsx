@@ -326,7 +326,8 @@ export default function ProfileMoviesScreen() {
       ) : (
         <View style={styles.listWrap}>
           <FlashList
-            key={`profile-movies-${layout}`}
+            // Perf fix (2026-08-07): no remount needed for a numColumns
+            // change — see (tabs)/index.tsx's identical note.
             data={filtered}
             keyExtractor={(item) => String(item.id)}
             numColumns={layout === 'grid' ? 3 : 1}

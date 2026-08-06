@@ -269,6 +269,8 @@ function ZombieRow({
         style={[styles.zombiePoster, { backgroundColor: c.bgElevated }]}
         contentFit="cover"
         transition={150}
+        recyclingKey={String(showId)}
+        cachePolicy="memory-disk"
       />
       <View style={styles.zombieTextCol}>
         <Text style={[styles.zombieShowTitle, { color: c.textPrimary }]} numberOfLines={1}>
@@ -332,6 +334,8 @@ function UpcomingRow({
         style={[styles.upcomingPoster, { backgroundColor: c.bgElevated }]}
         contentFit="cover"
         transition={150}
+        recyclingKey={String(item.tmdbShowId)}
+        cachePolicy="memory-disk"
       />
       <View style={styles.upcomingTextCol}>
         <Text style={[styles.upcomingShowTitle, { color: c.textPrimary }]} numberOfLines={1}>
@@ -485,18 +489,29 @@ export default function ShowsScreen() {
   // imminent (<1h away); otherwise a 60s tick is plenty for a countdown
   // measured in days. Deliberately NOT memoized on `upcomingItems` alone —
   // this component already re-renders once per tick (useNow's own state
-  // update below), so a plain recompute against Date.now() at each of
-  // those renders is what lets crossing the 1h boundary self-correct
-  // without waiting on the next watchlist refetch; it's a single pass over
-  // an already-capped list, cheap enough to skip memoizing at all.
+  // update below) while active, so a plain recompute against Date.now() at
+  // each of those renders is what lets crossing the 1h boundary self-correct
+  // without waiting on the next watchlist refetch.
+  //
+  // Perf fix (2026-08-07): this used to run unconditionally on every render
+  // of ShowsScreen, including every render of the WATCH LIST tab and the
+  // Upcoming GRID view, where its result (tickIntervalMs) is never read —
+  // useNow(_, active=false) below ignores it entirely. Each iteration calls
+  // resolveAirInstant(), which was the single most expensive routine
+  // operation in the app before dateFormat.ts's Intl.DateTimeFormat caching,
+  // and even post-cache still allocates Dates per item. Skipping the whole
+  // pass whenever nothing on screen actually consumes it is strictly free.
+  const isUpcomingListTicking = activeTab === 'upcoming' && upcomingView === 'list';
   let soonestFutureMs = Infinity;
-  for (const item of upcomingItems) {
-    const delta = resolveAirInstant(item.airDate, item.airDateTime, item.airsTime, item.airsTimezone).getTime() - Date.now();
-    if (delta > 0 && delta < soonestFutureMs) soonestFutureMs = delta;
+  if (isUpcomingListTicking) {
+    for (const item of upcomingItems) {
+      const delta = resolveAirInstant(item.airDate, item.airDateTime, item.airsTime, item.airsTimezone).getTime() - Date.now();
+      if (delta > 0 && delta < soonestFutureMs) soonestFutureMs = delta;
+    }
   }
   const ONE_HOUR_MS = 60 * 60 * 1000;
   const tickIntervalMs = soonestFutureMs < ONE_HOUR_MS ? 1000 : 60000;
-  const now = useNow(tickIntervalMs, activeTab === 'upcoming' && upcomingView === 'list');
+  const now = useNow(tickIntervalMs, isUpcomingListTicking);
 
   // Arriving from "Add to Watchlist" (show detail) passes highlightFilter
   // so the newly added show's bucket is on-screen immediately instead of
@@ -513,7 +528,11 @@ export default function ShowsScreen() {
   // season screen and episode detail screen). Un-watching bypasses this
   // entirely (handled directly in handleCheckPress's else branch below);
   // this only fires when marking an episode watched.
-  const catchup = useCatchupCascade((ids, watched) => bulkToggleWatchState(ids, watched));
+  // Passed directly (not wrapped in an inline arrow) — useCatchupCascade
+  // latches this into a ref internally, but a stable reference here still
+  // means the returned `catchup` object's identity only ever changes when
+  // the modal's own state does, not on every ShowsScreen render.
+  const catchup = useCatchupCascade(bulkToggleWatchState);
 
   useEffect(() => {
     fetchWatchlist();
@@ -612,11 +631,23 @@ export default function ShowsScreen() {
     [catchup, toggleWatchState, watchlist]
   );
 
-  /** Grid card checkmark — the poster card has no collapse animation to
-   *  defer to (unlike ShowRow's onAnimationComplete), so the store update
-   *  fires immediately once we know the Catch-Up modal isn't intercepting. */
+  /** Grid card checkmark — called by ShowPosterCard after its own ~420ms
+   *  confirm animation, same as ShowRow's onAnimationComplete for the list.
+   *
+   *  Bug fix (2026-08-07, grid mark-watched lag): this used to `await
+   *  catchup.checkEpisode(...)` before committing — a real POST to a
+   *  Render free-tier dyno (up to a ~20-50s cold-start RTT) sitting
+   *  directly between the tap and the store update, during which the
+   *  card's checkmark sat frozen and swallowed further taps. Firing the
+   *  check WITHOUT awaiting and committing immediately is exactly the
+   *  contract handleCheckPress (list mode, below) already relies on: every
+   *  Catch-Up modal outcome (confirm/cancel/neverForShow) finalizes this
+   *  same episode watched regardless of what already happened to it, and
+   *  bulkToggleWatchState now skips ids whose server state already matches
+   *  before hitting the wire (see watchStore.ts), so there's no
+   *  double-toggle risk no matter which resolves first. */
   const handleGridCheckPress = useCallback(
-    async (
+    (
       episodeId: number,
       showId: number,
       showTitle: string,
@@ -629,8 +660,8 @@ export default function ShowsScreen() {
         return;
       }
       const label = `S${pad(seasonNumber)}E${pad(episodeNumber)}`;
-      const shown = await catchup.checkEpisode(showId, episodeId, showTitle, label);
-      if (!shown) toggleWatchState(episodeId);
+      catchup.checkEpisode(showId, episodeId, showTitle, label);
+      toggleWatchState(episodeId);
     },
     [catchup, toggleWatchState]
   );
@@ -880,7 +911,6 @@ export default function ShowsScreen() {
                </View>
              ) : (
                <FlashList
-                 key={`history-${layout}`}
                  data={history.results}
                  keyExtractor={(item) => item.id}
                  renderItem={({ item }) => <HistoryRow item={item} />}
@@ -915,7 +945,15 @@ export default function ShowsScreen() {
             </View>
           ) : (
             <FlashList
-              key={`watchlist-${layout}`}
+              // Perf fix (2026-08-07): this used to key on `layout`, forcing
+              // FlashList to fully unmount+remount (destroying every visible
+              // ShowRow/ShowPosterCard, re-decoding every poster image) on
+              // every list<->grid toggle. FlashList v2 already handles a
+              // numColumns change on the existing layout manager instance
+              // (verified against RecyclerViewManager.js's updateLayoutParams
+              // — only `horizontal` toggling is unsupported without a
+              // remount) and renderItem/extraData changing identity already
+              // tells it which cells need to re-render. No key needed.
               data={rows}
               keyExtractor={(item) => item.id}
               renderItem={layout === 'grid' ? renderGridRow : renderRow}
@@ -1031,7 +1069,6 @@ export default function ShowsScreen() {
             </View>
           ) : upcomingView === 'list' ? (
             <FlashList
-              key={`upcoming-${layout}`}
               data={visibleUpcomingEntries}
               keyExtractor={(entry) => entry.key}
               renderItem={layout === 'grid' ? renderUpcomingGridEntry : renderUpcomingEntry}

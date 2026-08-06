@@ -17,8 +17,13 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 import { api } from '../lib/api';
-import { createDebouncedStorage } from '../lib/persistStorage';
+import { createDebouncedStorage, markStorageHydrated } from '../lib/persistStorage';
 import { extractErrorMessage } from '../lib/errors';
+
+// Named so `onRehydrateStorage` below can pass the exact same instance
+// handed to `storage:` into markStorageHydrated() — see watchStore.ts's
+// identical note for why this deliberately has NO explicit type argument.
+const socialStorage = createDebouncedStorage();
 
 export interface PublicUser {
   id: number;
@@ -315,7 +320,10 @@ export const useSocialStore = create<SocialStoreState>()(
     }),
     {
       name: 'social-store',
-      storage: createDebouncedStorage(),
+      storage: socialStorage,
+      onRehydrateStorage: () => () => {
+        markStorageHydrated(socialStorage);
+      },
       // Only activityFeed's first page is worth painting stale on a cold
       // start (C13) — search/profile/follower lookups are per-navigation
       // snapshots, and every loading/error/pagination field must start

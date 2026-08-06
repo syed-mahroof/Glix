@@ -1,3 +1,48 @@
+## 🟠 FIXED — grid mark-watched lag, Default Layout reset on relaunch, tab-switch responsiveness, silent tap-swallow bugs (2026-08-07, Phase 84)
+
+Full narrative in `PROJECT_STATUS.md`'s Phase 84 section. This entry is the resolution table + verification log.
+
+**User report, four parts:** (1) grid-mode mark-watched feels very laggy vs. list mode's seamless animation; (2) Default Layout setting sometimes resets after closing/reopening the app; (3) tab switching/navigation still feels laggy; (4) open-ended bug sweep.
+
+### Real bugs found & fixed
+
+| # | Severity | Bug | Root cause | Fix | Files |
+|---|---|---|---|---|---|
+| 1 | 🟠 | Grid checkmark froze for up to a cold-start RTT (Render free tier, 20-50s) after every tap, swallowing further taps the whole time | `handleGridCheckPress` `await`ed `catchup.checkEpisode()` (a real network POST) before committing the store update — list mode never did this | Un-awaited the check, matching list mode's existing (already-safe) fire-and-forget contract | `client-mobile/app/(tabs)/index.tsx`, `client-mobile/lib/useCatchupCascade.ts` |
+| 2 | 🟠 | Confirmed Catch-Up cascade could silently un-watch the just-tapped episode | Un-awaiting #1 lets `bulkToggleWatchState`'s SET request and the tapped episode's own `toggleWatchState` FLIP request both target the same episode in either order; if the bulk SET lands first, the flip then deletes the `WatchState` row the bulk request just created | `bulkToggleWatchState` now filters outgoing ids against the client's own pre-update snapshot, dropping any id whose state already matches the target | `client-mobile/store/watchStore.ts` |
+| 3 | 🟠 | Mark-watched tap silently dropped — no error, no retry, checkmark stayed visually filled forever | `ShowRow`/`MovieRow` gated the store commit on the row-collapse animation's own `finished` callback; a FlashList recycle or external state change mid-collapse cancels that animation (the reset effect assigns the animated value directly), firing the callback with `finished=false` | Decoupled the commit into a plain `setTimeout`, fires unconditionally — the id was captured at tap time, so delivering it is always correct | `client-mobile/components/ShowRow.tsx`, `client-mobile/components/MovieRow.tsx` |
+| 4 | 🟡 | Grid checkmark could get permanently stuck eating taps if the underlying toggle request failed and rolled back to the same episode/movie id | Nothing re-ran the animation-reset effect on a same-id rollback, so `isAnimating` stayed `true` forever | Fixed as a side effect of the `generation`/`advancing` rewrite — both animation flags now clear unconditionally within ~200ms of the commit regardless of the store's outcome | `client-mobile/components/ShowPosterCard.tsx`, `client-mobile/components/MoviePosterCard.tsx` |
+| 5 | 🟡 | Default Layout setting intermittently reset to a stale value on relaunch | A debounced `PersistStorage` adapter queued a write from a boot-time `set()` call that fired *before* `AsyncStorage.getItem()`'s rehydration resolved — that snapshot still contained the store's pre-hydration field initializers. zustand's own successful-rehydration `set()` deliberately does not re-trigger a storage write unless a version migration ran, so nothing corrected the already-queued stale write | Storage adapter's `setItem` now gated on a per-instance `hydrated` flag, flipped via each store's `onRehydrateStorage` calling a new `markStorageHydrated()` helper. Applied to all four `createDebouncedStorage()` consumers, not just `watchStore` | `client-mobile/lib/persistStorage.ts`, `client-mobile/store/{watchStore,discoverStore,socialStore,listsStore}.ts` |
+| 6 | 🟢 (correctness, not perf) | `HeroCarousel` violated the Rules of Hooks — `useAnimatedStyle` called inside `.map()`, so the number of hooks called changed whenever `items.length` did | N/A — a structural bug, not a regression from a specific change | Extracted `HeroSlide`/`HeroDot` as their own memoized components, one hook call each, always | `client-mobile/components/HeroCarousel.tsx` |
+
+### Performance fixes (no correctness change, verified via `tsc --noEmit` + `jest`)
+
+- `lib/dateFormat.ts`: five call sites building a fresh `Intl.DateTimeFormat` per invocation (one of the most expensive routine JS ops on Hermes/Android — a JNI call into `android.icu`) now share module-level cached formatters.
+- `(tabs)/index.tsx`: a per-render Shows-tab loop calling `resolveAirInstant()` over the full Upcoming list ran unconditionally regardless of which tab/view was active; now skipped unless the Upcoming List view is actually on screen (its own result was already unused otherwise).
+- `LiquidTabBar`: active-tab pill now springs from `onPress` instead of a post-navigation `useEffect`, so it responds in the same frame as the tap instead of waiting on the destination screen's mount cost. Wrapped in `React.memo`.
+- Removed four `key={...-${layout}}` props that forced a full FlashList unmount+remount on every list/grid toggle — verified against `@shopify/flash-list`'s `RecyclerViewManager.js` source that a `numColumns` change is handled on the existing layout-manager instance, not a remount.
+- Removed `react-native-worklets-core` (Babel plugin + dependency) — zero imports anywhere in the app, confirmed by grep; was running a second, redundant worklet transform over every file on every build.
+- Added `cachePolicy="memory-disk"`/`recyclingKey` to five images missing them.
+
+### Investigated, not changed (checked, found the risk outweighed the benefit)
+
+- **`HeroCarousel`'s backdrop image size.** Briefly reduced from TMDB's `w1280` tier to `w780` under the assumption it was oversized for a phone screen, then reverted: a full-bleed image at `SCREEN_WIDTH` on a 3x-density phone (most current iPhones/Android flagships) needs close to 1280 physical pixels to render crisply — `w1280` was already the correctly-sized tier, not oversized. The "oversized" claim didn't account for device pixel ratio; reverted before it could ship a visible quality regression on the app's one full-screen hero image.
+- **An in-flight dedup guard on `fetchWatchlist`/`fetchMovieWatchlist`/`fetchProfile`.** Drafted (gate on the existing `isLoading*` flag), then reverted after tracing that `loading.tsx`'s boot gate and `profile.tsx`'s own pull-to-refresh handler both `await` these functions directly for a user-visible spinner/gate; a guarded early-return resolves that promise immediately, which would end a refresh spinner (or the boot gate) before the *actual* in-flight request the guard deferred to had finished — a narrow but real regression risk for a low-probability, low-severity race.
+- **`(tabs)/profile.tsx`'s focus-refetch guard.** Re-verified in full against the actual file (not assumed from a prior report) and found already correctly hardened by Phase 76's crash fix — staleness + minimum-refetch-interval guards both present and working as designed. An initial exploration pass flagged this as "still an unconditional 4-request storm," which was checking against an outdated mental model rather than the current file.
+
+### A TypeScript inference trap worth recording for future sessions
+
+Giving `createDebouncedStorage<S>()` (in `lib/persistStorage.ts`) an explicit type argument at a call site used as a named variable (e.g. `const watchStorage = createDebouncedStorage<WatchStoreState>();`) pins `S` before zustand's `persist()` can jointly infer it against that same store's `partialize`'s narrower return type — broke `tsc --noEmit` with five type errors across all four persisted stores that had nothing else in common. Left uninstantiated, the call infers `PersistStorage<unknown>`, which is contravariantly compatible with whatever `PersistedState` `partialize` determines — exactly what the original, working code relied on by calling `createDebouncedStorage()` inline with no generic. Confirmed by `git stash`-isolating the change and watching the five errors disappear and reappear with just that one line.
+
+### Verification log
+
+- `tsc --noEmit` — clean, zero errors (required two rounds of fixing after the type-inference trap above surfaced mid-session).
+- `jest` — 47/47 passing, including one new regression test (`__tests__/persistStorage.test.ts`) for the hydration-gate fix specifically.
+- No backend files changed this phase.
+- Not verifiable this session: no physical device — the grid checkmark's advance/exit timing feel, the tab-bar pill's optimistic motion, and the Default Layout fix's actual behavior across a real kill/relaunch cycle all need an on-device pass.
+
+---
+
 ## 🔴 FIXED — app freeze/crash: self-triggering focus-refetch loop in `(tabs)/profile.tsx` (2026-08-03, Phase 76)
 
 Full narrative in `PROJECT_STATUS.md`'s Phase 76 section and `context.md`'s Phase 76 entry.

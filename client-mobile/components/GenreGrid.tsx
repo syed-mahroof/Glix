@@ -69,6 +69,7 @@ function GenreGrid({ activeSegment, onSelectGenre }: GenreGridProps) {
                   style={StyleSheet.absoluteFill}
                   contentFit="cover"
                   transition={200}
+                  cachePolicy="memory-disk"
                 />
               )}
               <LinearGradient

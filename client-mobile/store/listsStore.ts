@@ -16,8 +16,13 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 import { api } from '../lib/api';
-import { createDebouncedStorage } from '../lib/persistStorage';
+import { createDebouncedStorage, markStorageHydrated } from '../lib/persistStorage';
 import { extractErrorMessage } from '../lib/errors';
+
+// Named so `onRehydrateStorage` below can pass the exact same instance
+// handed to `storage:` into markStorageHydrated() — see watchStore.ts's
+// identical note for why this deliberately has NO explicit type argument.
+const listsStorage = createDebouncedStorage();
 
 export type MediaType = 'tv' | 'movie';
 
@@ -199,7 +204,10 @@ export const useListsStore = create<ListsStoreState>()(
     }),
     {
       name: 'lists-store',
-      storage: createDebouncedStorage(),
+      storage: listsStorage,
+      onRehydrateStorage: () => () => {
+        markStorageHydrated(listsStorage);
+      },
       // Only the list summaries are worth painting stale on a cold start
       // (C13) — activeListDetail/membership are per-navigation snapshots,
       // and every loading/error field must start fresh each session.

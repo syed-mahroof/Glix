@@ -14,8 +14,13 @@ import axios from 'axios';
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 import { api } from '../lib/api';
-import { createDebouncedStorage } from '../lib/persistStorage';
+import { createDebouncedStorage, markStorageHydrated } from '../lib/persistStorage';
 import { extractErrorMessage } from '../lib/errors';
+
+// Named so `onRehydrateStorage` below can pass the exact same instance
+// handed to `storage:` into markStorageHydrated() — see watchStore.ts's
+// identical note for why this deliberately has NO explicit type argument.
+const discoverStorage = createDebouncedStorage();
 
 // In-flight request trackers for runSearch/fetchFilteredResults — plain
 // module-scope refs, not store state, since nothing needs to re-render on
@@ -567,7 +572,10 @@ export const useDiscoverStore = create<DiscoverState>()(
     }),
     {
       name: 'discover-store',
-      storage: createDebouncedStorage(),
+      storage: discoverStorage,
+      onRehydrateStorage: () => () => {
+        markStorageHydrated(discoverStorage);
+      },
       // Only the curated feed/For You/genre covers are worth painting
       // stale on a cold start (C13) — search/filtered results are
       // query-specific snapshots, and every UI flag/error/pagination field

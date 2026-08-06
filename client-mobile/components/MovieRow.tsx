@@ -155,10 +155,20 @@ function MovieRowComponent({
       );
       rowMargin.value = withDelay(
         COLLAPSE_DELAY,
-        withTiming(0, { duration: COLLAPSE_DURATION, easing: Easing.out(Easing.ease) }, (finished) => {
-          if (finished) runOnJS(notifyComplete)(movieId);
-        })
+        withTiming(0, { duration: COLLAPSE_DURATION, easing: Easing.out(Easing.ease) })
       );
+      // Bug fix (2026-08-07): see ShowRow.tsx's identical fix for the full
+      // writeup. Gating the commit on this withTiming's own `finished`
+      // meant a recycle mid-collapse (the reset effect above assigns
+      // rowMargin.value directly, cancelling this animation) silently
+      // dropped the tap — the mark never reached the store even though the
+      // checkmark had already visibly filled. A plain timer commits
+      // unconditionally; movieId was captured at tap time, so it's always
+      // correct to deliver it regardless of what this row instance ends up
+      // showing by the time the timer fires.
+      setTimeout(() => {
+        notifyComplete(movieId);
+      }, COLLAPSE_DELAY + COLLAPSE_DURATION);
     } else {
       // Un-watching: reverse fill
       fillProgress.value = withSpring(0, { damping: 16, stiffness: 200 });

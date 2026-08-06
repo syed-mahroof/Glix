@@ -281,7 +281,8 @@ export default function ProfileAnimeScreen() {
       ) : segment === 'shows' ? (
         <View style={styles.listWrap}>
           <FlashList
-            key={`profile-anime-shows-${layout}`}
+            // Perf fix (2026-08-07): no remount needed for a numColumns
+            // change — see (tabs)/index.tsx's identical note.
             data={filteredShows}
             keyExtractor={(item) => String(item.id)}
             numColumns={layout === 'grid' ? 3 : 1}
@@ -297,7 +298,8 @@ export default function ProfileAnimeScreen() {
       ) : (
         <View style={styles.listWrap}>
           <FlashList
-            key={`profile-anime-movies-${layout}`}
+            // Perf fix (2026-08-07): no remount needed for a numColumns
+            // change — see (tabs)/index.tsx's identical note.
             data={filteredMovies}
             keyExtractor={(item) => String(item.id)}
             numColumns={layout === 'grid' ? 3 : 1}

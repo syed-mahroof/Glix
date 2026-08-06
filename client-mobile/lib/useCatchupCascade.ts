@@ -16,7 +16,7 @@
 // eager-caches any missing earlier season before answering — see
 // AUDIT.md for the full root-cause writeup.
 
-import { useCallback, useRef, useState } from 'react';
+import { useCallback, useMemo, useRef, useState } from 'react';
 import { api } from './api';
 import { useWatchStore } from '../store/watchStore';
 
@@ -30,18 +30,12 @@ interface PendingCatchup {
   showId: number;
   priorIds: number[];
   finalIds: number[];
-  count: number;
-  showTitle: string;
-  episodeLabel: string;
 }
 
 const EMPTY_PENDING: PendingCatchup = {
   showId: 0,
   priorIds: [],
   finalIds: [],
-  count: 0,
-  showTitle: '',
-  episodeLabel: '',
 };
 
 const FAILED_CHECK: CatchupCheckResponse = { has: false, ids: [], count: 0 };
@@ -54,6 +48,18 @@ interface UndoState {
 
 const EMPTY_UNDO: UndoState = { visible: false, count: 0, ids: [] };
 
+// Display-only fields for the modal. Split out of `pending` (below) and
+// held in state rather than a ref: these are read during render by every
+// consumer (visible={catchup.visible} showTitle={catchup.showTitle} etc.),
+// so they have to be something a render actually observes. `pending` itself
+// stays a ref — only confirm/cancel/neverForShow ever read it, and that
+// happens inside an event handler, never during render.
+interface Prompt {
+  showTitle: string;
+  episodeLabel: string;
+  previousCount: number;
+}
+
 /**
  * `onFinalize(ids, watched)` is called with the full list of episode ids to
  * mark and the direction to mark them in. `watched` is always `true` for
@@ -65,18 +71,45 @@ const EMPTY_UNDO: UndoState = { visible: false, count: 0, ids: [] };
 export function useCatchupCascade(onFinalize: (ids: number[], watched: boolean) => void) {
   const setCatchupPreference = useWatchStore((state) => state.setCatchupPreference);
 
+  // Latched so confirm/cancel/neverForShow/checkEpisode/checkSeason can stay
+  // referentially stable ([] deps) no matter what the caller passes in —
+  // every call site passes an inline arrow or a useCallback whose own deps
+  // change often (e.g. index.tsx's watchlist-dependent handlers), and
+  // without this, `catchup` itself was a fresh object on every render,
+  // which fed straight into FlashList's renderItem and defeated every
+  // memo() on the row/card components below it.
+  const onFinalizeRef = useRef(onFinalize);
+  onFinalizeRef.current = onFinalize;
+
   const [visible, setVisible] = useState(false);
-  const [isChecking, setIsChecking] = useState(false);
+  const [prompt, setPrompt] = useState<Prompt | null>(null);
   const [undo, setUndo] = useState<UndoState>(EMPTY_UNDO);
   const pending = useRef<PendingCatchup>(EMPTY_PENDING);
+  // Bug fix: `pending` is a single slot, but un-awaiting the grid's mark-
+  // watched call (Shows Hub perf fix) means checkEpisode/checkSeason can now
+  // be re-entered while a previous check is still on the wire or its modal
+  // is still up — a second call would silently overwrite `pending` and one
+  // of the two cascades would just vanish (no modal, no mark). Any call
+  // arriving while either is true proceeds as "nothing to catch up on" for
+  // ITS OWN tap rather than touching the slot a prior tap owns; the prior
+  // tap's flow is unaffected either way.
+  const inFlight = useRef(false);
 
   /** Checks a single episode against the server. Resolves true if the
    *  modal was shown (the caller must NOT toggle immediately); false if
-   *  there's nothing to catch up on (or the check itself failed — see
-   *  below) and the caller should proceed right away. */
+   *  there's nothing to catch up on (or the check itself failed, or the
+   *  single pending slot is already claimed — see above) and the caller
+   *  should proceed right away. */
   const checkEpisode = useCallback(
     async (showId: number, episodeId: number, showTitle: string, episodeLabel: string): Promise<boolean> => {
-      setIsChecking(true);
+      // `inFlight` stays true from here until confirm/cancel/neverForShow
+      // resolves the modal (or the check itself comes back empty, below) —
+      // it covers "check is on the wire" AND "modal is up awaiting a
+      // decision" as one continuous busy window, so a ref is required here
+      // (not `visible` state): this callback has `[]` deps, so a captured
+      // `visible` would always read its value from the very first render.
+      if (inFlight.current) return false;
+      inFlight.current = true;
       let check: CatchupCheckResponse;
       try {
         const res = await api.post<CatchupCheckResponse>('/watch-state/catchup-check/', {
@@ -89,19 +122,14 @@ export function useCatchupCascade(onFinalize: (ids: number[], watched: boolean) 
         // than leaving the checkmark stuck with no feedback at all. Worst
         // case the user has to manually mark an earlier episode later.
         check = FAILED_CHECK;
-      } finally {
-        setIsChecking(false);
       }
 
-      if (!check.has) return false;
-      pending.current = {
-        showId,
-        priorIds: check.ids,
-        finalIds: [episodeId],
-        count: check.count,
-        showTitle,
-        episodeLabel,
-      };
+      if (!check.has) {
+        inFlight.current = false;
+        return false;
+      }
+      pending.current = { showId, priorIds: check.ids, finalIds: [episodeId] };
+      setPrompt({ showTitle, episodeLabel, previousCount: check.count });
       setVisible(true);
       return true;
     },
@@ -119,7 +147,8 @@ export function useCatchupCascade(onFinalize: (ids: number[], watched: boolean) 
       showTitle: string,
       episodeLabel: string
     ): Promise<boolean> => {
-      setIsChecking(true);
+      if (inFlight.current) return false;
+      inFlight.current = true;
       let check: CatchupCheckResponse;
       try {
         const res = await api.post<CatchupCheckResponse>('/watch-state/catchup-check/', {
@@ -129,19 +158,14 @@ export function useCatchupCascade(onFinalize: (ids: number[], watched: boolean) 
         check = res.data;
       } catch {
         check = FAILED_CHECK;
-      } finally {
-        setIsChecking(false);
       }
 
-      if (!check.has) return false;
-      pending.current = {
-        showId,
-        priorIds: check.ids,
-        finalIds: seasonIds,
-        count: check.count,
-        showTitle,
-        episodeLabel,
-      };
+      if (!check.has) {
+        inFlight.current = false;
+        return false;
+      }
+      pending.current = { showId, priorIds: check.ids, finalIds: seasonIds };
+      setPrompt({ showTitle, episodeLabel, previousCount: check.count });
       setVisible(true);
       return true;
     },
@@ -150,8 +174,9 @@ export function useCatchupCascade(onFinalize: (ids: number[], watched: boolean) 
 
   const confirm = useCallback(() => {
     setVisible(false);
+    inFlight.current = false;
     const ids = [...pending.current.priorIds, ...pending.current.finalIds];
-    onFinalize(ids, true);
+    onFinalizeRef.current(ids, true);
     // An Undo affordance only matters for an actual cascade — marking the
     // one episode/season the user directly tapped, with nothing prior, is
     // already a 1-tap undo via the same checkmark/toggle. This is the case
@@ -159,18 +184,20 @@ export function useCatchupCascade(onFinalize: (ids: number[], watched: boolean) 
     if (pending.current.priorIds.length > 0) {
       setUndo({ visible: true, count: ids.length, ids });
     }
-  }, [onFinalize]);
+  }, []);
 
   const cancel = useCallback(() => {
     setVisible(false);
-    onFinalize(pending.current.finalIds, true);
-  }, [onFinalize]);
+    inFlight.current = false;
+    onFinalizeRef.current(pending.current.finalIds, true);
+  }, []);
 
   const neverForShow = useCallback(() => {
     setVisible(false);
+    inFlight.current = false;
     setCatchupPreference(pending.current.showId, true);
-    onFinalize(pending.current.finalIds, true);
-  }, [onFinalize, setCatchupPreference]);
+    onFinalizeRef.current(pending.current.finalIds, true);
+  }, [setCatchupPreference]);
 
   const dismissUndo = useCallback(() => {
     setUndo(EMPTY_UNDO);
@@ -179,23 +206,25 @@ export function useCatchupCascade(onFinalize: (ids: number[], watched: boolean) 
   const performUndo = useCallback(() => {
     const ids = undo.ids;
     setUndo(EMPTY_UNDO);
-    onFinalize(ids, false);
-  }, [undo, onFinalize]);
+    onFinalizeRef.current(ids, false);
+  }, [undo]);
 
-  return {
-    visible,
-    isChecking,
-    showTitle: pending.current.showTitle,
-    episodeLabel: pending.current.episodeLabel,
-    previousCount: pending.current.count,
-    checkEpisode,
-    checkSeason,
-    confirm,
-    cancel,
-    neverForShow,
-    undoVisible: undo.visible,
-    undoCount: undo.count,
-    dismissUndo,
-    performUndo,
-  };
+  return useMemo(
+    () => ({
+      visible,
+      showTitle: prompt?.showTitle ?? '',
+      episodeLabel: prompt?.episodeLabel ?? '',
+      previousCount: prompt?.previousCount ?? 0,
+      checkEpisode,
+      checkSeason,
+      confirm,
+      cancel,
+      neverForShow,
+      undoVisible: undo.visible,
+      undoCount: undo.count,
+      dismissUndo,
+      performUndo,
+    }),
+    [visible, prompt, checkEpisode, checkSeason, confirm, cancel, neverForShow, undo, dismissUndo, performUndo]
+  );
 }

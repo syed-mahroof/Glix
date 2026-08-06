@@ -7,6 +7,46 @@ export function pad(value: number): string {
   return String(Math.max(0, value)).padStart(2, '0');
 }
 
+// Perf fix (2026-08-07): constructing an Intl.DateTimeFormat crosses into
+// native ICU — on Hermes/Android specifically, a JNI call into android.icu —
+// and is one of the most expensive routine operations available to JS.
+// resolveAirInstant() (below) builds two of these per call via
+// zoneOffsetMs(), and it's called once per episode by buildUpcomingItems and
+// once per visible row per countdown tick, so an unmemoized watchlist of a
+// few hundred shows could mean tens of thousands of formatter constructions
+// in a single render pass. Every formatter with fixed options is built once
+// here, at module load; the one call site with a variable option
+// (zoneOffsetMs's `timeZone`) is cached per zone the first time it's seen
+// and reused for the rest of the app's lifetime — there are only a couple
+// dozen IANA zones in practice (TVmaze network slots), not per-episode.
+const WEEKDAY_LONG_FORMATTER = new Intl.DateTimeFormat('en-US', { weekday: 'long' });
+const HEADER_DATE_FORMATTER = new Intl.DateTimeFormat('en-US', {
+  day: 'numeric',
+  month: 'short',
+  year: 'numeric',
+});
+const LOCAL_AIR_TIME_FORMATTER = new Intl.DateTimeFormat('en-US', { hour: 'numeric', minute: '2-digit' });
+const WEEKDAY_SHORT_FORMATTER = new Intl.DateTimeFormat('en-US', { weekday: 'short' });
+
+const zoneOffsetFormatters = new Map<string, Intl.DateTimeFormat>();
+function getZoneOffsetFormatter(timeZone: string): Intl.DateTimeFormat {
+  let formatter = zoneOffsetFormatters.get(timeZone);
+  if (!formatter) {
+    formatter = new Intl.DateTimeFormat('en-US', {
+      timeZone,
+      hour12: false,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+    });
+    zoneOffsetFormatters.set(timeZone, formatter);
+  }
+  return formatter;
+}
+
 /**
  * Today's calendar date in the device's LOCAL timezone, as YYYY-MM-DD.
  * `Date#toISOString()` converts to UTC first, which silently shifts the
@@ -57,7 +97,7 @@ export function formatCountdown(
       ? `${days}d ${pad(hours)}h ${pad(minutes)}m`
       : `${pad(hours)}:${pad(minutes)}:${pad(seconds)}`;
       
-  const dayOfWeek = new Intl.DateTimeFormat('en-US', { weekday: 'long' }).format(targetDate);
+  const dayOfWeek = WEEKDAY_LONG_FORMATTER.format(targetDate);
 
   return { formatted, isImminent, dayOfWeek };
 }
@@ -98,16 +138,7 @@ export function formatDayBadge(airDate: string, now: Date): string {
  * engines, hence the `% 24`.
  */
 function zoneOffsetMs(instant: Date, timeZone: string): number {
-  const parts = new Intl.DateTimeFormat('en-US', {
-    timeZone,
-    hour12: false,
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-    second: '2-digit',
-  }).formatToParts(instant);
+  const parts = getZoneOffsetFormatter(timeZone).formatToParts(instant);
 
   const field: Record<string, number> = {};
   for (const part of parts) {
@@ -251,7 +282,7 @@ export function formatLocalAirTime(
   const instant = resolveKnownAirInstant(airDate, airDateTime, airsTime, airsTimezone);
   if (!instant) return null;
   try {
-    const formatted = new Intl.DateTimeFormat('en-US', { hour: 'numeric', minute: '2-digit' }).format(instant);
+    const formatted = LOCAL_AIR_TIME_FORMATTER.format(instant);
     return isEstimated ? `~${formatted}` : formatted;
   } catch {
     return null;
@@ -317,12 +348,10 @@ export function formatUpcomingHeaderLabel(airDate: string, now: Date): string {
   }
   if (diffDays === 1) return 'TOMORROW';
   if (diffDays >= 2 && diffDays <= 6) {
-    return new Intl.DateTimeFormat('en-US', { weekday: 'long' }).format(target).toUpperCase();
+    return WEEKDAY_LONG_FORMATTER.format(target).toUpperCase();
   }
   if (diffDays >= 7 && diffDays <= 30) {
-    return new Intl.DateTimeFormat('en-US', { day: 'numeric', month: 'short', year: 'numeric' })
-      .format(target)
-      .toUpperCase();
+    return HEADER_DATE_FORMATTER.format(target).toUpperCase();
   }
   return 'LATER';
 }
@@ -353,7 +382,7 @@ export function shouldAppendWeekday(headerLabel: string): boolean {
  *  helper in this file. */
 export function formatWeekdayShort(displayDateIso: string): string {
   const target = new Date(`${displayDateIso}T00:00:00`);
-  return new Intl.DateTimeFormat('en-US', { weekday: 'short' }).format(target);
+  return WEEKDAY_SHORT_FORMATTER.format(target);
 }
 
 /**

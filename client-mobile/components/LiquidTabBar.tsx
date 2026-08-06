@@ -14,7 +14,7 @@ const { width } = Dimensions.get('window');
 const TAB_BAR_WIDTH = width - 40; // 20px padding on each side
 const TAB_WIDTH = TAB_BAR_WIDTH / 4; // Ensure we always have exactly 4 tabs visible
 
-export default function LiquidTabBar({ state, descriptors, navigation }: BottomTabBarProps) {
+function LiquidTabBar({ state, descriptors, navigation }: BottomTabBarProps) {
   const { theme } = useAppTheme();
   const c = theme.colors;
   const visibleRoutes = state.routes.filter(route => {
@@ -30,6 +30,10 @@ export default function LiquidTabBar({ state, descriptors, navigation }: BottomT
   const safeIndex = activeIndex >= 0 ? activeIndex : 0;
   const translateX = useSharedValue(safeIndex * TAB_WIDTH);
 
+  // Re-syncs the pill for any tab change that didn't originate from a press
+  // on this bar (back gesture, deep link, programmatic navigate). Presses
+  // on this bar drive translateX optimistically from onPress below instead
+  // of waiting for this effect — see its comment for why.
   useEffect(() => {
     translateX.value = withSpring(safeIndex * TAB_WIDTH, {
       damping: 15,
@@ -63,6 +67,25 @@ export default function LiquidTabBar({ state, descriptors, navigation }: BottomT
             const isFocused = state.routes[state.index].key === route.key;
 
             const onPress = () => {
+              // Perf fix (2026-08-07): this used to rely entirely on the
+              // useEffect above, which only fires after React Navigation
+              // reconciles the destination screen into `state.index` and
+              // re-renders this bar — i.e. AFTER the new tab's mount cost
+              // (fetches, FlashList setup) already happened on the JS
+              // thread. The pill visibly waited on however long that took.
+              // Starting the spring here instead responds in the same
+              // frame as the tap, independent of destination cost; the
+              // effect above still re-syncs it from real nav state
+              // afterward (redundant in the common case, since it animates
+              // to the same target this already reached).
+              if (!isFocused) {
+                translateX.value = withSpring(index * TAB_WIDTH, {
+                  damping: 15,
+                  stiffness: 150,
+                  mass: 0.5,
+                });
+              }
+
               const event = navigation.emit({
                 type: 'tabPress',
                 target: route.key,
@@ -102,6 +125,13 @@ export default function LiquidTabBar({ state, descriptors, navigation }: BottomT
     </View>
   );
 }
+
+// React Navigation re-renders the tab bar whenever the navigation container
+// re-renders for any reason (e.g. a theme change bubbling down from
+// _layout.tsx) even when state/descriptors/navigation are the same
+// references — memo skips those; a real tab change still re-renders since
+// `state` gets a new reference then.
+export default React.memo(LiquidTabBar);
 
 const styles = StyleSheet.create({
   wrapper: {

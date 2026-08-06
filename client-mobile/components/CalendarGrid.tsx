@@ -161,6 +161,7 @@ export default function CalendarGrid({ items }: CalendarGridProps) {
                 style={[styles.poster, { backgroundColor: c.bgElevated }]}
                 contentFit="cover"
                 transition={150}
+                cachePolicy="memory-disk"
               />
               <View style={styles.textColumn}>
                 <Text style={[styles.showTitle, { color: c.textPrimary }]} numberOfLines={1}>

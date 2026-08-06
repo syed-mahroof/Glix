@@ -58,6 +58,7 @@ function ContinueWatchingCardComponent({ item, onPress }: ContinueWatchingCardPr
         style={[styles.image, { backgroundColor: c.bgElevated }]}
         contentFit="cover"
         transition={150}
+        cachePolicy="memory-disk"
       />
       {/* Scrim + caption text sit directly on the backdrop photo — kept a
           fixed dark wash/white text in both themes (photo-caption exception,

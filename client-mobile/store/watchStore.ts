@@ -3,7 +3,20 @@ import React from 'react';
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 import { api } from '../lib/api';
-import { createDebouncedStorage } from '../lib/persistStorage';
+import { createDebouncedStorage, markStorageHydrated } from '../lib/persistStorage';
+
+// Named so `onRehydrateStorage` below can pass the exact same instance
+// handed to `storage:` into markStorageHydrated() — see persistStorage.ts's
+// bug-fix note. Deliberately NOT createDebouncedStorage<WatchStoreState>():
+// an explicit type argument here pins S before persist() below can jointly
+// infer it against `partialize`'s narrower return type, which broke that
+// inference entirely (five TS2322 errors on partialize/migrate — confirmed
+// by adding then removing just this type argument). Left uninstantiated,
+// it infers PersistStorage<unknown>, which — per PersistStorage's own
+// contravariant setItem parameter — is freely assignable to whatever
+// PersistedState `partialize` ends up determining, exactly like the
+// original inline `storage: createDebouncedStorage()` always relied on.
+const watchStorage = createDebouncedStorage();
 import { extractErrorMessage } from '../lib/errors';
 import { Platform } from 'react-native';
 import { requestWidgetUpdate } from 'react-native-android-widget';
@@ -1377,9 +1390,40 @@ export const useWatchStore = create<WatchStoreState>()(
   },
 
   bulkToggleWatchState: async (episodeIds: number[], watched: boolean) => {
+    if (episodeIds.length === 0) return;
     const previousWatchlist = get().watchlist;
     const previousProfile = get().profile;
     const previousHistory = get().history;
+
+    // Bug fix (2026-08-07): /watch-state/toggle/ (single-episode) is a FLIP;
+    // /watch-state/bulk-toggle/ (this one) is a SET. Un-awaiting the Shows
+    // Hub's catch-up check (grid + list mark-watched perf fix) means the
+    // episode the user directly tapped can now be committed via
+    // toggleWatchState AND targeted by this same call for a confirmed
+    // cascade, in either order. A bulk SET landing after the flip is a
+    // no-op; a bulk SET landing BEFORE the flip is not — the flip then
+    // deletes the WatchState the bulk request just created, silently
+    // un-watching an episode the client still shows as watched, invisible
+    // until the next fetchWatchlist(). Only sending ids whose CLIENT state
+    // — captured here, before the optimistic update below touches it —
+    // doesn't already match `watched` closes the window: an id
+    // toggleWatchState already committed is dropped from the wire request
+    // entirely, so this endpoint never touches it again. An id the client
+    // has never cached (CatchupCheckView eager-caches earlier seasons the
+    // client may not have loaded yet) always passes through unfiltered —
+    // this can only shrink the request, never silently drop a real one.
+    const requestedIds = new Set(episodeIds);
+    const alreadyMatching = new Set<number>();
+    for (const bucket of Object.values(previousWatchlist)) {
+      for (const entry of bucket.results) {
+        for (const ep of entry.show.episodes) {
+          if (requestedIds.has(ep.tmdb_id) && ep.is_watched === watched) {
+            alreadyMatching.add(ep.tmdb_id);
+          }
+        }
+      }
+    }
+    const idsToSend = episodeIds.filter((id) => !alreadyMatching.has(id));
 
     // Optimistic update for all affected episodes
     set((state) => {
@@ -1505,9 +1549,19 @@ export const useWatchStore = create<WatchStoreState>()(
       };
     });
 
+    if (idsToSend.length === 0) {
+      // Every requested id already matched the target state client-side
+      // (e.g. the tapped episode a catch-up cascade confirmed, already
+      // committed by toggleWatchState moments earlier) — nothing left to
+      // send. The optimistic update above already applied to all of
+      // episodeIds; just get it to the widget.
+      get().syncWidgetData();
+      return;
+    }
+
     try {
       const response = await api.post<BulkToggleResponse>('/watch-state/bulk-toggle/', {
-        episode_ids: episodeIds,
+        episode_ids: idsToSend,
         watched,
       });
       set((state) => {
@@ -1746,7 +1800,14 @@ export const useWatchStore = create<WatchStoreState>()(
     }),
     {
       name: 'watchtracker-store',
-      storage: createDebouncedStorage(),
+      storage: watchStorage,
+      // Unblocks watchStorage's write gate the moment hydration actually
+      // finishes (success OR failure — a broken/corrupt blob still counts
+      // as "resolved," and a first-ever install with nothing in AsyncStorage
+      // must not stay gated forever). See persistStorage.ts's bug-fix note.
+      onRehydrateStorage: () => () => {
+        markStorageHydrated(watchStorage);
+      },
       version: 1,
       // v0 -> v1: preferredLayout/toggleLayout (one global list/grid choice)
       // replaced by defaultLayout + per-scope layoutOverrides (Phase 75.5) —

@@ -6,15 +6,40 @@
 // legible over any ground by design), while text below the poster reads
 // from theme tokens like every other themed surface.
 
+import * as Haptics from 'expo-haptics';
 import { Image } from 'expo-image';
 import { useRouter } from 'expo-router';
-import React, { memo } from 'react';
-import { StyleSheet, Text, View } from 'react-native';
+import React, { memo, useCallback, useEffect, useRef } from 'react';
+import { Pressable, StyleSheet, Text, View } from 'react-native';
+import Animated, {
+  Easing,
+  interpolateColor,
+  runOnJS,
+  useAnimatedStyle,
+  useSharedValue,
+  withSequence,
+  withSpring,
+  withTiming,
+} from 'react-native-reanimated';
 
+import { isReduceMotionEnabled } from '../lib/motion';
 import { useAppTheme } from '../lib/theme';
 import PressableScale from './PressableScale';
 
 const POSTER_BASE_URL = 'https://image.tmdb.org/t/p/w342';
+
+// Matches MovieRow's COLLAPSE_DELAY (components/MovieRow.tsx). Unlike
+// ShowPosterCard (which advances IN PLACE to the show's next episode),
+// marking a movie watched moves it between watch_next/watched buckets
+// (watchStore.ts's toggleMovieWatchState) — under the active filter this
+// card is removed from `rows` entirely, same as MovieRow's case. So this
+// card gets an EXIT, not an advance: confirm the tick, then fade+shrink the
+// whole card, then commit (removing it from the list) as the fade finishes.
+const EXIT_DELAY = 420;
+// A grid cell can't collapse its height without breaking the row (unlike
+// MovieRow, which shrinks rowHeight to 0) — FlashList measures cells, and
+// animating a layout property thrashes it. Opacity + scale only.
+const EXIT_DURATION = 240;
 
 export interface MoviePosterCardProps {
   movieId: number;
@@ -45,8 +70,140 @@ function MoviePosterCardComponent({
   const { theme } = useAppTheme();
   const c = theme.colors;
 
+  const isAnimating = useRef(false);
+  const isMounted = useRef(true);
+  const exitTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Bumped whenever the reset effect below actually resets — lets a
+  // deferred commit tell whether this exact instance still represents the
+  // movie that was tapped (FlashList can recycle it to a different movie
+  // while the 420ms timer is pending).
+  const generation = useRef(0);
+
+  const fillProgress = useSharedValue(checkmark?.isWatched ? 1 : 0);
+  const tickScale = useSharedValue(checkmark?.isWatched ? 1 : 0);
+  const checkBounce = useSharedValue(1);
+  // Card exit — opacity + transform ONLY, never a layout property (width/
+  // height/margin), so FlashList's measured cell size never changes
+  // mid-animation.
+  const cardOpacity = useSharedValue(1);
+  const cardScale = useSharedValue(1);
+
+  useEffect(() => {
+    isMounted.current = true;
+    return () => {
+      isMounted.current = false;
+      if (exitTimer.current) clearTimeout(exitTimer.current);
+    };
+  }, []);
+
+  // movieId is a genuinely stable card identity here (unlike
+  // ShowPosterCard, where the equivalent id is the EPISODE and legitimately
+  // changes on the card's own commit): a movie appears at most once per
+  // bucket and this card's only mount site (movies.tsx) keys by
+  // String(item.movie.tmdb_id), so this only fires for a real FlashList
+  // recycle or the store changing this movie's watched state from
+  // elsewhere. Restoring cardOpacity/cardScale here is load-bearing —
+  // without it, a cell recycled mid-exit would render its next movie
+  // invisible.
+  useEffect(() => {
+    generation.current += 1;
+    isAnimating.current = false;
+    if (exitTimer.current) {
+      clearTimeout(exitTimer.current);
+      exitTimer.current = null;
+    }
+    fillProgress.value = checkmark?.isWatched ? 1 : 0;
+    tickScale.value = checkmark?.isWatched ? 1 : 0;
+    checkBounce.value = 1;
+    cardOpacity.value = 1;
+    cardScale.value = 1;
+  }, [movieId, checkmark?.isWatched, fillProgress, tickScale, checkBounce, cardOpacity, cardScale]);
+
+  const endExit = useCallback(() => {
+    isAnimating.current = false;
+  }, []);
+
+  const handleCheckPress = useCallback(() => {
+    if (!checkmark) return;
+    if (isAnimating.current) return;
+
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+
+    if (checkmark.isWatched) {
+      // Un-watching (WATCHED / LAST_WATCHED filters): reverse the fill and
+      // commit immediately — same asymmetry MovieRow already has, only the
+      // marking direction gets an exit.
+      fillProgress.value = withSpring(0, { damping: 16, stiffness: 200 });
+      tickScale.value = withTiming(0, { duration: 160 });
+      checkBounce.value = withSequence(
+        withSpring(0.88, { damping: 12, stiffness: 300 }),
+        withSpring(1.0, { damping: 14, stiffness: 240 })
+      );
+      checkmark.onPress();
+      return;
+    }
+
+    const onPress = checkmark.onPress;
+    const tappedGeneration = generation.current;
+
+    if (isReduceMotionEnabled()) {
+      onPress();
+      return;
+    }
+
+    isAnimating.current = true;
+    checkBounce.value = withSequence(
+      withSpring(0.78, { damping: 10, stiffness: 380 }),
+      withSpring(1.18, { damping: 7, stiffness: 300 }),
+      withSpring(1.0, { damping: 16, stiffness: 260 })
+    );
+    fillProgress.value = withSpring(1, { damping: 14, stiffness: 200 });
+    tickScale.value = withSpring(1, { damping: 9, stiffness: 320 });
+
+    exitTimer.current = setTimeout(() => {
+      exitTimer.current = null;
+      if (!isMounted.current || generation.current !== tappedGeneration) {
+        // Recycled out from under us during the hold — commit anyway, skip
+        // the exit (this cell is showing a different movie now).
+        isAnimating.current = false;
+        onPress();
+        return;
+      }
+      cardScale.value = withTiming(0.9, { duration: EXIT_DURATION, easing: Easing.out(Easing.cubic) });
+      // The commit rides the exit's completion so the fade is actually
+      // seen (committing at exit-start would remove the item from `rows`
+      // the same frame the fade begins). Not gated on `finished`: an
+      // interrupted exit (another recycle mid-fade) must still commit, or
+      // a recycle mid-fade would silently swallow the user's tap.
+      cardOpacity.value = withTiming(
+        0,
+        { duration: EXIT_DURATION, easing: Easing.out(Easing.ease) },
+        () => {
+          runOnJS(onPress)();
+          runOnJS(endExit)();
+        }
+      );
+    }, EXIT_DELAY);
+  }, [checkmark, fillProgress, tickScale, checkBounce, cardOpacity, cardScale, endExit]);
+
+  const cardStyle = useAnimatedStyle(() => ({
+    opacity: cardOpacity.value,
+    transform: [{ scale: cardScale.value }],
+  }));
+
+  const checkCircleStyle = useAnimatedStyle(() => ({
+    backgroundColor: interpolateColor(fillProgress.value, [0, 1], ['rgba(0,0,0,0.45)', c.accentFill]),
+    borderColor: interpolateColor(fillProgress.value, [0, 1], ['rgba(255,255,255,0.7)', c.accentFill]),
+    transform: [{ scale: checkBounce.value }],
+  }));
+
+  const tickStyle = useAnimatedStyle(() => ({
+    transform: [{ scale: tickScale.value }],
+    opacity: tickScale.value,
+  }));
+
   return (
-    <View style={styles.wrap}>
+    <Animated.View style={[styles.wrap, cardStyle]}>
       <PressableScale
         onPress={() => router.push(`/movie/${movieId}`)}
         accessibilityRole="button"
@@ -71,8 +228,10 @@ function MoviePosterCardComponent({
           )}
 
           {checkmark && (
-            <PressableScale
-              onPress={checkmark.onPress}
+            // Plain Pressable, not PressableScale — checkBounce already
+            // animates this same circle; see ShowPosterCard's identical note.
+            <Pressable
+              onPress={handleCheckPress}
               disabled={checkmark.disabled}
               hitSlop={8}
               style={[styles.checkBtn, checkmark.disabled && styles.checkBtnDisabled]}
@@ -86,17 +245,10 @@ function MoviePosterCardComponent({
                   : 'Mark as watched'
               }
             >
-              <View
-                style={[
-                  styles.checkCircle,
-                  checkmark.isWatched
-                    ? { backgroundColor: c.accentFill, borderColor: c.accentFill }
-                    : styles.checkCircleEmpty,
-                ]}
-              >
-                {checkmark.isWatched && <Text style={[styles.checkMark, { color: c.onAccent }]}>✓</Text>}
-              </View>
-            </PressableScale>
+              <Animated.View style={[styles.checkCircle, checkCircleStyle]}>
+                <Animated.Text style={[styles.checkMark, { color: c.onAccent }, tickStyle]}>✓</Animated.Text>
+              </Animated.View>
+            </Pressable>
           )}
         </View>
       </PressableScale>
@@ -109,7 +261,7 @@ function MoviePosterCardComponent({
           {subtitle}
         </Text>
       ) : null}
-    </View>
+    </Animated.View>
   );
 }
 
@@ -160,10 +312,6 @@ const styles = StyleSheet.create({
     borderWidth: 2,
     alignItems: 'center',
     justifyContent: 'center',
-  },
-  checkCircleEmpty: {
-    backgroundColor: 'rgba(0,0,0,0.45)',
-    borderColor: 'rgba(255,255,255,0.7)',
   },
   checkMark: {
     fontSize: 15,
