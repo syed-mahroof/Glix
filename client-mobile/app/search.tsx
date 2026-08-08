@@ -137,6 +137,7 @@ export default function SearchScreen() {
         <FlashList
           data={results}
           keyExtractor={(item) => String(item.tmdb_id)}
+          estimatedItemSize={100}
           contentContainerStyle={styles.list}
           keyboardShouldPersistTaps="handled"
           renderItem={({ item }) => (

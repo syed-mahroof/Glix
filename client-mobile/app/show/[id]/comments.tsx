@@ -114,6 +114,7 @@ export default function ShowCommentsScreen() {
         <FlashList
           data={comments}
           keyExtractor={(item) => item.id}
+          estimatedItemSize={120}
           contentContainerStyle={styles.list}
           refreshing={isRefreshing}
           onRefresh={handleRefresh}

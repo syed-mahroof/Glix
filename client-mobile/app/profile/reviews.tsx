@@ -210,6 +210,7 @@ export default function MyReviewsScreen() {
           data={rows}
           keyExtractor={(item) => item.id}
           renderItem={({ item }) => <ReviewRowCard tab={tab} item={item} />}
+          estimatedItemSize={120}
           contentContainerStyle={styles.listContent}
           showsVerticalScrollIndicator={false}
           onEndReachedThreshold={0.4}

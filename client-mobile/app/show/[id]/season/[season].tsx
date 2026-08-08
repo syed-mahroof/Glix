@@ -338,6 +338,7 @@ export default function SeasonScreen() {
       <FlashList
         data={displayEpisodes}
         keyExtractor={(episode) => String(episode.tmdb_id)}
+        estimatedItemSize={92}
         contentContainerStyle={styles.list}
         ListHeaderComponent={
           <View style={styles.listHeader}>

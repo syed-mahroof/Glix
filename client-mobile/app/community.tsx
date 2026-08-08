@@ -87,6 +87,7 @@ function DiscussionsTab() {
     <FlashList
       data={feed}
       keyExtractor={(item) => item.id}
+      estimatedItemSize={120}
       contentContainerStyle={styles.list}
       refreshing={isRefreshing}
       onRefresh={handleRefresh}
@@ -168,6 +169,7 @@ function ActivityTab() {
     <FlashList
       data={activityFeed}
       keyExtractor={(item, index) => `${item.media_type}-${item.user_id}-${item.tmdb_id}-${item.updated_at}-${index}`}
+      estimatedItemSize={120}
       contentContainerStyle={styles.list}
       refreshing={isLoadingFeed && activityFeed.length > 0}
       onRefresh={() => fetchActivityFeed(1)}
@@ -254,6 +256,7 @@ function PeopleTab() {
         <FlashList
           data={searchResults}
           keyExtractor={(item) => String(item.id)}
+          estimatedItemSize={64}
           contentContainerStyle={styles.list}
           renderItem={({ item }) => (
             <UserRow

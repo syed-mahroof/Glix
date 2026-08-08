@@ -1,11 +1,11 @@
 // client-mobile/app/profile/movies.tsx
 // Phase 5: Profile > My Movies — full movie watchlist with filter pills.
 
-import { FlashList } from '@shopify/flash-list';
+import { FlashList, type FlashListRef } from '@shopify/flash-list';
 import { Image } from 'expo-image';
 import { useRouter } from 'expo-router';
 import { ArrowLeft, Clapperboard, Film, Palette, Search, X } from 'lucide-react-native';
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
@@ -17,6 +17,7 @@ import PressableScale from '../../components/PressableScale';
 import TabPill from '../../components/TabPill';
 import WatchlistFilterSheet from '../../components/WatchlistFilterSheet';
 import { hasAnimationGenreString, isAnimeByGenreStringAndLanguage } from '../../lib/anime';
+import { clearFlashListLayoutCacheOnChange } from '../../lib/flashListLayout';
 import { useAppTheme } from '../../lib/theme';
 import { MovieWatchlistItem } from '../../store/watchStore';
 import { useLayoutFor, useWatchStore } from '../../store/watchStore';
@@ -160,6 +161,16 @@ export default function ProfileMoviesScreen() {
   const [isLanguageModalVisible, setIsLanguageModalVisible] = useState(false);
   const [isFilterSheetVisible, setIsFilterSheetVisible] = useState(false);
   const [animationOnly, setAnimationOnly] = useState(false);
+  const listRef = useRef<FlashListRef<MovieWatchlistItem>>(null);
+  const previousLayoutRef = useRef(layout);
+
+  if (previousLayoutRef.current !== layout) {
+    previousLayoutRef.current = clearFlashListLayoutCacheOnChange(
+      previousLayoutRef.current,
+      layout,
+      listRef
+    );
+  }
   // Derived from the tab selection, not independent state — see shows.tsx's
   // identical comment (Phase 63).
   const lastWatchedSort = filter === 'LAST_WATCHED';
@@ -328,9 +339,12 @@ export default function ProfileMoviesScreen() {
           <FlashList
             // Perf fix (2026-08-07): no remount needed for a numColumns
             // change — see (tabs)/index.tsx's identical note.
+            ref={listRef}
             data={filtered}
             keyExtractor={(item) => String(item.id)}
             numColumns={layout === 'grid' ? 3 : 1}
+            getItemType={() => layout}
+            estimatedItemSize={layout === 'grid' ? 230 : 108}
             extraData={layout}
             renderItem={({ item }) =>
               layout === 'grid' ? <MovieGridCard item={item} /> : <MovieListRow item={item} />

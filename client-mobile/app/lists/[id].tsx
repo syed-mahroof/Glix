@@ -133,6 +133,7 @@ export default function ListDetailScreen() {
           keyExtractor={(item) => String(item.id)}
           renderItem={renderItem}
           numColumns={NUM_COLUMNS}
+          estimatedItemSize={230}
           contentContainerStyle={styles.listContent}
           showsVerticalScrollIndicator={false}
         />

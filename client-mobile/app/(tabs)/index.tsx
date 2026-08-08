@@ -5,11 +5,11 @@
 // and the circular checkmarks) and UPCOMING (a nested List/Calendar toggle
 // showing everything airing next).
 
-import { FlashList } from '@shopify/flash-list';
+import { FlashList, type FlashListRef } from '@shopify/flash-list';
 import { Image } from 'expo-image';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { CalendarDays, ChevronDown, ChevronUp, LayoutGrid, List as ListIcon, ListChecks, RefreshCw, Tv } from 'lucide-react-native';
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   RefreshControl,
@@ -42,6 +42,7 @@ import {
   resolveDisplayDateIso,
   todayLocalIso,
 } from '../../lib/dateFormat';
+import { clearFlashListLayoutCacheOnChange } from '../../lib/flashListLayout';
 import { useAppTheme } from '../../lib/theme';
 import {
   buildUpcomingItems,
@@ -476,6 +477,21 @@ export default function ShowsScreen() {
   // catch-up list the user opts into, not a wall of backlog ahead of real
   // future dates. Only labels the user has explicitly opened live in here.
   const [expandedPastLabels, setExpandedPastLabels] = useState<string[]>([]);
+  const watchlistListRef = useRef<FlashListRef<ShowEpisodeRow>>(null);
+  const upcomingListRef = useRef<FlashListRef<UpcomingListEntry>>(null);
+  const previousLayoutRef = useRef(layout);
+
+  // Grid cells retain a row-normalizing minHeight. FlashList v2 carries that
+  // measurement into its linear manager unless asked to clear its cache,
+  // leaving grid-sized gaps between compact list rows after a toggle.
+  if (previousLayoutRef.current !== layout) {
+    clearFlashListLayoutCacheOnChange(previousLayoutRef.current, layout, watchlistListRef);
+    previousLayoutRef.current = clearFlashListLayoutCacheOnChange(
+      previousLayoutRef.current,
+      layout,
+      upcomingListRef
+    );
+  }
 
   const upcomingItems = useMemo(
     () => buildUpcomingItems([...watchlist.to_watch.results, ...watchlist.up_to_date.results]),
@@ -954,9 +970,12 @@ export default function ShowsScreen() {
               // — only `horizontal` toggling is unsupported without a
               // remount) and renderItem/extraData changing identity already
               // tells it which cells need to re-render. No key needed.
+              ref={watchlistListRef}
               data={rows}
               keyExtractor={(item) => item.id}
               renderItem={layout === 'grid' ? renderGridRow : renderRow}
+              getItemType={() => layout}
+              estimatedItemSize={layout === 'grid' ? 230 : 108}
               numColumns={layout === 'grid' ? 3 : 1}
               extraData={layout}
               contentContainerStyle={styles.listContent}
@@ -1069,11 +1088,13 @@ export default function ShowsScreen() {
             </View>
           ) : upcomingView === 'list' ? (
             <FlashList
+              ref={upcomingListRef}
               data={visibleUpcomingEntries}
               keyExtractor={(entry) => entry.key}
               renderItem={layout === 'grid' ? renderUpcomingGridEntry : renderUpcomingEntry}
               getItemType={upcomingItemType}
               overrideItemLayout={layout === 'grid' ? upcomingOverrideLayout : undefined}
+              estimatedItemSize={layout === 'grid' ? 230 : 64}
               numColumns={layout === 'grid' ? 3 : 1}
               extraData={[layout, expandedPastLabels]}
               contentContainerStyle={styles.listContent}

@@ -4,9 +4,9 @@
 // animated checkmarks identical to Phase 2.5 ShowRow, and
 // the same deferred-Zustand-update anti-jump pattern.
 
-import { FlashList } from '@shopify/flash-list';
+import { FlashList, type FlashListRef } from '@shopify/flash-list';
 import { Film, ListChecks } from 'lucide-react-native';
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   RefreshControl,
@@ -25,6 +25,7 @@ import MoviePosterCard from '../../components/MoviePosterCard';
 import MovieRow from '../../components/MovieRow';
 import PressableScale from '../../components/PressableScale';
 import { hasAired } from '../../lib/dateFormat';
+import { clearFlashListLayoutCacheOnChange } from '../../lib/flashListLayout';
 import { useAppTheme } from '../../lib/theme';
 import { MovieWatchlistItem, useLayoutFor, useWatchStore } from '../../store/watchStore';
 
@@ -65,6 +66,20 @@ export default function MoviesScreen() {
 
   const [filter, setFilter] = useState<FilterKey>('WATCH_NEXT');
   const [isRefreshing, setIsRefreshing] = useState(false);
+  const listRef = useRef<FlashListRef<MovieWatchlistItem>>(null);
+  const previousLayoutRef = useRef(layout);
+
+  // FlashList v2 retains grid rows' normalized minHeight when it switches to
+  // its linear layout manager. Clear that incompatible measurement cache
+  // before rendering the new mode; this preserves the list instance rather
+  // than remounting it. See lib/flashListLayout.ts.
+  if (previousLayoutRef.current !== layout) {
+    previousLayoutRef.current = clearFlashListLayoutCacheOnChange(
+      previousLayoutRef.current,
+      layout,
+      listRef
+    );
+  }
 
   // Arriving from "Add to Watchlist" (movie detail) passes highlightFilter
   // so the newly added movie's bucket is on-screen immediately.
@@ -256,12 +271,15 @@ export default function MoviesScreen() {
         </View>
       ) : (
         <FlashList
+          ref={listRef}
           // Perf fix (2026-08-07): see the identical note on (tabs)/index.tsx's
           // watchlist FlashList — FlashList v2 handles a numColumns change on
           // its existing layout manager instance, no remount needed.
           data={rows}
           keyExtractor={(item) => String(item.movie.tmdb_id)}
           renderItem={layout === 'grid' ? renderGridItem : renderItem}
+          getItemType={() => layout}
+          estimatedItemSize={layout === 'grid' ? 230 : 108}
           numColumns={layout === 'grid' ? 3 : 1}
           extraData={layout}
           contentContainerStyle={styles.listContent}

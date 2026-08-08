@@ -7,10 +7,10 @@
 // screen — reuses profile/shows.tsx's and profile/movies.tsx's own row/card
 // components rather than a third copy of the same rendering logic.
 
-import { FlashList } from '@shopify/flash-list';
+import { FlashList, type FlashListRef } from '@shopify/flash-list';
 import { useRouter } from 'expo-router';
 import { ArrowLeft, Search, Sparkles, X } from 'lucide-react-native';
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
@@ -22,6 +22,7 @@ import { SegmentedControl } from '../../components/SegmentedControl';
 import TabPill from '../../components/TabPill';
 import WatchlistFilterSheet from '../../components/WatchlistFilterSheet';
 import { isAnimeByGenresAndLanguage, isAnimeByGenreStringAndLanguage } from '../../lib/anime';
+import { clearFlashListLayoutCacheOnChange } from '../../lib/flashListLayout';
 import { useAppTheme } from '../../lib/theme';
 import { useLayoutFor, useWatchStore, type MovieWatchlistItem, type WatchlistEntry } from '../../store/watchStore';
 import { MovieGridCard, MovieListRow } from './movies';
@@ -74,6 +75,18 @@ export default function ProfileAnimeScreen() {
   const [query, setQuery] = useState('');
   const [isLanguageModalVisible, setIsLanguageModalVisible] = useState(false);
   const [isFilterSheetVisible, setIsFilterSheetVisible] = useState(false);
+  const showsListRef = useRef<FlashListRef<WatchlistEntry>>(null);
+  const moviesListRef = useRef<FlashListRef<MovieWatchlistItem>>(null);
+  const previousLayoutRef = useRef(layout);
+
+  if (previousLayoutRef.current !== layout) {
+    clearFlashListLayoutCacheOnChange(previousLayoutRef.current, layout, showsListRef);
+    previousLayoutRef.current = clearFlashListLayoutCacheOnChange(
+      previousLayoutRef.current,
+      layout,
+      moviesListRef
+    );
+  }
   // Derived from the pill selection, not independent state — same
   // single-select-row convention as shows.tsx/movies.tsx (Phase 63).
   const showsLastWatchedSort = showsFilter === 'LAST_WATCHED';
@@ -283,9 +296,12 @@ export default function ProfileAnimeScreen() {
           <FlashList
             // Perf fix (2026-08-07): no remount needed for a numColumns
             // change — see (tabs)/index.tsx's identical note.
+            ref={showsListRef}
             data={filteredShows}
             keyExtractor={(item) => String(item.id)}
             numColumns={layout === 'grid' ? 3 : 1}
+            getItemType={() => layout}
+            estimatedItemSize={layout === 'grid' ? 230 : 108}
             extraData={layout}
             renderItem={({ item }) =>
               layout === 'grid' ? <ShowGridCard entry={item} /> : <ShowListRow entry={item} />
@@ -300,9 +316,12 @@ export default function ProfileAnimeScreen() {
           <FlashList
             // Perf fix (2026-08-07): no remount needed for a numColumns
             // change — see (tabs)/index.tsx's identical note.
+            ref={moviesListRef}
             data={filteredMovies}
             keyExtractor={(item) => String(item.id)}
             numColumns={layout === 'grid' ? 3 : 1}
+            getItemType={() => layout}
+            estimatedItemSize={layout === 'grid' ? 230 : 108}
             extraData={layout}
             renderItem={({ item }) =>
               layout === 'grid' ? <MovieGridCard item={item} /> : <MovieListRow item={item} />

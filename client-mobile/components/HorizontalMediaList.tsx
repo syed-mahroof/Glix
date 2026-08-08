@@ -53,6 +53,7 @@ function HorizontalMediaList({ title, items }: Props) {
           showsHorizontalScrollIndicator={false}
           contentContainerStyle={styles.listContent}
           keyExtractor={(item) => `${item.media_type}-${item.tmdb_id}`}
+          estimatedItemSize={130}
           renderItem={({ item }) => {
             const params = {
               title: item.title,

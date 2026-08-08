@@ -1,11 +1,11 @@
 // client-mobile/app/profile/shows.tsx
 // Phase 5: Profile > My Shows — full watchlist with filter pills.
 
-import { FlashList } from '@shopify/flash-list';
+import { FlashList, type FlashListRef } from '@shopify/flash-list';
 import { Image } from 'expo-image';
 import { useRouter } from 'expo-router';
 import { ArrowLeft, BookOpen, Search, Tv2, X } from 'lucide-react-native';
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   ScrollView,
   StyleSheet,
@@ -23,6 +23,7 @@ import ShowPosterCard from '../../components/ShowPosterCard';
 import TabPill from '../../components/TabPill';
 import WatchlistFilterSheet from '../../components/WatchlistFilterSheet';
 import { isAnimeByGenresAndLanguage } from '../../lib/anime';
+import { clearFlashListLayoutCacheOnChange } from '../../lib/flashListLayout';
 import { useAppTheme, type ThemeColors } from '../../lib/theme';
 import { WatchlistEntry } from '../../store/watchStore';
 import { useLayoutFor, useWatchStore } from '../../store/watchStore';
@@ -161,6 +162,16 @@ export default function ProfileShowsScreen() {
   const [query, setQuery] = useState('');
   const [isLanguageModalVisible, setIsLanguageModalVisible] = useState(false);
   const [isFilterSheetVisible, setIsFilterSheetVisible] = useState(false);
+  const listRef = useRef<FlashListRef<WatchlistEntry>>(null);
+  const previousLayoutRef = useRef(layout);
+
+  if (previousLayoutRef.current !== layout) {
+    previousLayoutRef.current = clearFlashListLayoutCacheOnChange(
+      previousLayoutRef.current,
+      layout,
+      listRef
+    );
+  }
   // Derived from the tab selection, not independent state — Last Watched
   // is one of the single-select FILTERS options now (Phase 63), not a
   // second toggle that could be active alongside Continuing/Ended.
@@ -312,9 +323,12 @@ export default function ProfileShowsScreen() {
           <FlashList
             // Perf fix (2026-08-07): no remount needed for a numColumns
             // change — see (tabs)/index.tsx's identical note.
+            ref={listRef}
             data={filtered}
             keyExtractor={(item) => String(item.id)}
             numColumns={layout === 'grid' ? 3 : 1}
+            getItemType={() => layout}
+            estimatedItemSize={layout === 'grid' ? 230 : 108}
             extraData={layout}
             renderItem={({ item }) =>
               layout === 'grid' ? <ShowGridCard entry={item} /> : <ShowListRow entry={item} />
