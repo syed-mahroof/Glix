@@ -77,12 +77,23 @@ export default function ProfileAnimeScreen() {
   const [isFilterSheetVisible, setIsFilterSheetVisible] = useState(false);
   const showsListRef = useRef<FlashListRef<WatchlistEntry>>(null);
   const moviesListRef = useRef<FlashListRef<MovieWatchlistItem>>(null);
-  const previousLayoutRef = useRef(layout);
+  // Independent refs — only one of shows/movies is mounted at a time (the
+  // segment tab), so a single shared "previous layout" would get stuck at
+  // the stale value whenever the other segment's list wasn't mounted to
+  // report convergence. See app/(tabs)/index.tsx's identical fix.
+  const previousShowsLayoutRef = useRef(layout);
+  const previousMoviesLayoutRef = useRef(layout);
 
-  if (previousLayoutRef.current !== layout) {
-    clearFlashListLayoutCacheOnChange(previousLayoutRef.current, layout, showsListRef);
-    previousLayoutRef.current = clearFlashListLayoutCacheOnChange(
-      previousLayoutRef.current,
+  if (previousShowsLayoutRef.current !== layout) {
+    previousShowsLayoutRef.current = clearFlashListLayoutCacheOnChange(
+      previousShowsLayoutRef.current,
+      layout,
+      showsListRef
+    );
+  }
+  if (previousMoviesLayoutRef.current !== layout) {
+    previousMoviesLayoutRef.current = clearFlashListLayoutCacheOnChange(
+      previousMoviesLayoutRef.current,
       layout,
       moviesListRef
     );

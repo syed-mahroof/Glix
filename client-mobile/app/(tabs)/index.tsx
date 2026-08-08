@@ -479,15 +479,28 @@ export default function ShowsScreen() {
   const [expandedPastLabels, setExpandedPastLabels] = useState<string[]>([]);
   const watchlistListRef = useRef<FlashListRef<ShowEpisodeRow>>(null);
   const upcomingListRef = useRef<FlashListRef<UpcomingListEntry>>(null);
-  const previousLayoutRef = useRef(layout);
+  // Two independent refs, not one shared between them — each FlashList
+  // mounts/unmounts on its own (e.g. Upcoming's Calendar view unmounts
+  // upcomingListRef while watchlistListRef stays mounted), so a single
+  // shared "previous layout" would get stuck at the stale value whenever
+  // either list wasn't currently mounted to report convergence, causing the
+  // still-mounted list's cache to be re-cleared on every subsequent render.
+  const previousWatchlistLayoutRef = useRef(layout);
+  const previousUpcomingLayoutRef = useRef(layout);
 
   // Grid cells retain a row-normalizing minHeight. FlashList v2 carries that
   // measurement into its linear manager unless asked to clear its cache,
   // leaving grid-sized gaps between compact list rows after a toggle.
-  if (previousLayoutRef.current !== layout) {
-    clearFlashListLayoutCacheOnChange(previousLayoutRef.current, layout, watchlistListRef);
-    previousLayoutRef.current = clearFlashListLayoutCacheOnChange(
-      previousLayoutRef.current,
+  if (previousWatchlistLayoutRef.current !== layout) {
+    previousWatchlistLayoutRef.current = clearFlashListLayoutCacheOnChange(
+      previousWatchlistLayoutRef.current,
+      layout,
+      watchlistListRef
+    );
+  }
+  if (previousUpcomingLayoutRef.current !== layout) {
+    previousUpcomingLayoutRef.current = clearFlashListLayoutCacheOnChange(
+      previousUpcomingLayoutRef.current,
       layout,
       upcomingListRef
     );
