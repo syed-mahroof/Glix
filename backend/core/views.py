@@ -544,7 +544,7 @@ class WatchlistView(APIView):
                 air_date,
                 air_datetime,
                 runtime_minutes,
-            ) in episode_rows.iterator(chunk_size=2000):
+            ) in episode_rows:
                 episodes_by_show[show_id].append(
                     {
                         "tmdb_id": tmdb_id,
