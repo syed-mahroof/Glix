@@ -22,6 +22,29 @@ import { extractErrorMessage } from '../lib/errors';
 // identical note for why this deliberately has NO explicit type argument.
 const discoverStorage = createDebouncedStorage();
 
+// Bug fix (2026-08-21, "empty gaps in the filtered Discover grid"): TMDB's
+// popularity-ordered /discover pagination legitimately repeats a title
+// across adjacent pages (a popularity tie moving pages as OTHER items shift
+// around it). Appending a "load more" page unconditionally could put the
+// same tmdb_id in the results array twice, at two different indices —
+// FlashList's own `keyExtractor` (`${media_type}-${tmdb_id}`) then produces
+// a duplicate key, which corrupts the recycler's cell↔key mapping and shows
+// up as the same grid-hole/misalignment symptom as the height-uniformity bug
+// this same fix batch addressed in SearchResultCard. Shared by both
+// loadMoreSearchResults and loadMoreFilteredResults below rather than
+// duplicated, since it's the exact same append operation for two different
+// pieces of state.
+function dedupeAppend(existing: DiscoverMediaItem[], incoming: DiscoverMediaItem[]): DiscoverMediaItem[] {
+  const seen = new Set(existing.map((item) => `${item.media_type}-${item.tmdb_id}`));
+  const fresh = incoming.filter((item) => {
+    const key = `${item.media_type}-${item.tmdb_id}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+  return [...existing, ...fresh];
+}
+
 // In-flight request trackers for runSearch/fetchFilteredResults — plain
 // module-scope refs, not store state, since nothing needs to re-render on
 // their own account. Neither guard here checked *completed* state (the
@@ -421,7 +444,7 @@ export const useDiscoverStore = create<DiscoverState>()(
         { signal: controller.signal }
       );
       set((state) => ({
-        searchResults: [...state.searchResults, ...response.data.results],
+        searchResults: dedupeAppend(state.searchResults, response.data.results),
         searchPage: response.data.page,
         searchTotalPages: response.data.total_pages,
         isLoadingMoreSearch: false,
@@ -516,7 +539,7 @@ export const useDiscoverStore = create<DiscoverState>()(
         signal: controller.signal,
       });
       set((state) => ({
-        filteredResults: [...state.filteredResults, ...response.data.results],
+        filteredResults: dedupeAppend(state.filteredResults, response.data.results),
         filteredPage: response.data.page,
         filteredTotalPages: response.data.total_pages,
         isLoadingMoreFiltered: false,

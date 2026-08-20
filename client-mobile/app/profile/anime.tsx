@@ -24,7 +24,8 @@ import WatchlistFilterSheet from '../../components/WatchlistFilterSheet';
 import { isAnimeByGenresAndLanguage, isAnimeByGenreStringAndLanguage } from '../../lib/anime';
 import { clearFlashListLayoutCacheOnChange } from '../../lib/flashListLayout';
 import { useAppTheme } from '../../lib/theme';
-import { useLayoutFor, useWatchStore, type MovieWatchlistItem, type WatchlistEntry } from '../../store/watchStore';
+import { useWatchStore, type MovieWatchlistItem, type WatchlistEntry } from '../../store/watchStore';
+import { useLayoutFor } from '../../store/preferencesStore';
 import { MovieGridCard, MovieListRow } from './movies';
 import { ShowGridCard, ShowListRow } from './shows';
 

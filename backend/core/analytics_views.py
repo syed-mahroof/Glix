@@ -18,8 +18,10 @@ from a date sequence).
 import calendar
 from collections import Counter, defaultdict
 from datetime import date, timedelta
+from decimal import Decimal
 
 from django.db.models import Avg, Count, Min, Sum
+from django.db.models.functions import ExtractMonth, ExtractYear
 from django.utils import timezone
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
@@ -42,11 +44,13 @@ from core.analytics_serializers import (
 from core.cache_utils import safe_cache_get, safe_cache_set
 from core.cache_keys import (
     ANALYTICS_DASHBOARD_CACHE_TTL_SECONDS,
+    ANALYTICS_GENRES_CACHE_TTL_SECONDS,
     ANALYTICS_HEATMAP_ALL_CACHE_TTL_SECONDS,
     ANALYTICS_MONTHLY_SUMMARY_CACHE_TTL_SECONDS,
     ANALYTICS_MOVIES_CACHE_TTL_SECONDS,
     ANALYTICS_STATISTICS_CACHE_TTL_SECONDS,
     analytics_dashboard_cache_key,
+    analytics_genres_cache_key,
     analytics_heatmap_all_cache_key,
     analytics_monthly_summary_cache_key,
     analytics_movies_cache_key,
@@ -78,6 +82,7 @@ from core.models import (
     EpisodeInteraction,
     MovieCache,
     MovieRewatch,
+    MovieReview,
     MovieWatchlist,
     MovieWatchState,
     RewatchEpisodeState,
@@ -314,14 +319,17 @@ def _genre_stats(user) -> list[dict]:
     Compute per-genre episode-watch counts by joining WatchState → CachedEpisode
     → CachedShow.genres (an ArrayField). Each watched episode contributes its
     show's genres to the tally.
-    """
-    watched_shows = (
-        WatchState.objects.filter(user=user)
-        .values("episode__show__genres", "episode__show__tmdb_id")
-        .distinct()
-        .order_by()
-    )
 
+    Phase 85, Batch D: this used to also run a `watched_shows` query
+    (grouped by show genres + tmdb_id, `.distinct()`) whose RESULT was never
+    referenced anywhere below — a second full scan of the user's WatchState
+    table, paid on every call, for nothing. Found while profiling
+    AnalyticsGenresView against production: it was consistently the single
+    slowest analytics endpoint (~2.1s on a real library) despite returning a
+    tiny payload, which pointed at wasted backend work rather than payload
+    size. Removed; AnalyticsGenresView's new response cache (see that view)
+    is the other half of the fix for the genuinely-needed work below.
+    """
     # For unique shows, tally genres
     genre_episode_counts: Counter = Counter()
     genre_show_sets: dict[str, set] = defaultdict(set)
@@ -795,14 +803,29 @@ class AnalyticsStatisticsView(APIView):
 
 
 class AnalyticsGenresView(APIView):
-    """GET /api/analytics/genres/"""
+    """
+    GET /api/analytics/genres/
+
+    Phase 85, Batch D: was entirely uncached — profiled against production
+    at ~2.1s on every single call for a real 400+ show library, the single
+    slowest analytics endpoint measured despite its tiny (few-hundred-byte)
+    response. Same cache/TTL/invalidation shape as AnalyticsDashboardView/
+    AnalyticsStatisticsView (signals.py's WatchState receiver busts all
+    three together — they're all derived from the same underlying rows).
+    """
 
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
+        cache_key = analytics_genres_cache_key(request.user.id)
+        cached = safe_cache_get(cache_key)
+        if cached is not None:
+            return Response(cached)
+
         genre_data = _genre_stats(request.user)
-        serializer = GenreStatSerializer(genre_data, many=True)
-        return Response(serializer.data)
+        serialized = GenreStatSerializer(genre_data, many=True).data
+        safe_cache_set(cache_key, serialized, ANALYTICS_GENRES_CACHE_TTL_SECONDS)
+        return Response(serialized)
 
 
 class AnalyticsMVPCharactersView(APIView):
@@ -988,6 +1011,25 @@ class AnalyticsMoviesView(APIView):
                 "runtime_minutes": longest_ws.movie.runtime_minutes,
             }
 
+        # runtime_minutes=0 means "TMDB runtime unknown" (MovieCache's own
+        # default, not a real 0-minute movie) — excluded so an un-synced
+        # movie can't spuriously win "shortest" over every real runtime.
+        shortest_ws = (
+            MovieWatchState.objects.filter(user=user)
+            .exclude(movie__runtime_minutes=0)
+            .select_related("movie")
+            .order_by("movie__runtime_minutes")
+            .first()
+        )
+        shortest_movie = None
+        if shortest_ws:
+            shortest_movie = {
+                "tmdb_id": shortest_ws.movie_id,
+                "title": shortest_ws.movie.title,
+                "poster_path": shortest_ws.movie.poster_path,
+                "runtime_minutes": shortest_ws.movie.runtime_minutes,
+            }
+
         # Genre trick: MovieCache.genres_string is a comma-separated combo
         # ("Drama, Comedy, Thriller"), not an ArrayField, and there are
         # only a few dozen distinct combos across any real library — group
@@ -1016,12 +1058,18 @@ class AnalyticsMoviesView(APIView):
             for genre, count in genre_counter.most_common(10)
         ]
 
+        # DB groups+counts by release YEAR (a Count aggregation, not a raw
+        # release_date fetched per row) — Python only buckets however many
+        # distinct years came back into decades, not every watched movie.
         decade_counter: Counter = Counter()
-        for release_date in MovieWatchState.objects.filter(user=user).values_list(
-            "movie__release_date", flat=True
+        for release_year, count in (
+            MovieWatchState.objects.filter(user=user, movie__release_date__isnull=False)
+            .annotate(release_year=ExtractYear("movie__release_date"))
+            .values("release_year")
+            .annotate(count=Count("id"))
+            .values_list("release_year", "count")
         ):
-            if release_date:
-                decade_counter[f"{(release_date.year // 10) * 10}s"] += 1
+            decade_counter[f"{(release_year // 10) * 10}s"] += count
         by_decade = [
             {"decade": decade, "count": count} for decade, count in sorted(decade_counter.items())
         ]
@@ -1040,6 +1088,76 @@ class AnalyticsMoviesView(APIView):
             )
         ]
 
+        # ── Movie analytics expansion (Phase 85, Batch C) ──────────────────
+
+        # Language breakdown — blank original_language (MovieCache rows
+        # cached before that field existed, or never re-synced since) is
+        # its own honest "unknown" bucket rather than silently dropped.
+        by_language = sorted(
+            (
+                {
+                    "language": code or "unknown",
+                    "count": count,
+                    "percentage": round((count / movies_watched) * 100, 1) if movies_watched else 0.0,
+                }
+                for code, count in (
+                    MovieWatchState.objects.filter(user=user)
+                    .values("movie__original_language")
+                    .annotate(count=Count("id"))
+                    .values_list("movie__original_language", "count")
+                )
+            ),
+            key=lambda row: row["count"],
+            reverse=True,
+        )
+
+        # "Watched in {year}" browse list — same shape as recent_movies (a
+        # 5-item teaser) but the full current year, most-recent-first. 60 is
+        # a generous cap (5/month average) against a pathological single-day
+        # binge-import inflating the response size for no real UI benefit.
+        this_year_movies = [
+            {
+                "tmdb_id": ws.movie_id,
+                "title": ws.movie.title,
+                "poster_path": ws.movie.poster_path,
+                "watched_at": ws.watched_at,
+            }
+            for ws in (
+                MovieWatchState.objects.filter(user=user, watched_at__year=timezone.now().year)
+                .select_related("movie")
+                .order_by("-watched_at")[:60]
+            )
+        ]
+
+        # 12 fixed buckets (not just whatever months have activity) so the
+        # client can render a full Jan-Dec strip without gap-filling itself.
+        month_counts = dict(
+            MovieWatchState.objects.filter(user=user, watched_at__year=timezone.now().year)
+            .annotate(watch_month=ExtractMonth("watched_at"))
+            .values("watch_month")
+            .annotate(count=Count("id"))
+            .values_list("watch_month", "count")
+        )
+        by_month = [{"month": m, "count": month_counts.get(m, 0)} for m in range(1, 13)]
+
+        # User's own half-star ratings (MovieReview — optional, gated on
+        # watched, distinct from TMDB's public vote_average). Null average
+        # when nothing's been rated yet, not 0 — 0 would read as "rated
+        # everything one star" rather than "hasn't rated anything".
+        review_agg = MovieReview.objects.filter(user=user).aggregate(avg=Avg("rating"), count=Count("id"))
+        rated_count = review_agg["count"] or 0
+        average_rating = float(review_agg["avg"]) if review_agg["avg"] is not None else None
+        rating_counts = dict(
+            MovieReview.objects.filter(user=user)
+            .values("rating")
+            .annotate(count=Count("id"))
+            .values_list("rating", "count")
+        )
+        rating_distribution = [
+            {"rating": step, "count": rating_counts.get(step, 0)}
+            for step in (Decimal(str(n / 2)) for n in range(1, 11))
+        ]
+
         data = {
             "movies_watched": movies_watched,
             "movies_tracked": movies_tracked,
@@ -1048,9 +1166,16 @@ class AnalyticsMoviesView(APIView):
             "average_runtime_minutes": avg_runtime,
             "watched_this_year": watched_this_year,
             "longest_movie": longest_movie,
+            "shortest_movie": shortest_movie,
             "top_genres": top_genres,
             "by_decade": by_decade,
             "recent_movies": recent_movies,
+            "this_year_movies": this_year_movies,
+            "by_language": by_language,
+            "by_month": by_month,
+            "average_rating": average_rating,
+            "rated_count": rated_count,
+            "rating_distribution": rating_distribution,
         }
         serialized = AnalyticsMoviesSerializer(data).data
         safe_cache_set(cache_key, serialized, ANALYTICS_MOVIES_CACHE_TTL_SECONDS)

@@ -17,6 +17,23 @@ import { createDebouncedStorage, markStorageHydrated } from '../lib/persistStora
 // PersistedState `partialize` ends up determining, exactly like the
 // original inline `storage: createDebouncedStorage()` always relied on.
 const watchStorage = createDebouncedStorage();
+
+// Bug fix (2026-08-21, "season list shows 0 watched right after marking
+// episodes"): fetchWatchlist has multiple un-awaited call sites (season
+// screen's mount effect AND its post-toggle refetch, Shows Hub's focus
+// effect, every mutation's own post-toggle refetch elsewhere) with no
+// ordering guarantee between them. `/watchlist/?page_size=all` is the
+// heaviest endpoint in the app, so it's also the one most likely to still be
+// in flight when a second call to it starts — and whichever response lands
+// LAST wins, even if it was the one that started FIRST and is now serving
+// pre-toggle data over a post-toggle refetch that already resolved. A plain
+// module-scope counter (matching discoverStore's AbortController-per-call
+// pattern for the same class of race, just without needing axios cancellation
+// since a stale watchlist response has no side effect worth aborting
+// server-side) — each call stamps the counter, and only the response from
+// the LATEST call is ever applied to state. An older response finishing
+// after a newer one already landed is discarded rather than clobbering it.
+let watchlistFetchSeq = 0;
 import { extractErrorMessage } from '../lib/errors';
 import { Platform } from 'react-native';
 import { requestWidgetUpdate } from 'react-native-android-widget';
@@ -51,11 +68,6 @@ if (Platform.OS === 'ios') {
     // widget extension target not built yet (Expo Go / dev-client before EAS build)
   }
 }
-
-export type LayoutMode = 'list' | 'grid';
-/** One entry per screen that owns its own list/grid choice — see
- *  defaultLayout/layoutOverrides on WatchStoreState. */
-export type LayoutScope = 'shows' | 'movies' | 'myShows' | 'myMovies' | 'myAnime';
 
 export interface Episode {
   tmdb_id: number;
@@ -175,6 +187,11 @@ export interface WatchlistEntry {
    *  if nothing watched yet. Drives recency-aware Shows Hub pill sorting. */
   last_watched_at: string | null;
   active_rewatch: ActiveRewatch | null;
+  /** How many distinct seasons of this show have ANY cached episode data —
+   *  see isShowComplete() below for why this matters (aired_episode_count
+   *  only counts episodes actually fetched from TMDB, not every episode the
+   *  show really has). */
+  seasons_cached: number;
   added_at: string;
   updated_at: string;
 }
@@ -510,6 +527,28 @@ export interface RecentMovie {
  *  Kept as its own slice, not merged into the existing fields, since the
  *  whole point of this addition was "existing TV numbers must not
  *  change." */
+export interface LanguageStat {
+  /** ISO 639-1 code (e.g. "en", "ko", "hi"), or "unknown" for a movie
+   *  cached before original_language existed / not yet re-synced —
+   *  see MovieCache.original_language's own comment. Map to a display
+   *  name client-side the same way the language filter already does. */
+  language: string;
+  count: number;
+  percentage: number;
+}
+
+export interface MonthStat {
+  /** 1-12, current year only. */
+  month: number;
+  count: number;
+}
+
+export interface RatingBucket {
+  /** Half-star step, 0.5-5.0. */
+  rating: number;
+  count: number;
+}
+
 export interface MovieAnalytics {
   movies_watched: number;
   movies_tracked: number;
@@ -518,9 +557,27 @@ export interface MovieAnalytics {
   average_runtime_minutes: number;
   watched_this_year: number;
   longest_movie: LongestMovie | null;
+  /** Shortest tracked movie with a known (non-zero) runtime — null if
+   *  nothing watched has a synced runtime yet. */
+  shortest_movie: LongestMovie | null;
   top_genres: { genre: string; count: number; percentage: number }[];
   by_decade: DecadeStat[];
   recent_movies: RecentMovie[];
+  /** Every movie watched this calendar year, most-recent-first (capped at
+   *  60 server-side) — a "Watched in {year}" browse list, not just the
+   *  5-item recent_movies teaser above. */
+  this_year_movies: RecentMovie[];
+  by_language: LanguageStat[];
+  /** Always 12 entries (months 1-12, current year), zero-filled — no
+   *  client-side gap-filling needed for a Jan-Dec strip. */
+  by_month: MonthStat[];
+  /** The user's own half-star rating average (MovieReview, optional,
+   *  gated on watched) — null when nothing's been rated yet, distinct
+   *  from a 0.0 which would read as "rated everything one star". */
+  average_rating: number | null;
+  rated_count: number;
+  /** Always 10 entries (0.5 through 5.0 in half-star steps), zero-filled. */
+  rating_distribution: RatingBucket[];
 }
 
 interface AnalyticsSlice {
@@ -562,19 +619,6 @@ interface WatchStoreState extends AnalyticsSlice {
    *  individual toggle/bulk-toggle/rewatch action. */
   analyticsDirtyAt: number;
   error: string | null;
-
-  /** App-wide default (Settings > Appearance), plus a per-screen override
-   *  map — Shows Hub, Movies Hub, Profile > My Shows/My Movies/My Anime can
-   *  each pick their own layout without disturbing the others or the
-   *  default. Read via useLayoutFor(scope) rather than these fields
-   *  directly. Both persisted so the choice sticks across app restarts. */
-  defaultLayout: LayoutMode;
-  layoutOverrides: Partial<Record<LayoutScope, LayoutMode>>;
-  /** Sets the app-wide default AND clears every per-screen override, so
-   *  a Settings change is felt everywhere immediately rather than being
-   *  masked by whatever overrides happen to already exist. */
-  setDefaultLayout: (mode: LayoutMode) => void;
-  setLayoutForScope: (scope: LayoutScope, mode: LayoutMode) => void;
 
   /** Original-language filter (ISO 639-1 code, e.g. "ko"), shared across
    *  Profile > My Shows and My Movies. Null means "All languages". Filtering
@@ -677,7 +721,10 @@ interface WatchStoreState extends AnalyticsSlice {
   clearCompletedShow: () => void;
 }
 
-function findEntryAndEpisode(
+// Exported for useCatchupCascade.ts, which needs to re-check whether ids the
+// server returned are still actually unwatched by the time its response
+// lands — see that hook's staleCheckedIds guard for why.
+export function findEntryAndEpisode(
   buckets: WatchlistBuckets,
   episodeId: number
 ): { bucketKey: keyof WatchlistBuckets; entryIndex: number; episodeIndex: number } | null {
@@ -696,6 +743,47 @@ function findEntryAndEpisode(
   return null;
 }
 
+/** Whether a show's tracked-episode coverage is complete enough to trust an
+ *  "aired vs watched" comparison at all. aired_episode_count only counts
+ *  CachedEpisode rows this app has actually fetched from TMDB — ShowAddView
+ *  eager-caches season 1 alone — so a show can read as "watched >= aired"
+ *  purely because later seasons were never fetched, not because it's
+ *  actually finished. seasons_cached (backend: WatchlistView / core.dates)
+ *  is how many distinct seasons have any cached episode at all. */
+function isShowFullyCovered(entry: WatchlistEntry): boolean {
+  return entry.show.total_seasons > 0 && entry.seasons_cached >= entry.show.total_seasons;
+}
+
+/** Single source of truth for "is this show actually finished" — replaces
+ *  the two copy-pasted completion checks (toggleWatchState/
+ *  bulkToggleWatchState) that used to drift independently. Bug fix
+ *  (2026-08-21, "series complete + confetti while seasons 5-7 remain"): both
+ *  now route through this, gated on isShowFullyCovered so a show with
+ *  uncached later seasons never reads as complete just because everything
+ *  CACHED so far is watched. CANCELED is treated the same as ENDED — a
+ *  cancelled show is exactly as "nothing more is coming" as a finished
+ *  one, and the old check silently never fired for it. */
+export function isShowComplete(entry: WatchlistEntry): boolean {
+  return (
+    (entry.show.status === 'ENDED' || entry.show.status === 'CANCELED') &&
+    entry.aired_episode_count > 0 &&
+    entry.watched_episode_count >= entry.aired_episode_count &&
+    isShowFullyCovered(entry)
+  );
+}
+
+/** True only when the episode is both present in the cached watchlist AND
+ *  already watched. An episode this store hasn't cached yet (never opened
+ *  season, never in a tracked show) reads as false, same as "not watched" —
+ *  callers that need to distinguish "definitely unwatched" from "unknown"
+ *  should check findEntryAndEpisode's null case themselves. */
+export function isEpisodeWatched(buckets: WatchlistBuckets, episodeId: number): boolean {
+  const location = findEntryAndEpisode(buckets, episodeId);
+  if (!location) return false;
+  const entry = buckets[location.bucketKey].results[location.entryIndex];
+  return entry.show.episodes[location.episodeIndex]?.is_watched ?? false;
+}
+
 export const useWatchStore = create<WatchStoreState>()(
   persist(
     (set, get) => ({
@@ -711,12 +799,6 @@ export const useWatchStore = create<WatchStoreState>()(
   isResyncingStats: false,
   analyticsDirtyAt: Date.now(),
   error: null,
-
-  defaultLayout: 'list',
-  layoutOverrides: {},
-  setDefaultLayout: (mode) => set({ defaultLayout: mode, layoutOverrides: {} }),
-  setLayoutForScope: (scope, mode) =>
-    set((state) => ({ layoutOverrides: { ...state.layoutOverrides, [scope]: mode } })),
 
   selectedLanguage: null,
   setLanguageFilter: (language) => set({ selectedLanguage: language }),
@@ -745,6 +827,7 @@ export const useWatchStore = create<WatchStoreState>()(
   clearCompletedShow: () => set({ completedShow: null }),
 
   fetchWatchlist: async () => {
+    const seq = ++watchlistFetchSeq;
     set({ isLoadingWatchlist: true, error: null });
     try {
       // page_size=all: load every entry unpaginated. The whole app derives
@@ -752,9 +835,14 @@ export const useWatchStore = create<WatchStoreState>()(
       // Home/Upcoming tab, home-screen widget), so a paginated fetch capped
       // all of them at 20/bucket — a 200-show import read as "My Shows: 40".
       const response = await api.get<WatchlistBuckets>('/watchlist/?page_size=all');
+      // Discard if a newer fetchWatchlist() call has started since this one
+      // did — see watchlistFetchSeq's own comment. isLoadingWatchlist is
+      // left alone too: the newer call already owns that flag's lifecycle.
+      if (seq !== watchlistFetchSeq) return;
       set({ watchlist: response.data, isLoadingWatchlist: false });
       get().syncWidgetData();
     } catch (error) {
+      if (seq !== watchlistFetchSeq) return;
       set({ error: extractErrorMessage(error), isLoadingWatchlist: false });
     }
   },
@@ -923,21 +1011,22 @@ export const useWatchStore = create<WatchStoreState>()(
           : 0;
 
       // Phase 67: series-finished celebration. Fires only on the specific
-      // mutation that crosses incomplete -> complete for a show whose
-      // status is 'ENDED' at this moment — computed from this action's own
-      // before (entrySnapshot)/after (entry) counts, never from a render or
-      // refetch, so it can't retroactively fire for a show that was already
-      // 100% watched before this shipped, and can't refire just from
-      // reopening the show. aired_episode_count is the same denominator
-      // progress_percentage already uses above; for an Ended show every
-      // episode has aired, so "aired" here means "every episode of the
-      // series." Only the marking direction can cross this threshold.
+      // mutation that crosses incomplete -> complete — computed from this
+      // action's own before (entrySnapshot)/after (entry) counts via the
+      // shared isShowComplete() predicate, never from a render or refetch,
+      // so it can't retroactively fire for a show that was already 100%
+      // watched before this shipped, and can't refire just from reopening
+      // the show. Only the marking direction can cross this threshold.
+      // isShowComplete's coverage gate (seasons_cached vs total_seasons)
+      // doesn't change within this local mutation, so `entry`'s own value
+      // applies to both the before/after checks below.
+      const wasComplete = isShowComplete({
+        ...entry,
+        watched_episode_count: entrySnapshot.watched_episode_count,
+        aired_episode_count: entrySnapshot.aired_episode_count,
+      });
       const justCompletedShow =
-        optimisticWatched &&
-        entry.show.status === 'ENDED' &&
-        entry.aired_episode_count > 0 &&
-        entrySnapshot.watched_episode_count < entrySnapshot.aired_episode_count &&
-        entry.watched_episode_count >= entry.aired_episode_count
+        optimisticWatched && !wasComplete && isShowComplete(entry)
           ? { showId: entry.show.tmdb_id, title: entry.show.title, posterPath: entry.show.poster_path }
           : null;
 
@@ -1013,6 +1102,10 @@ export const useWatchStore = create<WatchStoreState>()(
         profile: previousProfile,
         history: previousHistory,
         error: extractErrorMessage(error),
+        // Bug fix: completedShow is set inside the optimistic block above,
+        // BEFORE the server confirms — a failed request left the confetti's
+        // trigger armed for a toggle that never actually completed the show.
+        completedShow: null,
       });
     }
   },
@@ -1496,10 +1589,8 @@ export const useWatchStore = create<WatchStoreState>()(
             !bulkCompletedShow &&
             watched &&
             affected &&
-            entry.show.status === 'ENDED' &&
-            entry.aired_episode_count > 0 &&
-            beforeWatchedCount < entry.aired_episode_count &&
-            watchedCount >= entry.aired_episode_count
+            !isShowComplete({ ...entry, watched_episode_count: beforeWatchedCount }) &&
+            isShowComplete({ ...entry, watched_episode_count: watchedCount })
           ) {
             bulkCompletedShow = { showId: entry.show.tmdb_id, title: entry.show.title, posterPath: entry.show.poster_path };
           }
@@ -1599,6 +1690,10 @@ export const useWatchStore = create<WatchStoreState>()(
         profile: previousProfile,
         history: previousHistory,
         error: extractErrorMessage(error),
+        // Bug fix: completedShow is set inside the optimistic block above,
+        // BEFORE the server confirms — a failed request left the confetti's
+        // trigger armed for a toggle that never actually completed the show.
+        completedShow: null,
       });
     }
   },
@@ -1808,22 +1903,28 @@ export const useWatchStore = create<WatchStoreState>()(
       onRehydrateStorage: () => () => {
         markStorageHydrated(watchStorage);
       },
-      version: 1,
+      version: 2,
       // v0 -> v1: preferredLayout/toggleLayout (one global list/grid choice)
-      // replaced by defaultLayout + per-scope layoutOverrides (Phase 75.5) —
-      // seed the new default from whatever was already persisted so an
-      // existing user's choice isn't silently reset to 'list'.
+      // replaced by defaultLayout + per-scope layoutOverrides (Phase 75.5).
+      // v1 -> v2 (2026-08-21, "Default layout resets on his phone"):
+      // defaultLayout/layoutOverrides moved OUT of this store into their own
+      // preferencesStore/watchtracker-prefs key — this blob also carries the
+      // entire watchlist, which on a large library is large enough that
+      // AsyncStorage can fail to read it back, and a failed read silently
+      // resets whatever preference lived in here alongside it. See
+      // preferencesStore.ts's header for the full story, including the
+      // one-time seed that carries an existing user's choice across. Both
+      // fields are simply dropped here now rather than migrated forward —
+      // preferencesStore reads them out of this same on-disk blob itself,
+      // directly, before this migration's own rewrite can strip them.
       migrate: (persistedState: unknown, version: number) => {
         const state = (persistedState ?? {}) as Record<string, unknown>;
-        if (version < 1) {
-          const { preferredLayout, ...rest } = state;
-          return {
-            ...rest,
-            defaultLayout: preferredLayout === 'grid' ? 'grid' : 'list',
-            layoutOverrides: {},
-          };
-        }
-        return state;
+        const { preferredLayout, defaultLayout, layoutOverrides, ...rest } = state;
+        void version;
+        void preferredLayout;
+        void defaultLayout;
+        void layoutOverrides;
+        return rest;
       },
       partialize: (state) => ({
         watchlist: state.watchlist,
@@ -1835,8 +1936,6 @@ export const useWatchStore = create<WatchStoreState>()(
         // that already includes those same movies' minutes.
         movieWatchlist: state.movieWatchlist,
         profile: state.profile,
-        defaultLayout: state.defaultLayout,
-        layoutOverrides: state.layoutOverrides,
         selectedLanguage: state.selectedLanguage,
         dashboard: state.dashboard,
         streak: state.streak,
@@ -1851,12 +1950,5 @@ export const useWatchStore = create<WatchStoreState>()(
   )
 );
 
-/** The effective layout for one screen — its own override if it's set one,
- *  else the app-wide default (Settings > Appearance). Two separate scoped
- *  selectors rather than one combined one, so a screen only re-renders when
- *  the piece of state it actually depends on changes. */
-export function useLayoutFor(scope: LayoutScope): LayoutMode {
-  const defaultLayout = useWatchStore((s) => s.defaultLayout);
-  const override = useWatchStore((s) => s.layoutOverrides[scope]);
-  return override ?? defaultLayout;
-}
+// useLayoutFor / LayoutMode / LayoutScope moved to store/preferencesStore.ts
+// (2026-08-21) — see that file's header for why.

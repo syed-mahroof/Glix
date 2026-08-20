@@ -26,7 +26,7 @@ import { hasAired, pad } from '../../../../lib/dateFormat';
 import { extractErrorMessage } from '../../../../lib/errors';
 import { useAppTheme } from '../../../../lib/theme';
 import { useCatchupCascade } from '../../../../lib/useCatchupCascade';
-import { Episode, useWatchStore } from '../../../../store/watchStore';
+import { Episode, isShowComplete, useWatchStore, WatchlistBuckets } from '../../../../store/watchStore';
 
 interface ShowSummary {
   tmdb_id: number;
@@ -145,7 +145,16 @@ export default function SeasonScreen() {
 
   /** Immediate single-episode toggle — no catch-up check. Used for
    *  un-watching (always immediate) and for watching when there's
-   *  nothing chronologically prior to catch up on. */
+   *  nothing chronologically prior to catch up on.
+   *
+   *  Deliberately still a raw POST, not the store's own toggleWatchState:
+   *  that action flips based on the STORE's cached copy of the episode's
+   *  is_watched, which can be stale or entirely absent for a season this
+   *  screen just loaded fresh — routing through it risked flipping the
+   *  wrong direction. What it WAS missing, though — see the bug-fix note
+   *  below — is that bypassing the store entirely meant the store's own
+   *  completedShow (the confetti celebration) never had a chance to fire
+   *  for a show finished from this screen, no matter how it was finished. */
   const executeImmediateToggle = useCallback(
     async (episodeId: number) => {
       setTogglingIds((prev) => new Set(prev).add(episodeId));
@@ -156,11 +165,41 @@ export default function SeasonScreen() {
         prev.map((ep) => (ep.tmdb_id === episodeId ? { ...ep, is_watched: optimisticWatched } : ep))
       );
 
+      // Bug fix (2026-08-21, "finishing a show from the season screen never
+      // celebrates"): snapshot completion state from the store BEFORE this
+      // toggle (via the same isShowComplete() predicate the store's own
+      // toggleWatchState/bulkToggleWatchState use), so the crossing into
+      // complete can be detected below without duplicating the completion
+      // RULE itself — only the "was it already complete" diff is redone
+      // here, same shape as those two actions' own before/after checks.
+      const findShowEntry = (buckets: WatchlistBuckets) =>
+        [...buckets.to_watch.results, ...buckets.up_to_date.results, ...buckets.archived.results].find(
+          (entry) => entry.show.tmdb_id === tmdbId
+        ) ?? null;
+      const entryBefore = findShowEntry(useWatchStore.getState().watchlist);
+      const wasComplete = entryBefore ? isShowComplete(entryBefore) : false;
+
       try {
         await api.post('/watch-state/toggle/', { episode_id: episodeId });
         fetchProfile();
-        fetchWatchlist();
+        // Awaited (unlike the fire-and-forget calls around it) specifically
+        // so the completion check below reads a fresh entry, not whatever
+        // was cached before this toggle.
+        await fetchWatchlist();
         refreshContinueWatching();
+
+        if (optimisticWatched && !wasComplete) {
+          const entryAfter = findShowEntry(useWatchStore.getState().watchlist);
+          if (entryAfter && isShowComplete(entryAfter)) {
+            useWatchStore.setState({
+              completedShow: {
+                showId: entryAfter.show.tmdb_id,
+                title: entryAfter.show.title,
+                posterPath: entryAfter.show.poster_path,
+              },
+            });
+          }
+        }
       } catch (err) {
         setEpisodes((prev) =>
           prev.map((ep) =>
@@ -176,7 +215,7 @@ export default function SeasonScreen() {
         });
       }
     },
-    [episodes, fetchProfile, fetchWatchlist, refreshContinueWatching]
+    [episodes, fetchProfile, fetchWatchlist, refreshContinueWatching, tmdbId]
   );
 
   /** Marks the given episode ids watched in a single batched request
@@ -314,7 +353,13 @@ export default function SeasonScreen() {
   return (
     <SafeAreaView style={[styles.container, { backgroundColor: c.bg }]} edges={['top']}>
       <View style={styles.header}>
-        <PressableScale onPress={() => router.back()} hitSlop={8} style={styles.iconButton}>
+        <PressableScale
+          onPress={() => router.back()}
+          hitSlop={8}
+          style={styles.iconButton}
+          accessibilityRole="button"
+          accessibilityLabel="Go back"
+        >
           <ArrowLeft color={c.textPrimary} size={22} />
         </PressableScale>
         <View style={styles.headerTextColumn}>

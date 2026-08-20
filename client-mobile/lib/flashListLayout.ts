@@ -6,7 +6,7 @@
 // layout prop changes, while retaining the list instance, scroll container,
 // image cache, and normal recycling.
 
-import type { LayoutMode } from '../store/watchStore';
+import type { LayoutMode } from '../store/preferencesStore';
 
 export interface FlashListLayoutCacheRef {
   current: { clearLayoutCacheOnUpdate: () => void } | null;

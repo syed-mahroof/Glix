@@ -27,7 +27,8 @@ import PressableScale from '../../components/PressableScale';
 import { hasAired } from '../../lib/dateFormat';
 import { clearFlashListLayoutCacheOnChange } from '../../lib/flashListLayout';
 import { useAppTheme } from '../../lib/theme';
-import { MovieWatchlistItem, useLayoutFor, useWatchStore } from '../../store/watchStore';
+import { MovieWatchlistItem, useWatchStore } from '../../store/watchStore';
+import { useLayoutFor } from '../../store/preferencesStore';
 
 // ─── Filter categories ────────────────────────────────────────────────────────
 
@@ -195,6 +196,7 @@ export default function MoviesScreen() {
               { backgroundColor: c.glassFill, borderColor: c.hairline },
             ]}
             onPress={() => router.push('/lists?media=movie' as any)}
+            hitSlop={8}
             accessibilityRole="button"
             accessibilityLabel="My Lists"
           >

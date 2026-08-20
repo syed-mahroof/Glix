@@ -389,6 +389,73 @@ def backfill_missing_airtimes():
     return {"processed": processed, "found": found}
 
 
+@shared_task(bind=True, max_retries=2, default_retry_delay=30)
+def cache_next_missing_season(self, show_id: int):
+    """
+    Bug fix (2026-08-21, "show reads as complete / drops off the Watch List
+    while it still has uncached later seasons"): WatchlistView's up_to_date
+    bucketing (and the client's own show-complete/confetti check) both used
+    to derive "aired episode count" purely from CachedEpisode rows that
+    already exist locally. ShowAddView only eager-caches season 1 on add, so
+    a user who watches straight through season 1 of an ENDED show with more
+    seasons TMDB knows about — but this app has never fetched — read as 100%
+    caught up: `watched >= aired` was true only because `aired` didn't yet
+    know seasons 2+ existed. WatchlistView's coverage gate (seasons_cached >=
+    show.total_seasons) now refuses to call that show up_to_date, but that
+    alone would leave it stuck "not complete, not on the watch list either"
+    forever, since nothing was ever fetching the missing season. This task is
+    that fetch: called off the request path (see WatchStateToggleView /
+    BulkWatchStateToggleView) whenever a toggle leaves the user caught up on
+    every CACHED episode but seasons_cached < total_seasons, so the very next
+    poll of /watchlist/ has the newly-cached season's episodes and
+    pickNextEpisode can propose season N+1 episode 1 instead of the show
+    just silently vanishing from every bucket.
+
+    Caches only the single next missing season, not the whole remaining
+    show — mirrors CatchupCheckView's own "just enough to answer, not the
+    whole library" discipline. If more seasons are still missing after this
+    one, the same trigger fires again next time the user catches up on the
+    newly-cached season too, one hop at a time.
+    """
+    try:
+        show = CachedShow.objects.get(pk=show_id)
+    except CachedShow.DoesNotExist:
+        return {"show_id": show_id, "cached_season": None}
+
+    if show.total_seasons <= 0:
+        return {"show_id": show_id, "cached_season": None}
+
+    cached_seasons = set(
+        CachedEpisode.objects.filter(show=show)
+        .values_list("season_number", flat=True)
+        .distinct()
+    )
+    next_missing = next(
+        (s for s in range(1, show.total_seasons + 1) if s not in cached_seasons), None
+    )
+    if next_missing is None:
+        return {"show_id": show_id, "cached_season": None}
+
+    tmdb = TMDBService()
+    try:
+        tmdb.get_season_episodes(show.tmdb_id, next_missing)
+    except TMDBServiceError as exc:
+        # A season TMDB genuinely doesn't have (see get_season_episodes'
+        # own negative-cache comment) shouldn't retry — that's a permanent
+        # 404, not a transient failure. Anything else (network blip) is
+        # worth the couple of retries bind=True gives it.
+        if "not found" in str(exc).lower():
+            return {"show_id": show_id, "cached_season": None, "error": str(exc)}
+        raise self.retry(exc=exc)
+
+    # Not explicitly busting the per-user watchlist cache here: it's keyed by
+    # user_id, not show_id (this show could be on multiple users'
+    # watchlists), and its TTL is already only CACHE_TTL_SECONDS — short
+    # enough that the newly-cached season shows up on the next natural
+    # refetch without needing a fan-out bust across every affected user.
+    return {"show_id": show_id, "cached_season": next_missing}
+
+
 @shared_task
 def prewarm_discover_caches():
     """

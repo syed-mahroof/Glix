@@ -423,7 +423,13 @@ export default function ShowDetailScreen() {
     return (
       <SafeAreaView style={[styles.container, { backgroundColor: c.bg }]}>
         <View style={styles.header}>
-          <PressableScale onPress={() => goBack(router)} hitSlop={8} style={styles.iconButton}>
+          <PressableScale
+            onPress={() => goBack(router)}
+            hitSlop={8}
+            style={styles.iconButton}
+            accessibilityRole="button"
+            accessibilityLabel="Go back"
+          >
             <ArrowLeft color={c.textPrimary} size={22} />
           </PressableScale>
         </View>
@@ -459,7 +465,13 @@ export default function ShowDetailScreen() {
           />
           <View style={styles.backdropOverlay} />
           <View style={styles.headerFloating}>
-            <PressableScale onPress={() => goBack(router)} hitSlop={8} style={styles.iconButton}>
+            <PressableScale
+              onPress={() => goBack(router)}
+              hitSlop={8}
+              style={styles.iconButton}
+              accessibilityRole="button"
+              accessibilityLabel="Go back"
+            >
               <ArrowLeft color="#FFFFFF" size={22} />
             </PressableScale>
             <View style={styles.headerActions}>
@@ -467,6 +479,8 @@ export default function ShowDetailScreen() {
                 onPress={() => router.push(`/show/${tmdbId}/comments`)}
                 hitSlop={8}
                 style={styles.iconButton}
+                accessibilityRole="button"
+                accessibilityLabel="Open comments"
               >
                 <MessageCircle color="#FFFFFF" size={20} />
               </PressableScale>

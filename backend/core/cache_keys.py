@@ -118,6 +118,21 @@ def analytics_statistics_cache_key(user_id) -> str:
 ANALYTICS_STATISTICS_CACHE_TTL_SECONDS = 300
 
 
+def analytics_genres_cache_key(user_id) -> str:
+    return f"analytics_genres:{user_id}"
+
+
+# Phase 85, Batch D — AnalyticsGenresView was the single slowest analytics
+# endpoint measured against production (~2.1s, every single call, on a
+# real 400+ show library — see PROJECT_STATUS.md's Batch D entry for the
+# actual numbers): it was entirely uncached, unlike its dashboard/statistics
+# siblings. Same TTL/invalidation reasoning as those two — invalidated by
+# signals.py's WatchState receiver (_bust_analytics_dashboard_and_statistics_cache,
+# which this key was added to rather than inventing a fourth near-identical
+# bust helper).
+ANALYTICS_GENRES_CACHE_TTL_SECONDS = 300
+
+
 def analytics_monthly_summary_cache_key(user_id, year) -> str:
     return f"analytics_monthly_summary:{user_id}:{year}"
 

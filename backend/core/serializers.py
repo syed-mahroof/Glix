@@ -11,9 +11,9 @@ from django.contrib.auth import get_user_model
 from django.contrib.auth.validators import UnicodeUsernameValidator
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db import IntegrityError
-from django.utils import timezone
 from rest_framework import serializers
 
+from core.dates import aired_cutoff_date
 from core.models import (
     CachedEpisode,
     CachedShow,
@@ -244,6 +244,15 @@ class WatchlistSerializer(serializers.ModelSerializer):
     progress_percentage = serializers.SerializerMethodField()
     last_watched_at = serializers.SerializerMethodField()
     active_rewatch = serializers.SerializerMethodField()
+    # Bug fix ("series complete while seasons remain") — how many distinct
+    # seasons of this show have any cached episode data at all, vs. TMDB's
+    # total_seasons. The client's own completion/confetti check (
+    # isShowComplete in watchStore.ts) uses this to tell "actually finished"
+    # apart from "finished everything WE'VE FETCHED so far, which isn't the
+    # whole show" — see WatchlistView's identical up_to_date bucketing gate
+    # and _enqueue_season_backfill_if_caught_up's docstring for the full
+    # story.
+    seasons_cached = serializers.SerializerMethodField()
 
     class Meta:
         model = Watchlist
@@ -258,6 +267,7 @@ class WatchlistSerializer(serializers.ModelSerializer):
             "progress_percentage",
             "last_watched_at",
             "active_rewatch",
+            "seasons_cached",
             "added_at",
             "updated_at",
         ]
@@ -283,7 +293,13 @@ class WatchlistSerializer(serializers.ModelSerializer):
         annotated = getattr(obj, "aired_count", None)
         if annotated is not None:
             return annotated
-        return obj.show.episodes.filter(air_date__lte=timezone.now().date()).count()
+        return obj.show.episodes.filter(air_date__lte=aired_cutoff_date()).count()
+
+    def get_seasons_cached(self, obj: Watchlist) -> int:
+        annotated = getattr(obj, "seasons_cached", None)
+        if annotated is not None:
+            return annotated
+        return obj.show.episodes.values("season_number").distinct().count()
 
     def get_watched_episode_count(self, obj: Watchlist) -> int:
         annotated = getattr(obj, "watched_count", None)

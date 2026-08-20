@@ -18,7 +18,7 @@
 
 import { useCallback, useMemo, useRef, useState } from 'react';
 import { api } from './api';
-import { useWatchStore } from '../store/watchStore';
+import { isEpisodeWatched, useWatchStore } from '../store/watchStore';
 
 interface CatchupCheckResponse {
   has: boolean;
@@ -39,6 +39,21 @@ const EMPTY_PENDING: PendingCatchup = {
 };
 
 const FAILED_CHECK: CatchupCheckResponse = { has: false, ids: [], count: 0 };
+
+/** Bug fix (2026-08-21, "modal pops after the show already shows complete"):
+ *  checkEpisode/checkSeason fire un-awaited from the Shows Hub (a real POST
+ *  to a Render free-tier dyno can take 20-50s cold), so the server's answer
+ *  can land well after the local store has already moved on — most visibly,
+ *  after a bulk mark-watched (or another concurrent tap) already caught the
+ *  show up. Re-checking each id the server flagged against the CURRENT store
+ *  snapshot right before opening the modal means a stale answer degrades to
+ *  "nothing left to catch up on" instead of re-litigating episodes the user
+ *  can already see marked watched. getState(), not the reactive hook: this
+ *  runs after an await, outside any render. */
+function filterStillUnwatched(ids: number[]): number[] {
+  const watchlist = useWatchStore.getState().watchlist;
+  return ids.filter((id) => !isEpisodeWatched(watchlist, id));
+}
 
 interface UndoState {
   visible: boolean;
@@ -124,12 +139,13 @@ export function useCatchupCascade(onFinalize: (ids: number[], watched: boolean) 
         check = FAILED_CHECK;
       }
 
-      if (!check.has) {
+      const priorIds = filterStillUnwatched(check.ids);
+      if (!check.has || priorIds.length === 0) {
         inFlight.current = false;
         return false;
       }
-      pending.current = { showId, priorIds: check.ids, finalIds: [episodeId] };
-      setPrompt({ showTitle, episodeLabel, previousCount: check.count });
+      pending.current = { showId, priorIds, finalIds: [episodeId] };
+      setPrompt({ showTitle, episodeLabel, previousCount: priorIds.length });
       setVisible(true);
       return true;
     },
@@ -160,12 +176,13 @@ export function useCatchupCascade(onFinalize: (ids: number[], watched: boolean) 
         check = FAILED_CHECK;
       }
 
-      if (!check.has) {
+      const priorIds = filterStillUnwatched(check.ids);
+      if (!check.has || priorIds.length === 0) {
         inFlight.current = false;
         return false;
       }
-      pending.current = { showId, priorIds: check.ids, finalIds: seasonIds };
-      setPrompt({ showTitle, episodeLabel, previousCount: check.count });
+      pending.current = { showId, priorIds, finalIds: seasonIds };
+      setPrompt({ showTitle, episodeLabel, previousCount: priorIds.length });
       setVisible(true);
       return true;
     },

@@ -23,6 +23,7 @@ from django.utils import timezone
 from core.cache_utils import safe_cache_delete
 from core.cache_keys import (
     analytics_dashboard_cache_key,
+    analytics_genres_cache_key,
     analytics_monthly_summary_cache_key,
     analytics_movies_cache_key,
     analytics_statistics_cache_key,
@@ -308,13 +309,18 @@ def _bust_analytics_movies_cache(user_id):
 def _bust_analytics_dashboard_and_statistics_cache(user_id):
     """Shared by every signal below that represents "the user watched (or
     unwatched, or rewatched) something" — AnalyticsDashboardView/
-    AnalyticsStatisticsView (Phase 75.8) and the current year's monthly
-    summary all derive from the same underlying WatchState/MovieWatchState/
-    rewatch rows, so one bust point covers all three caches."""
+    AnalyticsStatisticsView (Phase 75.8), the current year's monthly
+    summary, and AnalyticsGenresView (Phase 85, Batch D — newly cached; TV
+    genre counts are WatchState-only, but busting on a movie/rewatch signal
+    too is a harmless no-op recompute, not a correctness issue, and keeping
+    one shared bust point is simpler than a fourth near-identical helper)
+    all derive from the same underlying WatchState/MovieWatchState/rewatch
+    rows, so one bust point covers all four caches."""
     def _bust():
         safe_cache_delete(analytics_dashboard_cache_key(user_id))
         safe_cache_delete(analytics_statistics_cache_key(user_id))
         safe_cache_delete(analytics_monthly_summary_cache_key(user_id, timezone.now().year))
+        safe_cache_delete(analytics_genres_cache_key(user_id))
     transaction.on_commit(_bust)
 
 
@@ -390,3 +396,15 @@ def invalidate_followers_feed_on_show_review(sender, instance, **kwargs):
 @receiver(post_delete, sender=MovieReview)
 def invalidate_followers_feed_on_movie_review(sender, instance, **kwargs):
     _bust_followers_activity_feed_cache(instance.user_id)
+
+
+# Bug fix (Phase 85, Batch C): AnalyticsMoviesView now reads average_rating/
+# rating_distribution off MovieReview rows, but nothing busted
+# analytics_movies_cache_key when a review was created/edited/deleted — a
+# rating change could take up to ANALYTICS_MOVIES_CACHE_TTL_SECONDS to show
+# up in Movie Analytics. Same bust helper the MovieWatchlist/MovieWatchState
+# receivers already use.
+@receiver(post_save, sender=MovieReview)
+@receiver(post_delete, sender=MovieReview)
+def invalidate_analytics_movies_cache_on_review(sender, instance, **kwargs):
+    _bust_analytics_movies_cache(instance.user_id)

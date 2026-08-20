@@ -376,10 +376,20 @@ export default function ProfileScreen() {
         <View style={styles.headerRow}>
           <Text style={[styles.headerTitle, { color: c.textPrimary }]}>Profile</Text>
           <View style={styles.headerActions}>
-            <PressableScale onPress={() => router.push('/community')} hitSlop={8}>
+            <PressableScale
+              onPress={() => router.push('/community')}
+              hitSlop={8}
+              accessibilityRole="button"
+              accessibilityLabel="Open community"
+            >
               <Users color={c.textPrimary} size={22} />
             </PressableScale>
-            <PressableScale onPress={() => router.push('/settings')} hitSlop={8}>
+            <PressableScale
+              onPress={() => router.push('/settings')}
+              hitSlop={8}
+              accessibilityRole="button"
+              accessibilityLabel="Open settings"
+            >
               <Settings color={c.textPrimary} size={22} />
             </PressableScale>
           </View>

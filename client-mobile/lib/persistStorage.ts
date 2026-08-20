@@ -120,8 +120,21 @@ export function createDebouncedStorage<S>(): PersistStorage<S> {
 
   const storage: PersistStorage<S> = {
     getItem: async (name) => {
-      const raw = await AsyncStorage.getItem(name);
-      return raw == null ? null : (JSON.parse(raw) as StorageValue<S>);
+      // A read failure here (oversized row on Android's SQLite-backed
+      // AsyncStorage, corrupt JSON) used to propagate silently: zustand
+      // treats a thrown getItem the same as "nothing persisted" and falls
+      // back to the store's field initializers with no trace of why. That
+      // silent fallback is exactly what caused the "layout preference keeps
+      // resetting" bug on a large-library device — logging it here at least
+      // makes a future case like it visible instead of looking like state
+      // was never saved at all.
+      try {
+        const raw = await AsyncStorage.getItem(name);
+        return raw == null ? null : (JSON.parse(raw) as StorageValue<S>);
+      } catch (error) {
+        console.warn(`Failed to read persisted store "${name}" — falling back to defaults`, error);
+        return null;
+      }
     },
     setItem: (name, value) => {
       // Pre-hydration write — see the bug-fix note above. Not queued at all

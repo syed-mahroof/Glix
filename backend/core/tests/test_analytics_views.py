@@ -11,6 +11,7 @@ from core.models import (
     CachedEpisode,
     CachedShow,
     MovieCache,
+    MovieReview,
     MovieWatchlist,
     MovieWatchState,
     WatchState,
@@ -270,6 +271,123 @@ def test_analytics_movies_view_aggregates_correctly(api_client, create_user):
     assert decades_by_name == {"1990s": 1, "2000s": 1}
 
     assert len(data["recent_movies"]) == 2
+
+
+# ── Phase 85, Batch C: movie analytics expansion ────────────────────────────
+
+@pytest.mark.django_db
+def test_analytics_movies_view_by_language_and_shortest_movie(api_client, create_user):
+    user = create_user()
+    api_client.force_authenticate(user=user)
+
+    korean_movie = MovieCache.objects.create(
+        tmdb_id=8301, title="Korean Film", release_date="2020-01-01",
+        runtime_minutes=95, genres_string="Drama", original_language="ko",
+    )
+    english_movie = MovieCache.objects.create(
+        tmdb_id=8302, title="English Film", release_date="2021-01-01",
+        runtime_minutes=150, genres_string="Action", original_language="en",
+    )
+    # original_language="" — a movie cached before that field existed / not
+    # yet re-synced. Must land in its own "unknown" bucket, not be dropped.
+    unknown_language_movie = MovieCache.objects.create(
+        tmdb_id=8303, title="Unsynced Film", release_date="2019-01-01",
+        runtime_minutes=110, genres_string="Comedy", original_language="",
+    )
+    # runtime_minutes=0 — TMDB runtime not yet known (MovieCache's own
+    # default). Must be excluded from "shortest", not spuriously win it.
+    unsynced_runtime_movie = MovieCache.objects.create(
+        tmdb_id=8304, title="No Runtime Yet", release_date="2018-01-01",
+        runtime_minutes=0, genres_string="Horror", original_language="en",
+    )
+    for movie in (korean_movie, english_movie, unknown_language_movie, unsynced_runtime_movie):
+        MovieWatchlist.objects.create(user=user, movie=movie)
+        MovieWatchState.objects.create(user=user, movie=movie)
+
+    response = api_client.get(reverse("analytics-movies"))
+    assert response.status_code == 200
+    data = response.data
+
+    languages_by_code = {row["language"]: row["count"] for row in data["by_language"]}
+    assert languages_by_code == {"ko": 1, "en": 2, "unknown": 1}
+
+    # Shortest of {95, 150, 110} — the 0-runtime movie must not win.
+    assert data["shortest_movie"]["tmdb_id"] == korean_movie.tmdb_id
+    assert data["shortest_movie"]["runtime_minutes"] == 95
+    assert data["longest_movie"]["tmdb_id"] == english_movie.tmdb_id
+
+
+@pytest.mark.django_db
+def test_analytics_movies_view_this_year_and_by_month(api_client, create_user):
+    user = create_user()
+    api_client.force_authenticate(user=user)
+    now = timezone.now()
+
+    this_year_movie = MovieCache.objects.create(
+        tmdb_id=8401, title="Watched This Year", release_date="2022-01-01", runtime_minutes=100,
+    )
+    last_year_movie = MovieCache.objects.create(
+        tmdb_id=8402, title="Watched Last Year", release_date="2022-01-01", runtime_minutes=100,
+    )
+    MovieWatchState.objects.create(user=user, movie=this_year_movie, watched_at=now)
+    MovieWatchState.objects.create(
+        user=user, movie=last_year_movie, watched_at=now.replace(year=now.year - 1)
+    )
+
+    response = api_client.get(reverse("analytics-movies"))
+    assert response.status_code == 200
+    data = response.data
+
+    # Only the current-year watch shows up in this_year_movies...
+    this_year_ids = {m["tmdb_id"] for m in data["this_year_movies"]}
+    assert this_year_ids == {this_year_movie.tmdb_id}
+
+    # ...and by_month is always all 12 months, zero-filled, with the one
+    # real watch landing in the current month.
+    assert len(data["by_month"]) == 12
+    assert [row["month"] for row in data["by_month"]] == list(range(1, 13))
+    month_counts = {row["month"]: row["count"] for row in data["by_month"]}
+    assert month_counts[now.month] == 1
+    assert sum(month_counts.values()) == 1
+
+
+@pytest.mark.django_db
+def test_analytics_movies_view_rating_distribution(api_client, create_user):
+    user = create_user()
+    api_client.force_authenticate(user=user)
+
+    movie_a = MovieCache.objects.create(tmdb_id=8501, title="Rated A", runtime_minutes=90)
+    movie_b = MovieCache.objects.create(tmdb_id=8502, title="Rated B", runtime_minutes=90)
+    unrated_movie = MovieCache.objects.create(tmdb_id=8503, title="Unrated", runtime_minutes=90)
+    for movie in (movie_a, movie_b, unrated_movie):
+        MovieWatchState.objects.create(user=user, movie=movie)
+    MovieReview.objects.create(user=user, movie=movie_a, rating="4.5")
+    MovieReview.objects.create(user=user, movie=movie_b, rating="3.0")
+
+    response = api_client.get(reverse("analytics-movies"))
+    assert response.status_code == 200
+    data = response.data
+
+    assert data["rated_count"] == 2
+    assert data["average_rating"] == pytest.approx(3.75)
+    assert len(data["rating_distribution"]) == 10
+    buckets = {str(row["rating"]): row["count"] for row in data["rating_distribution"]}
+    assert buckets["4.5"] == 1
+    assert buckets["3.0"] == 1
+    assert buckets["0.5"] == 0
+
+
+@pytest.mark.django_db
+def test_analytics_movies_view_no_ratings_yet(api_client, create_user):
+    user = create_user()
+    api_client.force_authenticate(user=user)
+    response = api_client.get(reverse("analytics-movies"))
+    assert response.status_code == 200
+    assert response.data["rated_count"] == 0
+    # Null, not 0.0 — 0.0 would read as "rated everything one star".
+    assert response.data["average_rating"] is None
+    assert len(response.data["rating_distribution"]) == 10
+    assert all(row["count"] == 0 for row in response.data["rating_distribution"])
 
 
 @pytest.mark.django_db

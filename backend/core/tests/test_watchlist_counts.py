@@ -168,3 +168,54 @@ def test_continue_watching_orders_by_most_recently_watched(api_client, create_us
     assert response.status_code == 200
     tmdb_ids = [row["show"]["tmdb_id"] for row in response.data]
     assert tmdb_ids == [show_b.tmdb_id, show_a.tmdb_id]
+
+
+# ── Coverage gate (Phase 85, Batch A/E): "series complete" while later
+#    seasons remain uncached ───────────────────────────────────────────────
+#
+# aired_episode_count only counts CachedEpisode rows this app has actually
+# fetched from TMDB. A show whose watched seasons happen to be the only ones
+# cached used to read as watched >= aired — "up_to_date" — for a reason
+# unrelated to whether the show is actually finished. WatchlistView now also
+# requires seasons_cached >= show.total_seasons before that bucket applies.
+
+@pytest.mark.django_db
+def test_watchlist_view_keeps_show_in_to_watch_when_later_seasons_uncached(api_client, create_user):
+    user = create_user()
+    api_client.force_authenticate(user=user)
+    # total_seasons=3, but only season 1 (below) is ever cached — the exact
+    # ShowAddView shape (eager-caches season 1 only on add).
+    show, episodes = _make_show_with_episodes(9509, episode_count=2)
+    show.total_seasons = 3
+    show.save(update_fields=["total_seasons"])
+    Watchlist.objects.create(user=user, show=show)
+    for ep in episodes:
+        WatchState.objects.create(user=user, episode=ep)
+
+    response = api_client.get(reverse("watchlist"), {"page_size": "all"})
+    assert response.status_code == 200
+    # Without the coverage gate this would be in up_to_date (watched ==
+    # aired == 2) despite two whole seasons the app has never fetched.
+    assert response.data["up_to_date"]["count"] == 0
+    assert response.data["to_watch"]["count"] == 1
+    entry = response.data["to_watch"]["results"][0]
+    assert entry["seasons_cached"] == 1
+
+
+@pytest.mark.django_db
+def test_watchlist_view_marks_up_to_date_when_all_seasons_cached_and_watched(api_client, create_user):
+    user = create_user()
+    api_client.force_authenticate(user=user)
+    # total_seasons=1 and that one season is fully cached+watched — the
+    # positive case the gate must still allow through.
+    show, episodes = _make_show_with_episodes(9510, episode_count=2)
+    show.total_seasons = 1
+    show.save(update_fields=["total_seasons"])
+    Watchlist.objects.create(user=user, show=show)
+    for ep in episodes:
+        WatchState.objects.create(user=user, episode=ep)
+
+    response = api_client.get(reverse("watchlist"), {"page_size": "all"})
+    assert response.status_code == 200
+    assert response.data["up_to_date"]["count"] == 1
+    assert response.data["to_watch"]["count"] == 0

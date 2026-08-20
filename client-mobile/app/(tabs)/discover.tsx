@@ -38,7 +38,7 @@ import Animated, {
   withSpring,
   withTiming,
 } from 'react-native-reanimated';
-import { SafeAreaView } from 'react-native-safe-area-context';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { FlashList } from '@shopify/flash-list';
 
 import DiscoverFilterSheet from '../../components/DiscoverFilterSheet';
@@ -194,7 +194,32 @@ function LoadMoreFooter({ visible }: { visible: boolean }) {
 }
 
 // ─── Search Result Card ────────────────────────────────────────────────────────
-
+//
+// Bug fix (2026-08-21, "empty gaps in the filtered Discover grid"): this card
+// used to be a fixed-pixel-width column (CARD_WIDTH = (SCREEN_WIDTH-48)/3)
+// with a variable-height caption underneath (title 1-OR-2 lines, an optional
+// year row) sitting inside a `numColumns={3}` FlashList. FlashList v2's own
+// types document that grid cells must all be the same height — masonry
+// layouts aren't supported — so a variable-height cell here was always going
+// to eventually misalign into visible holes once cells fell out of a neat
+// multiple-of-3 pattern (which unfiltered/filtered pagination guarantees
+// will happen; see discoverStore's loadMore fixes). CARD_WIDTH's own
+// `-48` also didn't match this screen's real `paddingHorizontal: 16`
+// container (`searchGrid` below) — an independent few-pixel misalignment on
+// top of the height one.
+//
+// Fixed by matching the pattern every OTHER 3-column grid in this app
+// already uses successfully (components/MoviePosterCard.tsx, rendered by
+// Movies Hub / Profile's My Movies grid): let FlashList's own column flex
+// sizing set the width (`wrap: { flex: 1 }`, no computed pixel width to
+// drift out of sync with the container), size the poster by `aspectRatio`
+// instead of a computed height, and make the caption underneath a FIXED
+// height regardless of content — a reserved 2-line title box (`minHeight`)
+// so a 1-line title doesn't leave its cell shorter than a 2-line neighbor,
+// and the year line always rendered (as a zero-width-space when there's no
+// release_date) so its absence doesn't do the same thing. Every cell is now
+// structurally identical height, which is what FlashList v2's grid actually
+// requires.
 function SearchResultCard({ item }: { item: DiscoverMediaItem }) {
   const router = useRouter();
   const { theme } = useAppTheme();
@@ -207,64 +232,61 @@ function SearchResultCard({ item }: { item: DiscoverMediaItem }) {
     overview: item.overview || '',
   };
   return (
-    <PressableScale
-      style={src.card}
-      onPress={() => {
-        if (item.media_type === 'movie') {
-          router.push({ pathname: `/movie/${item.tmdb_id}` as any, params });
-        } else {
-          router.push({ pathname: `/show/${item.tmdb_id}` as any, params });
-        }
-      }}
-    >
-      <View style={[src.poster, { backgroundColor: c.glassFill, borderColor: c.hairline }]}>
-        <Image
-          source={
-            item.poster_path
-              ? { uri: `${POSTER_BASE_URL}${item.poster_path}` }
-              : undefined
+    <View style={src.wrap}>
+      <PressableScale
+        onPress={() => {
+          if (item.media_type === 'movie') {
+            router.push({ pathname: `/movie/${item.tmdb_id}` as any, params });
+          } else {
+            router.push({ pathname: `/show/${item.tmdb_id}` as any, params });
           }
-          style={src.posterImg}
-          contentFit="cover"
-          transition={200}
-          recyclingKey={`${item.media_type}-${item.tmdb_id}`}
-          cachePolicy="memory-disk"
-        />
-        <LinearGradient
-          colors={['transparent', 'rgba(0,0,0,0.85)']}
-          style={src.gradient}
-        />
-        <View style={src.badge}>
-          <Text style={src.badgeText}>
-            {item.media_type === 'movie' ? 'MOVIE' : 'SERIES'}
-          </Text>
+        }}
+      >
+        <View style={[src.poster, { backgroundColor: c.glassFill, borderColor: c.hairline }]}>
+          <Image
+            source={
+              item.poster_path
+                ? { uri: `${POSTER_BASE_URL}${item.poster_path}` }
+                : undefined
+            }
+            style={src.posterImg}
+            contentFit="cover"
+            transition={200}
+            recyclingKey={`${item.media_type}-${item.tmdb_id}`}
+            cachePolicy="memory-disk"
+          />
+          <LinearGradient
+            colors={['transparent', 'rgba(0,0,0,0.85)']}
+            style={src.gradient}
+          />
+          <View style={src.badge}>
+            <Text style={src.badgeText}>
+              {item.media_type === 'movie' ? 'MOVIE' : 'SERIES'}
+            </Text>
+          </View>
+          <View style={src.ratingBadge}>
+            <Text style={src.ratingText}>★ {item.vote_average.toFixed(1)}</Text>
+          </View>
         </View>
-        <View style={src.ratingBadge}>
-          <Text style={src.ratingText}>★ {item.vote_average.toFixed(1)}</Text>
-        </View>
-      </View>
+      </PressableScale>
       <Text style={[src.title, { color: c.textPrimary }]} numberOfLines={2}>
         {item.title}
       </Text>
-      {item.release_date && (
-        <Text style={[src.year, { color: c.textTertiary }]}>
-          {new Date(item.release_date).getFullYear()}
-        </Text>
-      )}
-    </PressableScale>
+      <Text style={[src.year, { color: c.textTertiary }]} numberOfLines={1}>
+        {item.release_date ? new Date(item.release_date).getFullYear() : '​'}
+      </Text>
+    </View>
   );
 }
 
-const CARD_WIDTH = (SCREEN_WIDTH - 48) / 3;
-
 const src = StyleSheet.create({
-  card: {
-    width: CARD_WIDTH,
-    gap: 6,
+  wrap: {
+    flex: 1,
+    padding: 6,
   },
   poster: {
-    width: CARD_WIDTH,
-    height: CARD_WIDTH * 1.5,
+    width: '100%',
+    aspectRatio: 2 / 3,
     borderRadius: 10,
     overflow: 'hidden',
     borderWidth: StyleSheet.hairlineWidth,
@@ -308,13 +330,19 @@ const src = StyleSheet.create({
   // (same precedent as profile/movies.tsx's rating style and its "watched" green).
   ratingText: { color: '#FFD700', fontSize: 9, fontWeight: '800' },
   title: {
+    marginTop: 6,
     fontSize: 12,
     fontWeight: '600',
     lineHeight: 16,
+    // Reserved 2-line box (see this card's header comment) — a 1-line title
+    // still occupies the same height as a 2-line one, so every cell in the
+    // grid is the same total height regardless of content.
+    minHeight: 32,
   },
   year: {
     fontSize: 11,
     fontWeight: '500',
+    lineHeight: 14,
   },
 });
 
@@ -337,10 +365,27 @@ interface DiscoverSearchHeaderProps {
   onToggleFilterSheet: () => void;
   activeSegment: ActiveSegment;
   onSegmentChange: (segment: ActiveSegment) => void;
+  /** Device status-bar inset (`useSafeAreaInsets().top`) — the header is
+   *  `position: 'absolute'` at the screen root (see `headerContainer` below)
+   *  so it can float over the full-bleed hero, which means it's no longer
+   *  inside anything that reserves the status-bar area for it. Padding by
+   *  this value keeps the search bar clear of the status bar without
+   *  clipping the hero behind it — a `SafeAreaView` here would do the same
+   *  padding but ALSO paint over the hero with the screen background color,
+   *  which is exactly the opaque strip a full-bleed hero is meant to not have. */
+  topInset: number;
+  /** Reports the header's own rendered height (status bar inset + search
+   *  row + segment control) once measured, so the screen can size the
+   *  search/filtered result grids' top clearance to the header's REAL
+   *  height instead of a hardcoded guess — see this screen's own
+   *  `headerHeight` state for the full story. */
+  onHeightChange: (height: number) => void;
 }
 
 function DiscoverSearchHeader({
   headerBlurStyle,
+  topInset,
+  onHeightChange,
   inputRef,
   isSearchActive,
   searchQuery,
@@ -357,7 +402,11 @@ function DiscoverSearchHeader({
   const c = theme.colors;
 
   return (
-    <View style={styles.headerContainer} pointerEvents="box-none">
+    <View
+      style={styles.headerContainer}
+      pointerEvents="box-none"
+      onLayout={(e) => onHeightChange(e.nativeEvent.layout.height)}
+    >
       {/* Blur background (fades in on scroll) */}
       <Animated.View style={[StyleSheet.absoluteFill, headerBlurStyle]}>
         <GlassBlur intensity={80} tint={theme.blurTint} style={StyleSheet.absoluteFill} />
@@ -365,16 +414,41 @@ function DiscoverSearchHeader({
         <View style={[styles.headerBorder, { backgroundColor: c.hairline }]} />
       </Animated.View>
 
-      <SafeAreaView edges={['top']}>
+      {/* Full-bleed hero (Discover redesign): this header floats at the
+          screen's top edge, `position: 'absolute'`, with the hero rendering
+          full-bleed behind it (see DiscoverScreen's `scrollContent`, which no
+          longer reserves a paddingTop gap for this header). A `SafeAreaView`
+          here would paint the status-bar strip with the screen background
+          color — exactly the opaque band a full-bleed hero shouldn't have —
+          so this is a plain View padded by the real inset instead. */}
+      <View style={{ paddingTop: topInset }}>
         {/* Search Row */}
         <View style={styles.searchRow}>
           <View
             style={[
               styles.searchBar,
-              { backgroundColor: c.glassFill, borderColor: c.hairline },
+              { borderColor: c.hairline },
               isSearchActive && { borderColor: c.accentInk },
             ]}
           >
+            {/* Glassmorphic fill (Discover redesign): a real blur, not just
+                a translucent color — at scroll position 0 the header's own
+                blur layer above hasn't faded in yet, so this pill floats
+                directly over the hero photo with nothing else behind it.
+                GlassBlur (not a raw BlurView) because Android's BlurView
+                doesn't actually blur without a native config this app
+                doesn't set — see GlassBlur.tsx. glassFillStrong, not
+                glassFill: this sits over the hero's own busy photo content,
+                same "floats over image-heavy content" case that token's own
+                doc comment names. */}
+            <GlassBlur
+              intensity={80}
+              tint={theme.blurTint}
+              style={[StyleSheet.absoluteFill, styles.pillClip]}
+            />
+            <View
+              style={[StyleSheet.absoluteFill, styles.pillClip, { backgroundColor: c.glassFillStrong }]}
+            />
             <TextInput
               ref={inputRef}
               style={[styles.searchInput, { color: c.textPrimary }]}
@@ -388,7 +462,12 @@ function DiscoverSearchHeader({
               autoCapitalize="none"
             />
             {searchQuery.length > 0 && (
-              <PressableScale onPress={onClearSearch} hitSlop={8}>
+              <PressableScale
+                onPress={onClearSearch}
+                hitSlop={8}
+                accessibilityRole="button"
+                accessibilityLabel="Clear search"
+              >
                 <X color={c.textSecondary} size={16} strokeWidth={2.5} />
               </PressableScale>
             )}
@@ -399,14 +478,30 @@ function DiscoverSearchHeader({
             <PressableScale
               style={[
                 styles.filterBtn,
-                { backgroundColor: c.glassFill, borderColor: c.hairline },
-                (filterSheetVisible || filterActive) && {
-                  backgroundColor: c.accentDim,
-                  borderColor: c.accentInk,
-                },
+                { borderColor: c.hairline },
+                (filterSheetVisible || filterActive) && { borderColor: c.accentInk },
               ]}
               onPress={onToggleFilterSheet}
+              hitSlop={8}
+              accessibilityRole="button"
+              accessibilityLabel="Filter and sort"
+              accessibilityState={{ selected: filterSheetVisible || filterActive }}
             >
+              <GlassBlur
+                intensity={80}
+                tint={theme.blurTint}
+                style={[StyleSheet.absoluteFill, styles.pillClip]}
+              />
+              <View
+                style={[
+                  StyleSheet.absoluteFill,
+                  styles.pillClip,
+                  {
+                    backgroundColor:
+                      filterSheetVisible || filterActive ? c.accentDim : c.glassFillStrong,
+                  },
+                ]}
+              />
               <SlidersHorizontal
                 color={filterSheetVisible || filterActive ? c.accentInk : c.textSecondary}
                 size={18}
@@ -435,7 +530,7 @@ function DiscoverSearchHeader({
             <AnimatedSegmentControl value={activeSegment} onChange={onSegmentChange} />
           </Animated.View>
         )}
-      </SafeAreaView>
+      </View>
     </View>
   );
 }
@@ -471,6 +566,13 @@ interface DiscoverFeedBodyProps {
   scrollHandler: ReturnType<typeof useAnimatedScrollHandler>;
   onSelectGenre: (genreId: number) => void;
   onRetry: () => void;
+  /** Measured height of the floating header (see DiscoverScreen's
+   *  `headerHeight` state) — a plain number, not a ref/animated value, so
+   *  this memo boundary still holds for everything else. Used only to
+   *  offset the pull-to-refresh spinner below the header; the hero itself
+   *  intentionally renders full-bleed BEHIND the header, unaffected by this
+   *  value. */
+  headerHeight: number;
 }
 
 function DiscoverFeedBodyComponent({
@@ -486,6 +588,7 @@ function DiscoverFeedBodyComponent({
   scrollHandler,
   onSelectGenre,
   onRetry,
+  headerHeight,
 }: DiscoverFeedBodyProps) {
   const { theme } = useAppTheme();
   const c = theme.colors;
@@ -537,7 +640,12 @@ function DiscoverFeedBodyComponent({
           refreshing={isRefreshing}
           onRefresh={onRefresh}
           tintColor={c.accentInk}
-          progressViewOffset={120}
+          // Was a hardcoded 120 tuned to the old paddingTop:130 header
+          // clearance — the hero is now full-bleed behind the header
+          // (scrollContent no longer reserves that gap), so the pull spinner
+          // needs the header's real measured height instead, or it renders
+          // under the floating header instead of below it.
+          progressViewOffset={headerHeight}
         />
       }
     >
@@ -626,6 +734,7 @@ export default function DiscoverScreen() {
 
   const { theme } = useAppTheme();
   const c = theme.colors;
+  const insets = useSafeAreaInsets();
 
   // Discover has no persisted fallback (discoverStore.ts is in-memory only)
   // — unlike Shows/Movies Hub, which paint real content from AsyncStorage
@@ -637,6 +746,14 @@ export default function DiscoverScreen() {
   const inputRef = useRef<TextInput>(null);
   const [isSearchActive, setIsSearchActive] = useState(false);
   const [isRefreshing, setIsRefreshing] = useState(false);
+  // Full-bleed hero redesign: the search/filtered result grids (unlike the
+  // hero feed) need to clear the floating header's REAL height, which
+  // varies by device (status bar inset) and isn't knowable until the header
+  // actually lays out. Seeded to a close-enough estimate
+  // (insets.top + search row ~52px + segment row ~50px + spacing ~12px) so
+  // the very first frame doesn't render with a visible jump once the header
+  // reports its real measured height via onLayout.
+  const [headerHeight, setHeaderHeight] = useState(() => insets.top + 114);
 
   // Debounce the search query — hit API 400ms after user stops typing
   const debouncedQuery = useDebounce(searchQuery, 400);
@@ -747,21 +864,32 @@ export default function DiscoverScreen() {
         onToggleFilterSheet={toggleFilterSheet}
         activeSegment={activeSegment}
         onSegmentChange={handleSegmentChange}
+        topInset={insets.top}
+        onHeightChange={setHeaderHeight}
       />
 
       {/* ── Body ──────────────────────────────────────────────────────────── */}
 
       {isSearchActive ? (
         // ── Search Results ─────────────────────────────────────────────────
-        <View style={styles.searchResults}>
+        <View style={[styles.searchResults, { marginTop: headerHeight }]}>
           {isSearching ? (
             <View style={styles.centerState}>
               <ActivityIndicator color={c.accentInk} />
             </View>
           ) : searchResults.length > 0 ? (
             <FlashList
+              // Distinct key from the filtered-results grid below: both
+              // render at the same JSX position across an isSearchActive/
+              // filterActive branch swap, so without this React reconciles
+              // them as ONE FlashList instance being handed new data rather
+              // than a fresh mount — see this screen's own SearchResultCard
+              // comment for the layout-cache-carryover class of bug that
+              // pattern risks.
+              key="search-grid"
               data={searchResults}
               keyExtractor={(item) => `${item.media_type}-${item.tmdb_id}`}
+              getItemType={() => 'card'}
               numColumns={3}
               contentContainerStyle={styles.searchGrid}
               renderItem={({ item }) => <SearchResultCard item={item} />}
@@ -785,7 +913,7 @@ export default function DiscoverScreen() {
         // ── Filtered Results (Filter & Sort sheet: genre and/or non-default
         // sort applied) — a flat TMDB-backed grid, same card/layout as
         // universal search, instead of the fixed curated sections. ─────────
-        <View style={styles.searchResults}>
+        <View style={[styles.searchResults, { marginTop: headerHeight }]}>
           {isLoadingFiltered ? (
             <View style={styles.centerState}>
               <ActivityIndicator color={c.accentInk} />
@@ -805,8 +933,10 @@ export default function DiscoverScreen() {
             </View>
           ) : filteredResults.length > 0 ? (
             <FlashList
+              key="filtered-grid"
               data={filteredResults}
               keyExtractor={(item) => `${item.media_type}-${item.tmdb_id}`}
+              getItemType={() => 'card'}
               numColumns={3}
               contentContainerStyle={styles.searchGrid}
               renderItem={({ item }) => <SearchResultCard item={item} />}
@@ -837,6 +967,7 @@ export default function DiscoverScreen() {
           scrollHandler={scrollHandler}
           onSelectGenre={setSelectedGenreId}
           onRetry={handleRetryFeed}
+          headerHeight={headerHeight}
         />
       )}
 
@@ -908,6 +1039,7 @@ const styles = StyleSheet.create({
     paddingVertical: 10,
     gap: 10,
     borderWidth: StyleSheet.hairlineWidth,
+    overflow: 'hidden',
   },
   searchInput: {
     flex: 1,
@@ -923,6 +1055,14 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     position: 'relative',
+    overflow: 'hidden',
+  },
+  // Shared by the blur+tint layers inside searchBar/filterBtn — matches
+  // both containers' own borderRadius as a belt-and-suspenders clip
+  // (parent `overflow: 'hidden'` should be enough, but Android has had
+  // corner-clipping quirks with absolutely-positioned children before).
+  pillClip: {
+    borderRadius: 14,
   },
   filterBadge: {
     position: 'absolute',
@@ -949,13 +1089,25 @@ const styles = StyleSheet.create({
     paddingBottom: 120,
   },
   scrollContent: {
-    paddingTop: 130, // clears sticky header (search bar ~52px + segment ~50px + spacing)
+    // Full-bleed hero redesign: was 130 (a hardcoded guess at the sticky
+    // header's height) to keep feed content clear of the floating header.
+    // The hero is now DELIBERATELY meant to render behind the header
+    // instead — HeroCarousel starts at y=0, full width, with the header
+    // floating on top of it via its own `position: 'absolute'` + zIndex.
+    // Content that comes after the hero (For You, sections, genre grid)
+    // still needs to clear the header, but the hero itself provides that
+    // clearance visually — its own gradient scrim reaches well past any
+    // header height, so no separate paddingTop is needed here.
+    paddingTop: 0,
   },
 
-  // Search
+  // Search / filtered results — flat lists with no hero behind them, so
+  // (unlike scrollContent above) these DO need to clear the floating
+  // header's real height. marginTop is applied inline at each call site
+  // from `headerHeight` state (measured via the header's own onLayout —
+  // see DiscoverScreen) rather than a hardcoded guess here.
   searchResults: {
     flex: 1,
-    marginTop: 130,
   },
   searchGrid: {
     paddingHorizontal: 16,

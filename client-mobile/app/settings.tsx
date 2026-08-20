@@ -22,7 +22,8 @@ import { useDiscoverStore } from '../store/discoverStore';
 import { useListsStore } from '../store/listsStore';
 import { useSocialStore } from '../store/socialStore';
 import type { ThemePreference } from '../store/themeStore';
-import { LayoutMode, useWatchStore } from '../store/watchStore';
+import { useWatchStore } from '../store/watchStore';
+import { LayoutMode, usePreferencesStore } from '../store/preferencesStore';
 
 function SwitchRow({
   label,
@@ -68,8 +69,8 @@ export default function SettingsScreen() {
   const updateProfilePicture = useWatchStore((state) => state.updateProfilePicture);
   const updateUsername = useWatchStore((state) => state.updateUsername);
   const updateIsPrivate = useWatchStore((state) => state.updateIsPrivate);
-  const defaultLayout = useWatchStore((state) => state.defaultLayout);
-  const setDefaultLayout = useWatchStore((state) => state.setDefaultLayout);
+  const defaultLayout = usePreferencesStore((state) => state.defaultLayout);
+  const setDefaultLayout = usePreferencesStore((state) => state.setDefaultLayout);
   const [notifyNewEpisode, setNotifyNewEpisode] = useState(true);
   const [notifyWeeklyDigest, setNotifyWeeklyDigest] = useState(false);
   const [isLoggingOut, setIsLoggingOut] = useState(false);
@@ -145,7 +146,13 @@ export default function SettingsScreen() {
   return (
     <SafeAreaView style={[styles.container, { backgroundColor: c.bg }]} edges={['top']}>
       <View style={styles.header}>
-        <PressableScale onPress={() => router.back()} hitSlop={8} style={styles.backButton}>
+        <PressableScale
+          onPress={() => router.back()}
+          hitSlop={8}
+          style={styles.backButton}
+          accessibilityRole="button"
+          accessibilityLabel="Go back"
+        >
           <ArrowLeft color={c.textPrimary} size={22} />
         </PressableScale>
         <Text style={[styles.headerTitle, { color: c.textPrimary }]}>Settings</Text>

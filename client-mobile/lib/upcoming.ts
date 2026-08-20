@@ -15,16 +15,30 @@ import type { Episode, WatchlistEntry } from '../store/watchStore';
 /** Same "next episode" rule the Shows Hub row uses: earliest aired-unwatched,
  *  falling back to the nearest future episode, falling back to the last episode
  *  once everything is watched. Shared so the widget data bridge stays truthful
- *  to what the Shows Hub itself would show as "next up" for a given entry. */
+ *  to what the Shows Hub itself would show as "next up" for a given entry.
+ *
+ *  Bug fix (2026-08-21): used to compare the raw TMDB `air_date` (a
+ *  network-local calendar date) against todayLocalIso() (the device's local
+ *  date) directly — the same air_date/local-date mismatch as the Watch
+ *  List's badge bug, just here it could pick the WRONG episode as "next"
+ *  across a local-midnight boundary, not just mislabel the right one. Every
+ *  comparison now goes through resolveDisplayDateIso first, same as the
+ *  Upcoming tab. */
 export function pickNextEpisode(entry: WatchlistEntry): Episode | null {
   const todayIso = todayLocalIso();
-  const airedUnwatched = entry.show.episodes.filter(
-    (ep) => ep.air_date && ep.air_date <= todayIso && !ep.is_watched
-  );
+  const displayDate = (ep: Episode): string | null =>
+    ep.air_date
+      ? resolveDisplayDateIso(ep.air_date, ep.air_datetime, entry.show.airs_time, entry.show.airs_timezone)
+      : null;
+  const airedUnwatched = entry.show.episodes.filter((ep) => {
+    const d = displayDate(ep);
+    return d !== null && d <= todayIso && !ep.is_watched;
+  });
   if (airedUnwatched.length > 0) return airedUnwatched[0];
-  const future = entry.show.episodes.filter(
-    (ep) => ep.air_date && ep.air_date > todayIso && !ep.is_watched
-  );
+  const future = entry.show.episodes.filter((ep) => {
+    const d = displayDate(ep);
+    return d !== null && d > todayIso && !ep.is_watched;
+  });
   if (future.length > 0) return future[0];
   if (entry.show.episodes.length > 0)
     return entry.show.episodes[entry.show.episodes.length - 1];

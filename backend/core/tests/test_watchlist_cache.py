@@ -4,7 +4,16 @@ from django.urls import reverse
 from django.contrib.auth import get_user_model
 from rest_framework.test import APIClient
 
-from core.models import CachedEpisode, CachedShow, MovieCache, MovieWatchlist, Watchlist
+from core.models import (
+    CachedEpisode,
+    CachedShow,
+    MovieCache,
+    MovieReview,
+    MovieWatchlist,
+    MovieWatchState,
+    Watchlist,
+    WatchState,
+)
 
 User = get_user_model()
 
@@ -68,7 +77,13 @@ def test_watchlist_all_reflects_watch_state_toggle(api_client, create_user):
     user = create_user()
     api_client.force_authenticate(user=user)
 
-    show = CachedShow.objects.create(tmdb_id=5002, title="Toggle Show", status=CachedShow.Status.ENDED)
+    # total_seasons=1: the coverage gate (WatchlistView) requires
+    # seasons_cached >= show.total_seasons before calling a show up_to_date —
+    # without this the show could never reach up_to_date regardless of watch
+    # state, since a real (unset) total_seasons of 0 never satisfies "> 0".
+    show = CachedShow.objects.create(
+        tmdb_id=5002, title="Toggle Show", status=CachedShow.Status.ENDED, total_seasons=1
+    )
     episode = CachedEpisode.objects.create(
         show=show, season_number=1, episode_number=1, tmdb_id=50021,
         air_date="2026-01-01", runtime_minutes=20,
@@ -101,7 +116,11 @@ def test_watchlist_all_reflects_bulk_toggle_cascade_catch_up(api_client, create_
     user = create_user()
     api_client.force_authenticate(user=user)
 
-    show = CachedShow.objects.create(tmdb_id=5003, title="Cascade Show", status=CachedShow.Status.ENDED)
+    # total_seasons=1 — see test_watchlist_all_reflects_watch_state_toggle's
+    # comment on why the coverage gate needs this set.
+    show = CachedShow.objects.create(
+        tmdb_id=5003, title="Cascade Show", status=CachedShow.Status.ENDED, total_seasons=1
+    )
     episodes = [
         CachedEpisode.objects.create(
             show=show, season_number=1, episode_number=n, tmdb_id=50030 + n,
@@ -160,3 +179,65 @@ def test_movie_watchlist_reflects_toggle_and_exposes_watched_at(api_client, crea
     assert len(response.data["watch_next"]) == 0
     assert len(response.data["watched"]) == 1
     assert response.data["watched"][0]["watched_at"] is not None
+
+
+# ── AnalyticsMoviesView response cache bust on MovieReview (Phase 85,
+#    Batch C) — average_rating/rating_distribution are derived from
+#    MovieReview rows, which nothing busted the analytics cache for before
+#    this fix; a rating change could sit stale for up to
+#    ANALYTICS_MOVIES_CACHE_TTL_SECONDS. ──────────────────────────────────
+
+@pytest.mark.django_db(transaction=True)
+def test_analytics_movies_reflects_review_after_cache_bust(api_client, create_user):
+    user = create_user()
+    api_client.force_authenticate(user=user)
+
+    movie = MovieCache.objects.create(tmdb_id=6002, title="Rated Movie", runtime_minutes=100)
+    MovieWatchState.objects.create(user=user, movie=movie)
+
+    url = reverse("analytics-movies")
+    response = api_client.get(url)
+    assert response.status_code == 200
+    assert response.data["rated_count"] == 0
+    assert response.data["average_rating"] is None
+
+    # Without invalidate_analytics_movies_cache_on_review (signals.py), this
+    # would still read the primed cache above — rated_count stuck at 0.
+    MovieReview.objects.create(user=user, movie=movie, rating="4.0")
+
+    response = api_client.get(url)
+    assert response.data["rated_count"] == 1
+    assert response.data["average_rating"] == 4.0
+
+
+# ── AnalyticsGenresView response cache (Phase 85, Batch D) ─────────────────
+# Was entirely uncached — profiled against production at ~2.1s on every
+# call for a real large library (see PROJECT_STATUS.md's Batch D entry).
+
+@pytest.mark.django_db(transaction=True)
+def test_analytics_genres_reflects_new_watch_after_cache_bust(api_client, create_user):
+    user = create_user()
+    api_client.force_authenticate(user=user)
+
+    show = CachedShow.objects.create(
+        tmdb_id=6003, title="Genre Cache Show", status=CachedShow.Status.ENDED, genres=["Drama"]
+    )
+    episode = CachedEpisode.objects.create(
+        show=show, season_number=1, episode_number=1, tmdb_id=60031,
+        air_date="2020-01-01", runtime_minutes=30,
+    )
+
+    url = reverse("analytics-genres")
+    response = api_client.get(url)
+    assert response.status_code == 200
+    assert response.data == []
+
+    # Without invalidate_analytics_movies_cache_on_review's sibling bust
+    # (both route through _bust_analytics_dashboard_and_statistics_cache),
+    # this would still read the primed empty-list cache above.
+    WatchState.objects.create(user=user, episode=episode)
+
+    response = api_client.get(url)
+    assert len(response.data) == 1
+    assert response.data[0]["genre"] == "Drama"
+    assert response.data[0]["episodes_watched"] == 1

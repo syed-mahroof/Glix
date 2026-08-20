@@ -26,7 +26,8 @@ import { isAnimeByGenresAndLanguage } from '../../lib/anime';
 import { clearFlashListLayoutCacheOnChange } from '../../lib/flashListLayout';
 import { useAppTheme, type ThemeColors } from '../../lib/theme';
 import { WatchlistEntry } from '../../store/watchStore';
-import { useLayoutFor, useWatchStore } from '../../store/watchStore';
+import { useWatchStore } from '../../store/watchStore';
+import { useLayoutFor } from '../../store/preferencesStore';
 
 const POSTER_BASE = 'https://image.tmdb.org/t/p/w185';
 
@@ -244,6 +245,8 @@ export default function ProfileShowsScreen() {
         <PressableScale
           style={[styles.backBtn, { backgroundColor: c.glassFill, borderColor: c.hairline }]}
           onPress={() => router.back()}
+          accessibilityRole="button"
+          accessibilityLabel="Go back"
         >
           <ArrowLeft color={c.textPrimary} size={22} />
         </PressableScale>
@@ -288,7 +291,12 @@ export default function ProfileShowsScreen() {
             returnKeyType="search"
           />
           {query.length > 0 && (
-            <PressableScale onPress={() => setQuery('')} hitSlop={8}>
+            <PressableScale
+              onPress={() => setQuery('')}
+              hitSlop={8}
+              accessibilityRole="button"
+              accessibilityLabel="Clear search"
+            >
               <X color={c.textTertiary} size={16} />
             </PressableScale>
           )}

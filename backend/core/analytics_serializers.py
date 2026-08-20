@@ -110,6 +110,30 @@ class RecentMovieSerializer(serializers.Serializer):
     watched_at = serializers.DateTimeField()
 
 
+# ── Movie analytics expansion (Phase 85, Batch C) ──────────────────────────
+
+class LanguageStatSerializer(serializers.Serializer):
+    # ISO 639-1 code (e.g. "en", "ko", "hi") or "unknown" for a movie cached
+    # before MovieCache.original_language existed / not yet re-synced from
+    # TMDB — see that field's own model comment. Display-name lookup (code
+    # -> "Korean") happens client-side, same as the existing language filter.
+    language = serializers.CharField()
+    count = serializers.IntegerField()
+    percentage = serializers.FloatField()
+
+
+class MonthStatSerializer(serializers.Serializer):
+    month = serializers.IntegerField(help_text="1-12, current year only.")
+    count = serializers.IntegerField()
+
+
+class RatingBucketSerializer(serializers.Serializer):
+    # coerce_to_string=False matches review_serializers.py's own rating
+    # fields — a real number on the wire, not "3.5" as a string.
+    rating = serializers.DecimalField(max_digits=2, decimal_places=1, coerce_to_string=False)
+    count = serializers.IntegerField()
+
+
 class AnalyticsMoviesSerializer(serializers.Serializer):
     movies_watched = serializers.IntegerField()
     movies_tracked = serializers.IntegerField()
@@ -118,9 +142,23 @@ class AnalyticsMoviesSerializer(serializers.Serializer):
     average_runtime_minutes = serializers.FloatField()
     watched_this_year = serializers.IntegerField()
     longest_movie = LongestMovieSerializer(allow_null=True)
+    # Shortest tracked movie with a known (non-zero) runtime — pairs with
+    # longest_movie above. Null if nothing watched has a runtime yet.
+    shortest_movie = LongestMovieSerializer(allow_null=True)
     top_genres = MovieGenreStatSerializer(many=True)
     by_decade = DecadeStatSerializer(many=True)
     recent_movies = RecentMovieSerializer(many=True)
+    # Movies watched THIS calendar year, most-recent-first — same shape as
+    # recent_movies (which is a 5-item teaser), capped at a real list length
+    # for a "Watched in {year}" browse section.
+    this_year_movies = RecentMovieSerializer(many=True)
+    by_language = LanguageStatSerializer(many=True)
+    by_month = MonthStatSerializer(many=True)
+    # Null when the user hasn't rated any watched movie yet (MovieReview is
+    # optional, gated on watched — not every watched movie has one).
+    average_rating = serializers.FloatField(allow_null=True)
+    rated_count = serializers.IntegerField()
+    rating_distribution = RatingBucketSerializer(many=True)
 
 
 class HeatmapDaySerializer(serializers.Serializer):

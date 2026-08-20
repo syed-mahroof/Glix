@@ -52,7 +52,8 @@ import {
   UpcomingListEntry,
 } from '../../lib/upcoming';
 import { useCatchupCascade } from '../../lib/useCatchupCascade';
-import { Episode, useLayoutFor, useWatchStore, WatchlistBuckets, WatchlistEntry } from '../../store/watchStore';
+import { Episode, useWatchStore, WatchlistBuckets, WatchlistEntry } from '../../store/watchStore';
+import { useLayoutFor, usePreferencesStore } from '../../store/preferencesStore';
 
 const POSTER_BASE_URL = 'https://image.tmdb.org/t/p/w185';
 
@@ -87,6 +88,11 @@ interface ShowEpisodeRow {
   /** Whether the row's next episode has already aired. When false the
    *  checkmark is disabled — a future episode can't be marked watched. */
   isAired: boolean;
+  /** episode.air_date resolved to the DEVICE's local calendar day via
+   *  resolveDisplayDateIso (lib/dateFormat.ts), not the raw TMDB string —
+   *  see buildRows' own comment on why this row-level field exists at all.
+   *  Null iff there's no episode or no air_date at all. */
+  displayAirDate: string | null;
   /** For recency-aware pill sorting. ISO string or null. */
   lastWatchedAt: string | null;
 }
@@ -134,6 +140,26 @@ function buildRows(entries: WatchlistEntry[], filter: FilterKey): ShowEpisodeRow
     // row below, instead of the two separate calls this used to make.
     const episode = pickNextEpisode(entry);
 
+    // Bug fix (2026-08-21, "Watch List shows a different weekday than
+    // Upcoming for the same episode"): episode.air_date is TMDB's bare,
+    // network-local calendar date — the Upcoming tab was already resolving
+    // it to the device's local calendar day via resolveDisplayDateIso
+    // (lib/dateFormat.ts), using the episode's exact air_datetime or the
+    // show's airs_time/airs_timezone broadcast slot when known. This row
+    // builder never did the same resolution, so the same episode could
+    // legitimately land on different calendar days between the two tabs —
+    // resolved once here and threaded through every place below that used
+    // to read episode.air_date directly (isFreshDrop, isAired, and the row
+    // itself, which ShowRow/gridBadgeForRow format from).
+    const displayAirDate = episode?.air_date
+      ? resolveDisplayDateIso(
+          episode.air_date,
+          episode.air_datetime,
+          entry.show.airs_time,
+          entry.show.airs_timezone
+        )
+      : null;
+
     // Categorize
     let category: FilterKey;
     if (watched_episode_count === 0) {
@@ -142,8 +168,8 @@ function buildRows(entries: WatchlistEntry[], filter: FilterKey): ShowEpisodeRow
       continue; // Up to date shows are omitted from the main "to watch" queue
     } else {
       let isFreshDrop = false;
-      if (episode?.air_date) {
-        const airMs = new Date(`${episode.air_date}T00:00:00`).getTime();
+      if (displayAirDate) {
+        const airMs = new Date(`${displayAirDate}T00:00:00`).getTime();
         if (todayMs - airMs <= INACTIVITY_MS) {
           isFreshDrop = true;
         }
@@ -177,7 +203,8 @@ function buildRows(entries: WatchlistEntry[], filter: FilterKey): ShowEpisodeRow
       showTitle: entry.show.title,
       posterPath: entry.show.poster_path,
       episode,
-      isAired: hasAired(episode?.air_date),
+      isAired: hasAired(displayAirDate),
+      displayAirDate,
       lastWatchedAt: entry.last_watched_at,
     });
   }
@@ -231,9 +258,9 @@ function gridBadgeForRow(item: ShowEpisodeRow): { label: string; highlighted: bo
       highlighted: false,
     };
   }
-  if (!item.episode.air_date) return { label: 'UPCOMING', highlighted: false };
+  if (!item.displayAirDate) return { label: 'UPCOMING', highlighted: false };
   const todayMs = new Date().setHours(0, 0, 0, 0);
-  const airMs = new Date(`${item.episode.air_date}T00:00:00`).getTime();
+  const airMs = new Date(`${item.displayAirDate}T00:00:00`).getTime();
   const diffDays = Math.round((airMs - todayMs) / 86400000);
   if (diffDays <= 0) return { label: 'TODAY', highlighted: true };
   if (diffDays === 1) return { label: 'TOMORROW', highlighted: true };
@@ -458,7 +485,7 @@ export default function ShowsScreen() {
   const toggleWatchState = useWatchStore((s) => s.toggleWatchState);
   const bulkToggleWatchState = useWatchStore((s) => s.bulkToggleWatchState);
   const layout = useLayoutFor('shows');
-  const setLayoutForScope = useWatchStore((s) => s.setLayoutForScope);
+  const setLayoutForScope = usePreferencesStore((s) => s.setLayoutForScope);
   const { highlightFilter } = useLocalSearchParams<{ highlightFilter?: string }>();
   const { theme } = useAppTheme();
   const c = theme.colors;
@@ -734,7 +761,7 @@ export default function ShowsScreen() {
           episodeNumber={episode.episode_number}
           episodeTitle={episode.title}
           episodeId={episode.tmdb_id}
-          airDate={episode.air_date}
+          airDate={item.displayAirDate}
           isWatched={episode.is_watched}
           isAired={item.isAired}
           onCheckPress={(epId) =>
@@ -867,6 +894,7 @@ export default function ShowsScreen() {
           <PressableScale
             style={[styles.headerIcon, { backgroundColor: c.glassFill, borderColor: c.hairline }]}
             onPress={() => router.push('/lists?media=tv' as any)}
+            hitSlop={8}
             accessibilityRole="button"
             accessibilityLabel="My Lists"
           >
@@ -1033,6 +1061,14 @@ export default function ShowsScreen() {
                 upcomingView === 'list' &&
                   layout === 'list' && { backgroundColor: c.accentFill },
               ]}
+              // Asymmetric, not a flat 8 — these three sit in a row with only
+              // a 4pt gap between them (viewToggleRow), so an 8pt hitSlop on
+              // every side would make adjacent buttons' hit regions overlap
+              // (mis-tap risk the checklist itself warns about). Vertical has
+              // no neighbor, so it gets the full 8pt; horizontal stays at 2pt
+              // so the two 2pt slops from neighboring buttons meet exactly at
+              // the 4pt gap's midpoint, never overlapping.
+              hitSlop={{ top: 8, bottom: 8, left: 2, right: 2 }}
               accessibilityRole="button"
               accessibilityLabel="List view"
               accessibilityState={{ selected: upcomingView === 'list' && layout === 'list' }}
@@ -1055,6 +1091,7 @@ export default function ShowsScreen() {
                 upcomingView === 'list' &&
                   layout === 'grid' && { backgroundColor: c.accentFill },
               ]}
+              hitSlop={{ top: 8, bottom: 8, left: 2, right: 2 }}
               accessibilityRole="button"
               accessibilityLabel="Grid view"
               accessibilityState={{ selected: upcomingView === 'list' && layout === 'grid' }}
@@ -1073,6 +1110,7 @@ export default function ShowsScreen() {
                 styles.viewToggleBtn,
                 upcomingView === 'calendar' && { backgroundColor: c.accentFill },
               ]}
+              hitSlop={{ top: 8, bottom: 8, left: 2, right: 8 }}
               accessibilityRole="button"
               accessibilityLabel="Calendar view"
               accessibilityState={{ selected: upcomingView === 'calendar' }}

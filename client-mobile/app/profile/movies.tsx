@@ -20,7 +20,8 @@ import { hasAnimationGenreString, isAnimeByGenreStringAndLanguage } from '../../
 import { clearFlashListLayoutCacheOnChange } from '../../lib/flashListLayout';
 import { useAppTheme } from '../../lib/theme';
 import { MovieWatchlistItem } from '../../store/watchStore';
-import { useLayoutFor, useWatchStore } from '../../store/watchStore';
+import { useWatchStore } from '../../store/watchStore';
+import { useLayoutFor } from '../../store/preferencesStore';
 
 const POSTER_BASE = 'https://image.tmdb.org/t/p/w185';
 
@@ -261,6 +262,8 @@ export default function ProfileMoviesScreen() {
         <PressableScale
           style={[styles.backBtn, { backgroundColor: c.glassFill, borderColor: c.hairline }]}
           onPress={() => router.back()}
+          accessibilityRole="button"
+          accessibilityLabel="Go back"
         >
           <ArrowLeft color={c.textPrimary} size={22} />
         </PressableScale>
@@ -304,7 +307,12 @@ export default function ProfileMoviesScreen() {
             returnKeyType="search"
           />
           {query.length > 0 && (
-            <PressableScale onPress={() => setQuery('')} hitSlop={8}>
+            <PressableScale
+              onPress={() => setQuery('')}
+              hitSlop={8}
+              accessibilityRole="button"
+              accessibilityLabel="Clear search"
+            >
               <X color={c.textTertiary} size={16} />
             </PressableScale>
           )}

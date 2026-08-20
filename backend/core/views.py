@@ -36,7 +36,7 @@ from core.models import (
     NotificationPreference,
 )
 from core.cache_keys import CACHE_TTL_SECONDS, movie_watchlist_cache_key, watchlist_cache_key
-from core.dates import has_released
+from core.dates import aired_cutoff_date, has_released
 from core.pagination import StandardResultsPagination
 from core.serializers import (
     LEAN_EPISODE_FIELDS,
@@ -50,7 +50,12 @@ from core.serializers import (
     WatchHistorySerializer,
 )
 from core.services import ANIME_GENRE_ID, ANIME_ORIGINAL_LANGUAGE, TMDBService, TMDBServiceError
-from core.tasks import recalculate_user_badges, recalculate_watch_streak, run_tvtime_import
+from core.tasks import (
+    cache_next_missing_season,
+    recalculate_user_badges,
+    recalculate_watch_streak,
+    run_tvtime_import,
+)
 
 class HealthCheckView(APIView):
     """
@@ -461,7 +466,7 @@ class WatchlistView(APIView):
             if cached is not None:
                 return Response(cached, status=status.HTTP_200_OK)
 
-        today = timezone.now().date()
+        today = aired_cutoff_date()
 
         entries = list(
             Watchlist.objects.filter(user=request.user)
@@ -518,10 +523,31 @@ class WatchlistView(APIView):
                 watched_counts[row["episode__show_id"]] = row["c"]
                 last_watched_map[row["episode__show_id"]] = row["last"]
 
+        # Distinct cached seasons per show (Bug fix, "series complete while
+        # seasons remain" — see _enqueue_season_backfill_if_caught_up's
+        # docstring for the full story). aired_count above only counts
+        # episodes this app has actually fetched from TMDB; a show can have
+        # `watched_count >= aired_count` purely because later seasons were
+        # never cached, not because the show is actually finished. Gating
+        # "up to date" on full season coverage too — not just on the
+        # cached-episode ratio — is what stops that false-complete state
+        # from surfacing here (the actual backfill of the missing season
+        # happens off this GET's request path, triggered from the toggle
+        # views instead).
+        seasons_cached_counts: dict[int, int] = {}
+        if show_ids:
+            seasons_cached_counts = dict(
+                CachedEpisode.objects.filter(show_id__in=show_ids)
+                .values("show_id")
+                .annotate(c=Count("season_number", distinct=True))
+                .values_list("show_id", "c")
+            )
+
         for entry in entries:
             entry.aired_count = aired_counts.get(entry.show_id, 0)
             entry.watched_count = watched_counts.get(entry.show_id, 0)
             entry.last_watched_at = last_watched_map.get(entry.show_id)
+            entry.seasons_cached = seasons_cached_counts.get(entry.show_id, 0)
 
         episodes_by_show: dict[int, list] = {show_id: [] for show_id in show_ids}
         if show_ids:
@@ -595,7 +621,17 @@ class WatchlistView(APIView):
         for entry in entries:
             if entry.status == Watchlist.Status.ARCHIVED:
                 bucket = "archived"
-            elif entry.aired_count > 0 and entry.watched_count >= entry.aired_count:
+            elif (
+                entry.aired_count > 0
+                and entry.watched_count >= entry.aired_count
+                # Coverage gate (bug fix, see seasons_cached_counts above):
+                # never call a show up_to_date off a partial cache. A show
+                # whose total_seasons hasn't synced yet (0) can't satisfy
+                # this either — conservative by construction, since that's
+                # exactly the state a not-yet-fully-synced show is in.
+                and entry.show.total_seasons > 0
+                and entry.seasons_cached >= entry.show.total_seasons
+            ):
                 bucket = "up_to_date"
             else:
                 bucket = "to_watch"
@@ -657,6 +693,71 @@ class WatchlistView(APIView):
         return Response(paginated, status=status.HTTP_200_OK)
 
 
+def _enqueue_season_backfill_if_caught_up(user, show_ids: set[int]) -> None:
+    """
+    Bug fix (2026-08-21, "series complete + confetti while seasons 5-7
+    remain") — shared by WatchStateToggleView and BulkWatchStateToggleView,
+    called after either successfully marks an episode watched.
+
+    "Aired episode count" for a show is only ever counted off CachedEpisode
+    rows that already exist locally, but ShowAddView eager-caches season 1
+    alone. A show whose watched seasons happen to be the only ones cached
+    reads as "watched >= aired" — i.e. complete — for a reason that has
+    nothing to do with whether the show is actually finished. WatchlistView's
+    own bucketing now additionally requires full season coverage before
+    calling a show up_to_date, which stops the false "complete" state from
+    being SHOWN — but by itself that would leave the show stuck in limbo
+    (not complete, but also not offering a next episode, since the season
+    that would supply one was never fetched). This closes that gap: any show
+    that would otherwise look caught-up gets its next missing season fetched
+    in the background, off this request's own critical path, so the next
+    /watchlist/ poll has real data to compute "up to date" or "next episode"
+    from instead of a stale count.
+
+    One grouped query per aggregate (aired/watched/season-coverage) across
+    every show in `show_ids` at once — this runs on every watched=True
+    toggle, so it stays cheap even for a large Cascade Catch-Up batch rather
+    than querying per-show in a loop.
+    """
+    if not show_ids:
+        return
+    shows_by_id = {
+        s.tmdb_id: s
+        for s in CachedShow.objects.filter(pk__in=show_ids, total_seasons__gt=0)
+    }
+    if not shows_by_id:
+        return
+
+    cutoff = aired_cutoff_date()
+    aired_counts = dict(
+        CachedEpisode.objects.filter(show_id__in=shows_by_id, air_date__lte=cutoff)
+        .values("show_id")
+        .annotate(c=Count("pk"))
+        .values_list("show_id", "c")
+    )
+    watched_counts = dict(
+        WatchState.objects.filter(user=user, episode__show_id__in=shows_by_id)
+        .values("episode__show_id")
+        .annotate(c=Count("id"))
+        .values_list("episode__show_id", "c")
+    )
+    seasons_cached_counts = dict(
+        CachedEpisode.objects.filter(show_id__in=shows_by_id)
+        .values("show_id")
+        .annotate(c=Count("season_number", distinct=True))
+        .values_list("show_id", "c")
+    )
+
+    for show_id, show in shows_by_id.items():
+        aired = aired_counts.get(show_id, 0)
+        watched = watched_counts.get(show_id, 0)
+        seasons_cached = seasons_cached_counts.get(show_id, 0)
+        if aired > 0 and watched >= aired and seasons_cached < show.total_seasons:
+            # on_commit: never fire the background fetch for a toggle whose
+            # own transaction goes on to roll back.
+            transaction.on_commit(lambda sid=show_id: cache_next_missing_season.delay(sid))
+
+
 class WatchStateToggleView(APIView):
     """
     POST /api/watch-state/toggle/
@@ -700,8 +801,7 @@ class WatchStateToggleView(APIView):
                 # (the branch above) is always allowed — this only gates the
                 # "create WatchState" direction. air_date is null for episodes
                 # TMDB hasn't dated yet; treat those as not-yet-airable too.
-                today = timezone.now().date()
-                if episode.air_date is None or episode.air_date > today:
+                if not has_released(episode.air_date):
                     return Response(
                         {"detail": "This episode hasn't aired yet — you can't mark it watched."},
                         status=status.HTTP_400_BAD_REQUEST,
@@ -712,6 +812,7 @@ class WatchStateToggleView(APIView):
                 profile.refresh_from_db(fields=["total_time_watched"])
                 WatchState.objects.create(user=request.user, episode=episode)
                 watched = True
+                _enqueue_season_backfill_if_caught_up(request.user, {episode.show_id})
 
             Watchlist.objects.get_or_create(
                 user=request.user,
@@ -857,6 +958,7 @@ class BulkWatchStateToggleView(APIView):
                     recalculate_user_badges(request.user.id)
                     recalculate_watch_streak(request.user.id)
                     transaction.on_commit(lambda: safe_cache_delete(watchlist_cache_key(request.user.id)))
+                    _enqueue_season_backfill_if_caught_up(request.user, show_ids)
             else:
                 # Only delete states that currently exist
                 to_delete = [ep for ep in episodes if ep.pk in existing_states]
@@ -1073,7 +1175,7 @@ class CatchupCheckView(APIView):
         # BulkWatchStateToggleView), so counting them here would let the
         # Catch-Up modal promise "N previous episodes" that the follow-up
         # bulk-toggle then silently can't deliver on.
-        today = timezone.now().date()
+        today = aired_cutoff_date()
         ids = list(
             prev_qs.exclude(pk__in=watched_ids)
             .filter(air_date__isnull=False, air_date__lte=today)
@@ -1311,7 +1413,7 @@ class ContinueWatchingView(APIView):
     RESULT_LIMIT = 10
 
     def get(self, request):
-        today = timezone.now().date()
+        today = aired_cutoff_date()
 
         # Which shows qualify ("started but not finished") and how they
         # rank, via two flat grouped queries (Phase 75.8) — not one

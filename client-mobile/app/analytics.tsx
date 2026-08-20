@@ -30,6 +30,8 @@ import ErrorState from '../components/ErrorState';
 import GenreChart from '../components/GenreChart';
 import GlassSurface from '../components/GlassSurface';
 import HorizontalMediaList, { type MediaItem } from '../components/HorizontalMediaList';
+import { languageDisplayName } from '../components/LanguageFilterModal';
+import MonthlyBarStrip from '../components/MonthlyBarStrip';
 import PressableScale from '../components/PressableScale';
 import { SegmentedControl } from '../components/SegmentedControl';
 import StatsCard from '../components/StatsCard';
@@ -181,7 +183,12 @@ export default function AnalyticsScreen() {
         {/* Header */}
         <View style={styles.headerRow}>
           <View style={styles.headerLeft}>
-            <PressableScale onPress={() => router.back()} hitSlop={8}>
+            <PressableScale
+              onPress={() => router.back()}
+              hitSlop={8}
+              accessibilityRole="button"
+              accessibilityLabel="Go back"
+            >
               <ArrowLeft color={c.textPrimary} size={22} />
             </PressableScale>
             <View>
@@ -224,16 +231,64 @@ export default function AnalyticsScreen() {
                 <StatsCard label="This Year" value={movieAnalytics.watched_this_year} Icon={Clapperboard} />
               </View>
 
-              {movieAnalytics.longest_movie && (
+              {(movieAnalytics.longest_movie || movieAnalytics.shortest_movie) && (
+                <View style={styles.runtimeExtremesRow}>
+                  {movieAnalytics.longest_movie && (
+                    <GlassSurface radius={14} style={[styles.longestMovieRow, styles.runtimeExtremeCard]}>
+                      <Text style={[styles.longestMovieLabel, { color: c.textSecondary }]}>Longest watched</Text>
+                      <Text style={[styles.longestMovieValue, { color: c.textPrimary }]} numberOfLines={1}>
+                        {movieAnalytics.longest_movie.title} · {movieAnalytics.longest_movie.runtime_minutes}m
+                      </Text>
+                    </GlassSurface>
+                  )}
+                  {movieAnalytics.shortest_movie && (
+                    <GlassSurface radius={14} style={[styles.longestMovieRow, styles.runtimeExtremeCard]}>
+                      <Text style={[styles.longestMovieLabel, { color: c.textSecondary }]}>Shortest watched</Text>
+                      <Text style={[styles.longestMovieValue, { color: c.textPrimary }]} numberOfLines={1}>
+                        {movieAnalytics.shortest_movie.title} · {movieAnalytics.shortest_movie.runtime_minutes}m
+                      </Text>
+                    </GlassSurface>
+                  )}
+                </View>
+              )}
+
+              {movieAnalytics.rated_count > 0 && (
                 <GlassSurface radius={14} style={styles.longestMovieRow}>
-                  <Text style={[styles.longestMovieLabel, { color: c.textSecondary }]}>Longest movie watched</Text>
-                  <Text style={[styles.longestMovieValue, { color: c.textPrimary }]} numberOfLines={1}>
-                    {movieAnalytics.longest_movie.title} · {movieAnalytics.longest_movie.runtime_minutes}m
+                  <Text style={[styles.longestMovieLabel, { color: c.textSecondary }]}>Average rating</Text>
+                  <Text style={[styles.longestMovieValue, { color: c.textPrimary }]}>
+                    ★ {movieAnalytics.average_rating?.toFixed(1)} · {movieAnalytics.rated_count} rated
                   </Text>
                 </GlassSurface>
               )}
 
               {movieAnalytics.top_genres.length > 0 && <GenreChart data={movieAnalytics.top_genres} />}
+
+              {movieAnalytics.by_language.length > 0 && (
+                <GenreChart
+                  title="By Language"
+                  maxItems={10}
+                  data={movieAnalytics.by_language.map((l) => ({
+                    genre: languageDisplayName(l.language),
+                    percentage: l.percentage,
+                  }))}
+                />
+              )}
+
+              <MonthlyBarStrip data={movieAnalytics.by_month} />
+
+              {movieAnalytics.rated_count > 0 && (
+                <GenreChart
+                  title="Ratings"
+                  maxItems={10}
+                  data={[...movieAnalytics.rating_distribution].reverse().map((r) => ({
+                    genre: `★ ${r.rating}`,
+                    percentage:
+                      movieAnalytics.rated_count > 0
+                        ? Math.round((r.count / movieAnalytics.rated_count) * 1000) / 10
+                        : 0,
+                  }))}
+                />
+              )}
 
               {movieAnalytics.by_decade.length > 0 && (
                 <GlassSurface radius={16} style={styles.decadeCard}>
@@ -245,6 +300,21 @@ export default function AnalyticsScreen() {
                     </View>
                   ))}
                 </GlassSurface>
+              )}
+
+              {movieAnalytics.this_year_movies.length > 0 && (
+                <HorizontalMediaList
+                  title={`Watched in ${new Date().getFullYear()}`}
+                  items={movieAnalytics.this_year_movies.map(
+                    (m): MediaItem => ({
+                      tmdb_id: m.tmdb_id,
+                      media_type: 'movie',
+                      title: m.title,
+                      poster_path: m.poster_path,
+                      vote_average: 0,
+                    })
+                  )}
+                />
               )}
 
               {movieAnalytics.recent_movies.length > 0 && (
@@ -400,6 +470,18 @@ const styles = StyleSheet.create({
   moviesLoading: {
     paddingVertical: 60,
     alignItems: 'center',
+  },
+  runtimeExtremesRow: {
+    flexDirection: 'row',
+    gap: 10,
+  },
+  // Modifier for longestMovieRow when two cards sit side by side (see
+  // runtimeExtremesRow above) — NOT on the base style, which is also used
+  // standalone (average rating card) where flex:1 inside the screen's
+  // vertical ScrollView content would misbehave (grows to fill remaining
+  // scroll height instead of sizing to its own content).
+  runtimeExtremeCard: {
+    flex: 1,
   },
   longestMovieRow: {
     padding: 16,

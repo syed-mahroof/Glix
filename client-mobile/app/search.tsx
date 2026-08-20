@@ -92,7 +92,13 @@ export default function SearchScreen() {
   return (
     <SafeAreaView style={[styles.container, { backgroundColor: c.bg }]}>
       <View style={styles.header}>
-        <PressableScale onPress={() => router.back()} hitSlop={8} style={styles.backButton}>
+        <PressableScale
+          onPress={() => router.back()}
+          hitSlop={8}
+          style={styles.backButton}
+          accessibilityRole="button"
+          accessibilityLabel="Go back"
+        >
           <ArrowLeft color={c.textPrimary} size={22} />
         </PressableScale>
         <View style={[styles.inputRow, { backgroundColor: c.glassFill, borderColor: c.hairline }]}>
@@ -108,7 +114,12 @@ export default function SearchScreen() {
             returnKeyType="search"
           />
           {query.length > 0 && (
-            <PressableScale onPress={() => setQuery('')} hitSlop={8}>
+            <PressableScale
+              onPress={() => setQuery('')}
+              hitSlop={8}
+              accessibilityRole="button"
+              accessibilityLabel="Clear search"
+            >
               <X color={c.textTertiary} size={18} />
             </PressableScale>
           )}

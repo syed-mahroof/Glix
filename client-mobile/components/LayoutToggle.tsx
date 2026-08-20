@@ -5,21 +5,21 @@
 // Upcoming List/Calendar switch — same shape, new icons. Each screen passes
 // its own `scope`, so switching layout on one screen never affects another;
 // all of them fall back to the Settings > Appearance default until a screen
-// gets its own override (see watchStore's useLayoutFor).
+// gets its own override (see preferencesStore's useLayoutFor).
 
 import { LayoutGrid, List as ListIcon } from 'lucide-react-native';
 import React from 'react';
 import { StyleSheet, View } from 'react-native';
 
 import { useAppTheme } from '../lib/theme';
-import { LayoutScope, useLayoutFor, useWatchStore } from '../store/watchStore';
+import { LayoutScope, useLayoutFor, usePreferencesStore } from '../store/preferencesStore';
 import PressableScale from './PressableScale';
 
 export default function LayoutToggle({ scope }: { scope: LayoutScope }) {
   const { theme } = useAppTheme();
   const c = theme.colors;
   const layout = useLayoutFor(scope);
-  const setLayoutForScope = useWatchStore((s) => s.setLayoutForScope);
+  const setLayoutForScope = usePreferencesStore((s) => s.setLayoutForScope);
 
   return (
     <View style={[styles.row, { backgroundColor: c.glassFill, borderColor: c.hairline }]}>
