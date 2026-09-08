@@ -71,7 +71,12 @@ if (Platform.OS === 'ios') {
 
 export interface Episode {
   tmdb_id: number;
-  show: number;
+  /** Same lean-shape caveat as `overview` below: absent on episodes embedded
+   *  in a WatchlistEntry — every one of those already arrives nested under
+   *  its own show's `episodes` array, so the parent id would be pure
+   *  repetition (confirmed unread by anything on that path). Present on
+   *  episodes from the dedicated season/episode endpoints. */
+  show?: number;
   season_number: number;
   episode_number: number;
   title: string;

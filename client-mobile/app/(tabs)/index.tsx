@@ -649,19 +649,28 @@ export default function ShowsScreen() {
     []
   );
 
+  // Perf fix: this used to take (episodeId, showId, showTitle, seasonNumber,
+  // episodeNumber) and close over `watchlist` directly, which meant its
+  // identity — and therefore renderRow's, and therefore the onCheckPress
+  // prop every visible ShowRow receives — was rebuilt on every single
+  // watchlist mutation (i.e. every checkmark tap anywhere in the list).
+  // ShowRow is memo()'d specifically to stop one row's tap from re-rendering
+  // every other visible row, but a fresh onCheckPress reference each time
+  // defeated that shallow-prop-equality check regardless of what else
+  // changed. Single-param signature (episodeId only, matching ShowRow's
+  // onCheckPress type exactly) + reading watchStore.getState() instead of
+  // closing over the `watchlist` selector value makes this callback
+  // reference genuinely stable across re-renders — show/season/episode/
+  // label are all derivable from the episode lookup already done here, so
+  // nothing is lost by not receiving them as arguments.
   const handleCheckPress = useCallback(
-    (
-      episodeId: number,
-      showId: number,
-      showTitle: string,
-      seasonNumber: number,
-      episodeNumber: number
-    ) => {
-      const allEntries = getAllEntries(watchlist);
+    (episodeId: number) => {
+      const allEntries = getAllEntries(useWatchStore.getState().watchlist);
       const entry = allEntries.find((e) => e.show.episodes.some((ep) => ep.tmdb_id === episodeId));
       const episode = entry?.show.episodes.find((ep) => ep.tmdb_id === episodeId);
+      if (!entry || !episode) return;
 
-      if (episode?.is_watched) {
+      if (episode.is_watched) {
         // Un-watching: no catch-up concern either way, update immediately
         // (no exit animation). Checking the catch-up backend here too
         // would risk popping "mark previous episodes watched?" on an
@@ -681,10 +690,10 @@ export default function ShowsScreen() {
       // marks this episode watched too (idempotent — already-watched
       // episodes are skipped by the bulk endpoint), so there's no
       // double-toggle risk regardless of which resolves first.
-      const label = `S${pad(seasonNumber)}E${pad(episodeNumber)}`;
-      catchup.checkEpisode(showId, episodeId, showTitle, label);
+      const label = `S${pad(episode.season_number)}E${pad(episode.episode_number)}`;
+      catchup.checkEpisode(entry.show.tmdb_id, episodeId, entry.show.title, label);
     },
-    [catchup, toggleWatchState, watchlist]
+    [catchup, toggleWatchState]
   );
 
   /** Grid card checkmark — called by ShowPosterCard after its own ~420ms
@@ -764,9 +773,13 @@ export default function ShowsScreen() {
           airDate={item.displayAirDate}
           isWatched={episode.is_watched}
           isAired={item.isAired}
-          onCheckPress={(epId) =>
-            handleCheckPress(epId, item.showId, item.showTitle, episode.season_number, episode.episode_number)
-          }
+          // Direct stable reference, not an inline wrapper — an inline
+          // arrow here would be a fresh function every renderRow call,
+          // defeating ShowRow's memo() regardless of handleCheckPress's own
+          // stability. handleCheckPress now takes only episodeId (see its
+          // definition above) specifically so it can be passed straight
+          // through like this.
+          onCheckPress={handleCheckPress}
           onAnimationComplete={handleRowAnimationComplete}
         />
       );
@@ -908,7 +921,7 @@ export default function ShowsScreen() {
         <PressableScale
           style={[
             styles.errorBanner,
-            { backgroundColor: c.negativeDim, borderColor: 'rgba(255, 69, 58, 0.3)' },
+            { backgroundColor: c.negativeDim, borderColor: c.negativeBorder },
           ]}
           onPress={clearError}
         >
@@ -1016,7 +1029,6 @@ export default function ShowsScreen() {
               keyExtractor={(item) => item.id}
               renderItem={layout === 'grid' ? renderGridRow : renderRow}
               getItemType={() => layout}
-              estimatedItemSize={layout === 'grid' ? 230 : 108}
               numColumns={layout === 'grid' ? 3 : 1}
               extraData={layout}
               contentContainerStyle={styles.listContent}
@@ -1145,7 +1157,6 @@ export default function ShowsScreen() {
               renderItem={layout === 'grid' ? renderUpcomingGridEntry : renderUpcomingEntry}
               getItemType={upcomingItemType}
               overrideItemLayout={layout === 'grid' ? upcomingOverrideLayout : undefined}
-              estimatedItemSize={layout === 'grid' ? 230 : 64}
               numColumns={layout === 'grid' ? 3 : 1}
               extraData={[layout, expandedPastLabels]}
               contentContainerStyle={styles.listContent}

@@ -265,7 +265,26 @@ function MoviePosterCardComponent({
   );
 }
 
-export default memo(MoviePosterCardComponent);
+// Custom equality — same reasoning/pattern as ShowPosterCard.tsx's
+// arePropsEqual: `checkmark` is a fresh object literal from every parent
+// render, so comparing it by reference would defeat memo() every time
+// regardless of whether anything user-visible changed. onPress is
+// deliberately excluded — when every other field is unchanged, the
+// still-mounted instance's existing closure is behaviorally identical to a
+// fresh one.
+function arePropsEqual(prev: MoviePosterCardProps, next: MoviePosterCardProps): boolean {
+  return (
+    prev.movieId === next.movieId &&
+    prev.title === next.title &&
+    prev.posterPath === next.posterPath &&
+    prev.subtitle === next.subtitle &&
+    prev.ratingBadge === next.ratingBadge &&
+    prev.checkmark?.isWatched === next.checkmark?.isWatched &&
+    prev.checkmark?.disabled === next.checkmark?.disabled
+  );
+}
+
+export default memo(MoviePosterCardComponent, arePropsEqual);
 
 const styles = StyleSheet.create({
   wrap: {

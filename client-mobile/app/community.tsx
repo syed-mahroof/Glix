@@ -87,13 +87,12 @@ function DiscussionsTab() {
     <FlashList
       data={feed}
       keyExtractor={(item) => item.id}
-      estimatedItemSize={120}
       contentContainerStyle={styles.list}
       refreshing={isRefreshing}
       onRefresh={handleRefresh}
       ListHeaderComponent={
         error ? (
-          <View style={[styles.errorBanner, { backgroundColor: c.negativeDim, borderColor: 'rgba(255, 69, 58, 0.3)' }]}>
+          <View style={[styles.errorBanner, { backgroundColor: c.negativeDim, borderColor: c.negativeBorder }]}>
             <Text style={[styles.errorBannerText, { color: c.negative }]}>{error}</Text>
           </View>
         ) : feed.length === 0 ? null : (
@@ -169,7 +168,6 @@ function ActivityTab() {
     <FlashList
       data={activityFeed}
       keyExtractor={(item, index) => `${item.media_type}-${item.user_id}-${item.tmdb_id}-${item.updated_at}-${index}`}
-      estimatedItemSize={120}
       contentContainerStyle={styles.list}
       refreshing={isLoadingFeed && activityFeed.length > 0}
       onRefresh={() => fetchActivityFeed(1)}
@@ -256,7 +254,6 @@ function PeopleTab() {
         <FlashList
           data={searchResults}
           keyExtractor={(item) => String(item.id)}
-          estimatedItemSize={64}
           contentContainerStyle={styles.list}
           renderItem={({ item }) => (
             <UserRow

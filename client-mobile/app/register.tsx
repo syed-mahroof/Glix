@@ -86,7 +86,7 @@ export default function RegisterScreen() {
           <Text style={[styles.subtitle, { color: c.textSecondary }]}>Start tracking every show you watch.</Text>
 
           {error && (
-            <View style={[styles.errorBanner, { backgroundColor: c.negativeDim, borderColor: 'rgba(255, 69, 58, 0.3)' }]}>
+            <View style={[styles.errorBanner, { backgroundColor: c.negativeDim, borderColor: c.negativeBorder }]}>
               <Text style={[styles.errorText, { color: c.negative }]}>{error}</Text>
             </View>
           )}
@@ -132,7 +132,12 @@ export default function RegisterScreen() {
               onChangeText={setPassword}
               editable={!isSubmitting}
             />
-            <PressableScale onPress={() => setIsPasswordVisible((prev) => !prev)} hitSlop={8}>
+            <PressableScale
+              onPress={() => setIsPasswordVisible((prev) => !prev)}
+              hitSlop={8}
+              accessibilityRole="button"
+              accessibilityLabel={isPasswordVisible ? 'Hide password' : 'Show password'}
+            >
               {isPasswordVisible ? (
                 <EyeOff color={c.textTertiary} size={18} />
               ) : (

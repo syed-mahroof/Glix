@@ -313,7 +313,6 @@ export default function ProfileAnimeScreen() {
             keyExtractor={(item) => String(item.id)}
             numColumns={layout === 'grid' ? 3 : 1}
             getItemType={() => layout}
-            estimatedItemSize={layout === 'grid' ? 230 : 108}
             extraData={layout}
             renderItem={({ item }) =>
               layout === 'grid' ? <ShowGridCard entry={item} /> : <ShowListRow entry={item} />
@@ -333,7 +332,6 @@ export default function ProfileAnimeScreen() {
             keyExtractor={(item) => String(item.id)}
             numColumns={layout === 'grid' ? 3 : 1}
             getItemType={() => layout}
-            estimatedItemSize={layout === 'grid' ? 230 : 108}
             extraData={layout}
             renderItem={({ item }) =>
               layout === 'grid' ? <MovieGridCard item={item} /> : <MovieListRow item={item} />

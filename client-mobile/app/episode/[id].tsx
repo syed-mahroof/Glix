@@ -413,7 +413,7 @@ export default function EpisodeDetailScreen() {
           })()}
 
           {sectionError && (
-            <View style={[styles.errorBanner, { backgroundColor: c.negativeDim, borderColor: 'rgba(255, 69, 58, 0.3)' }]}>
+            <View style={[styles.errorBanner, { backgroundColor: c.negativeDim, borderColor: c.negativeBorder }]}>
               <Text style={[styles.errorBannerText, { color: c.negative }]}>{sectionError}</Text>
             </View>
           )}

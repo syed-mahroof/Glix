@@ -171,7 +171,13 @@ export default function ForgotPasswordScreen() {
         behavior={Platform.OS === 'ios' ? 'padding' : undefined}
       >
         <View style={styles.content}>
-          <PressableScale onPress={() => router.back()} hitSlop={8} style={styles.backButton}>
+          <PressableScale
+            onPress={() => router.back()}
+            hitSlop={8}
+            style={styles.backButton}
+            accessibilityRole="button"
+            accessibilityLabel="Go back"
+          >
             <ArrowLeft color={c.textPrimary} size={22} />
           </PressableScale>
 
@@ -187,7 +193,7 @@ export default function ForgotPasswordScreen() {
           </Text>
 
           {error && (
-            <View style={[styles.banner, { backgroundColor: c.negativeDim, borderColor: 'rgba(255, 69, 58, 0.3)' }]}>
+            <View style={[styles.banner, { backgroundColor: c.negativeDim, borderColor: c.negativeBorder }]}>
               <Text style={[styles.bannerText, { color: c.negative }]}>{error}</Text>
             </View>
           )}

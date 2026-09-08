@@ -117,9 +117,15 @@ export default function MoviesScreen() {
     return movieWatchlist.watched;
   }, [movieWatchlist, filter]);
 
+  // Perf fix (same cause/fix as index.tsx's handleCheckPress): closing over
+  // the `movieWatchlist` selector value meant this callback's identity was
+  // rebuilt on every watchlist mutation, defeating MovieRow/MoviePosterCard's
+  // memo() for every visible row on every single tap. Reading
+  // watchStore.getState() instead keeps this reference genuinely stable.
   const handleCheckPress = useCallback(
     (movieId: number) => {
-      const item = [...movieWatchlist.watch_next, ...movieWatchlist.watched].find(
+      const { movieWatchlist: current } = useWatchStore.getState();
+      const item = [...current.watch_next, ...current.watched].find(
         (i) => i.movie.tmdb_id === movieId
       );
       if (!item) return;
@@ -130,7 +136,7 @@ export default function MoviesScreen() {
       }
       // Watching path: handled by onAnimationComplete (see below)
     },
-    [movieWatchlist, toggleMovieWatchState]
+    [toggleMovieWatchState]
   );
 
   /** Fires after the row's collapse animation finishes.
@@ -210,7 +216,7 @@ export default function MoviesScreen() {
         <PressableScale
           style={[
             styles.errorBanner,
-            { backgroundColor: c.negativeDim, borderColor: 'rgba(255, 69, 58, 0.3)' },
+            { backgroundColor: c.negativeDim, borderColor: c.negativeBorder },
           ]}
           onPress={clearError}
         >
@@ -281,7 +287,6 @@ export default function MoviesScreen() {
           keyExtractor={(item) => String(item.movie.tmdb_id)}
           renderItem={layout === 'grid' ? renderGridItem : renderItem}
           getItemType={() => layout}
-          estimatedItemSize={layout === 'grid' ? 230 : 108}
           numColumns={layout === 'grid' ? 3 : 1}
           extraData={layout}
           contentContainerStyle={styles.listContent}

@@ -114,7 +114,6 @@ export default function ShowCommentsScreen() {
         <FlashList
           data={comments}
           keyExtractor={(item) => item.id}
-          estimatedItemSize={120}
           contentContainerStyle={styles.list}
           refreshing={isRefreshing}
           onRefresh={handleRefresh}
@@ -124,7 +123,7 @@ export default function ShowCommentsScreen() {
             <View style={styles.listHeader}>
               <ReactionSummary commentCount={totalCount} />
               {error && (
-                <View style={[styles.errorBanner, { backgroundColor: c.negativeDim, borderColor: 'rgba(255, 69, 58, 0.3)' }]}>
+                <View style={[styles.errorBanner, { backgroundColor: c.negativeDim, borderColor: c.negativeBorder }]}>
                   <Text style={[styles.errorBannerText, { color: c.negative }]}>{error}</Text>
                 </View>
               )}

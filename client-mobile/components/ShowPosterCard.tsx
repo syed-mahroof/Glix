@@ -340,7 +340,33 @@ function ShowPosterCardComponent({
   );
 }
 
-export default memo(ShowPosterCardComponent);
+// Custom equality (not memo()'s default shallow-props compare) — `checkmark`
+// arrives as a fresh object literal from every parent render (see index.tsx/
+// movies.tsx's renderGridRow: `checkmark={{ isWatched, disabled, itemId,
+// onPress: () => ... }}`), so comparing it by reference would defeat memo()
+// on every single grid render regardless of whether anything user-visible
+// actually changed — the exact "checkmark object defeats memoization" issue.
+// Compares checkmark's own fields by value instead, and deliberately does
+// NOT compare checkmark.onPress by reference: when every other field here is
+// unchanged too, the still-mounted instance's existing onPress closure was
+// built from the same showId/episodeId/etc. a fresh render would produce
+// anyway, so calling the "stale" one is behaviorally identical.
+function arePropsEqual(prev: ShowPosterCardProps, next: ShowPosterCardProps): boolean {
+  return (
+    prev.showId === next.showId &&
+    prev.title === next.title &&
+    prev.posterPath === next.posterPath &&
+    prev.overlayBadge === next.overlayBadge &&
+    prev.overlayBadgeHighlighted === next.overlayBadgeHighlighted &&
+    prev.subtitle === next.subtitle &&
+    prev.progressPercentage === next.progressPercentage &&
+    prev.checkmark?.isWatched === next.checkmark?.isWatched &&
+    prev.checkmark?.disabled === next.checkmark?.disabled &&
+    prev.checkmark?.itemId === next.checkmark?.itemId
+  );
+}
+
+export default memo(ShowPosterCardComponent, arePropsEqual);
 
 const styles = StyleSheet.create({
   wrap: {

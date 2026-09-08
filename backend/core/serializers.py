@@ -162,7 +162,6 @@ class CachedEpisodeSerializer(serializers.ModelSerializer):
 # a multi-megabyte `GET /watchlist/` body. See CachedShowSerializer.
 LEAN_EPISODE_FIELDS = (
     "tmdb_id",
-    "show_id",
     "season_number",
     "episode_number",
     "title",

@@ -186,7 +186,7 @@ export default function MyReviewsScreen() {
 
       {error && (
         <PressableScale
-          style={[styles.errorBanner, { backgroundColor: c.negativeDim, borderColor: 'rgba(255, 69, 58, 0.3)' }]}
+          style={[styles.errorBanner, { backgroundColor: c.negativeDim, borderColor: c.negativeBorder }]}
           onPress={() => setError(null)}
         >
           <Text style={[styles.errorText, { color: c.negative }]}>{error}</Text>
@@ -210,7 +210,6 @@ export default function MyReviewsScreen() {
           data={rows}
           keyExtractor={(item) => item.id}
           renderItem={({ item }) => <ReviewRowCard tab={tab} item={item} />}
-          estimatedItemSize={120}
           contentContainerStyle={styles.listContent}
           showsVerticalScrollIndicator={false}
           onEndReachedThreshold={0.4}

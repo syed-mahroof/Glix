@@ -556,14 +556,21 @@ class WatchlistView(APIView):
                     user=request.user, episode__show_id__in=show_ids
                 ).values_list("episode_id", flat=True)
             )
+            # show_id is queried separately from LEAN_EPISODE_FIELDS (grouping
+            # key only) rather than included in it: nothing on the client
+            # reads a per-episode `show` id — every episode already arrives
+            # nested under its own show's `episodes` array, so repeating the
+            # parent's id on all ~14,000 rows of a large library was pure
+            # dead weight (confirmed via a full grep of the client for any
+            # read of Episode.show on a watchlist-sourced episode — none).
             episode_rows = (
                 CachedEpisode.objects.filter(show_id__in=show_ids)
                 .order_by("show_id", "season_number", "episode_number")
-                .values_list(*LEAN_EPISODE_FIELDS)
+                .values_list("show_id", *LEAN_EPISODE_FIELDS)
             )
             for (
-                tmdb_id,
                 show_id,
+                tmdb_id,
                 season_number,
                 episode_number,
                 title,
@@ -574,7 +581,6 @@ class WatchlistView(APIView):
                 episodes_by_show[show_id].append(
                     {
                         "tmdb_id": tmdb_id,
-                        "show": show_id,
                         "season_number": season_number,
                         "episode_number": episode_number,
                         "title": title,
@@ -598,7 +604,13 @@ class WatchlistView(APIView):
             )
             if active_rewatches:
                 rewatch_ids = [r["id"] for r in active_rewatches]
-                watched_counts = dict(
+                # Deliberately its own name, not a reuse of `watched_counts`
+                # above (show_id -> episode-watched-count) — this dict is
+                # keyed by rewatch_id and means something different. It used
+                # to just reassign `watched_counts`, which happened to be
+                # harmless (nothing below reads the original meaning again
+                # in this method) but was a live footgun for the next edit.
+                rewatch_watched_counts = dict(
                     RewatchEpisodeState.objects.filter(rewatch_id__in=rewatch_ids)
                     .values("rewatch_id")
                     .annotate(c=Count("id"))
@@ -607,7 +619,7 @@ class WatchlistView(APIView):
                 for r in active_rewatches:
                     active_rewatch_by_show[r["show_id"]] = {
                         "round_number": r["round_number"],
-                        "watched_episode_count": watched_counts.get(r["id"], 0),
+                        "watched_episode_count": rewatch_watched_counts.get(r["id"], 0),
                     }
 
         serializer_context = {

@@ -10,22 +10,28 @@
 # tab. `wait -n` means if any one process dies, the script exits and
 # Render restarts the whole container — all three come back together
 # rather than silently running with one process dead.
+#
+# collectstatic moved to the Dockerfile (build time, once per deploy) —
+# it's a pure filesystem operation with no DB dependency, so it had no
+# reason to run again on every wake-from-sleep. migrate stays here: it
+# needs a live DB connection the build stage doesn't have, and genuinely
+# can differ between a sleep and a wake if a deploy landed while asleep.
 python manage.py migrate --noinput
-python manage.py collectstatic --noinput
 
-# -l WARNING (not INFO): the per-heartbeat/gossip/mingle chatter at INFO was
-# the dominant line count in Render's log tab and, on Upstash, a real chunk
-# of the monthly command budget was just this being *logged*, not the
-# commands themselves. --without-gossip/--without-mingle/--without-heartbeat
-# turn off worker-to-worker cluster coordination Celery ships needing for a
-# multi-worker fleet — this is --concurrency=1, a single solo worker with
-# nothing to coordinate with, so all three are pure BRPOP/PUBLISH overhead
-# with no purpose here (Phase 75.8).
-celery -A config beat -l WARNING &
-celery -A config worker --concurrency=1 -l WARNING --without-gossip --without-mingle --without-heartbeat &
+# Cold-start fix: gunicorn is started FIRST, not after celery worker+beat.
+# lib/warmup.ts's /health/ poll (what actually unblocks the client's boot
+# screen) only needs Django + gunicorn to be up — it never touches Celery.
+# The previous order backgrounded beat and worker before gunicorn, so all
+# three processes' own Django app import/boot competed for the same single
+# free-tier CPU at once, with gunicorn (the one thing the user is actually
+# waiting on) getting no priority over two processes nothing in the boot
+# path is blocked on. `&` still backgrounds everything the same way `wait
+# -n` below expects — this only changes which one gets first crack at the
+# CPU during that shared boot window.
+#
 # --workers 1 (not more): a 2nd worker process would duplicate this whole
 # Django app's memory footprint on a free-tier box that already shares its
-# RAM with the celery worker+beat processes above, in this same container.
+# RAM with the celery worker+beat processes below, in this same container.
 # --threads 4 --worker-class gthread instead: real concurrency for I/O-bound
 # views (DB queries, occasional TMDBService HTTP call) inside that single
 # process's memory budget, so one slow/blocked request (e.g. a user's big
@@ -37,6 +43,17 @@ celery -A config worker --concurrency=1 -l WARNING --without-gossip --without-mi
 # gunicorn's arbiter starts the replacement before killing the old one, so
 # this can't trip the `wait -n` below.
 gunicorn config.wsgi:application --bind "0.0.0.0:$PORT" --workers 1 --threads 4 --worker-class gthread --timeout 60 --max-requests 500 --max-requests-jitter 50 &
+
+# -l WARNING (not INFO): the per-heartbeat/gossip/mingle chatter at INFO was
+# the dominant line count in Render's log tab and, on Upstash, a real chunk
+# of the monthly command budget was just this being *logged*, not the
+# commands themselves. --without-gossip/--without-mingle/--without-heartbeat
+# turn off worker-to-worker cluster coordination Celery ships needing for a
+# multi-worker fleet — this is --concurrency=1, a single solo worker with
+# nothing to coordinate with, so all three are pure BRPOP/PUBLISH overhead
+# with no purpose here (Phase 75.8).
+celery -A config beat -l WARNING &
+celery -A config worker --concurrency=1 -l WARNING --without-gossip --without-mingle --without-heartbeat &
 
 wait -n
 exit $?

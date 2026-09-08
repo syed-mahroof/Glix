@@ -242,7 +242,7 @@ export default function SettingsScreen() {
         <PressableScale
           style={[
             styles.logoutButton,
-            { backgroundColor: c.negativeDim, borderColor: 'rgba(255, 69, 58, 0.3)' },
+            { backgroundColor: c.negativeDim, borderColor: c.negativeBorder },
           ]}
           onPress={handleLogout}
           disabled={isLoggingOut}

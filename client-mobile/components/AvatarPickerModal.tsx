@@ -143,7 +143,7 @@ export default function AvatarPickerModal({
           </View>
 
           {tab === 'characters' && error ? (
-            <View style={[styles.errorBanner, { backgroundColor: c.negativeDim, borderColor: 'rgba(255, 69, 58, 0.3)' }]}>
+            <View style={[styles.errorBanner, { backgroundColor: c.negativeDim, borderColor: c.negativeBorder }]}>
               <Text style={[styles.errorText, { color: c.negative }]}>{error}</Text>
             </View>
           ) : null}

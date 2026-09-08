@@ -680,7 +680,7 @@ export default function ShowDetailScreen() {
         {displayShow?.overview ? <Text style={[styles.overview, { color: c.textSecondary }]}>{displayShow.overview}</Text> : null}
 
         {sectionError && (
-          <View style={[styles.errorBanner, { backgroundColor: c.negativeDim, borderColor: 'rgba(255, 69, 58, 0.3)' }]}>
+          <View style={[styles.errorBanner, { backgroundColor: c.negativeDim, borderColor: c.negativeBorder }]}>
             <Text style={[styles.errorBannerText, { color: c.negative }]}>{sectionError}</Text>
           </View>
         )}

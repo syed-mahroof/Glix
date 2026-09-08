@@ -74,7 +74,6 @@ export default function ConnectionsScreen() {
         <FlashList
           data={data ?? []}
           keyExtractor={(item) => String(item.id)}
-          estimatedItemSize={64}
           contentContainerStyle={styles.list}
           renderItem={({ item }) => (
             <UserRow

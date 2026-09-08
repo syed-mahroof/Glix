@@ -127,7 +127,7 @@ export default function SearchScreen() {
       </View>
 
       {error && (
-        <View style={[styles.errorBanner, { backgroundColor: c.negativeDim, borderColor: 'rgba(255, 69, 58, 0.3)' }]}>
+        <View style={[styles.errorBanner, { backgroundColor: c.negativeDim, borderColor: c.negativeBorder }]}>
           <Text style={[styles.errorText, { color: c.negative }]}>{error}</Text>
         </View>
       )}
@@ -148,7 +148,6 @@ export default function SearchScreen() {
         <FlashList
           data={results}
           keyExtractor={(item) => String(item.tmdb_id)}
-          estimatedItemSize={100}
           contentContainerStyle={styles.list}
           keyboardShouldPersistTaps="handled"
           renderItem={({ item }) => (

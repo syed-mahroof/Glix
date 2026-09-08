@@ -77,6 +77,7 @@ export interface ThemeColors {
 
   negative: string;
   negativeDim: string;
+  negativeBorder: string;
 
   /** Track color behind a ProgressRing / conic gauge. */
   trackRing: string;
@@ -118,6 +119,7 @@ const darkColors: ThemeColors = {
 
   negative: '#FF453A',
   negativeDim: 'rgba(255, 69, 58, 0.14)',
+  negativeBorder: 'rgba(255, 69, 58, 0.3)',
 
   trackRing: 'rgba(255, 255, 255, 0.08)',
   tabInactive: '#6B6B6E',
@@ -149,6 +151,7 @@ const lightColors: ThemeColors = {
 
   negative: '#D63A2E', // slightly deepened for legibility on light
   negativeDim: 'rgba(214, 58, 46, 0.12)',
+  negativeBorder: 'rgba(214, 58, 46, 0.3)',
 
   trackRing: 'rgba(17, 19, 8, 0.08)',
   tabInactive: '#8A8B82',

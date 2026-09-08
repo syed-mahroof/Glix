@@ -44,7 +44,7 @@ export default function LogoutConfirmModal({ visible, onConfirm, onCancel }: Log
         >
           <BlurView intensity={80} tint={theme.blurTint} style={StyleSheet.absoluteFill} />
 
-          <View style={[styles.iconContainer, { backgroundColor: c.negativeDim, borderColor: 'rgba(255, 69, 58, 0.3)' }]}>
+          <View style={[styles.iconContainer, { backgroundColor: c.negativeDim, borderColor: c.negativeBorder }]}>
             <LogOut color={c.negative} size={26} />
           </View>
 
