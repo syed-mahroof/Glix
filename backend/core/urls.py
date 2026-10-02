@@ -38,6 +38,8 @@ from core.views import (
     CatchupPreferenceView,
     ContinueWatchingView,
     DiscoverFilterView,
+    DiscoverProvidersView,
+    DiscoverReleasesView,
     HealthCheckView,
     DiscoverGenresView,
     EpisodeInteractionView,
@@ -106,6 +108,8 @@ urlpatterns = [
     # Search / TMDB proxy
     path("discover/feed/", DiscoverFeedView.as_view(), name="discover-feed"),
     path("discover/filter/", DiscoverFilterView.as_view(), name="discover-filter"),
+    path("discover/providers/", DiscoverProvidersView.as_view(), name="discover-providers"),
+    path("discover/releases/", DiscoverReleasesView.as_view(), name="discover-releases"),
     path("discover/genres/", DiscoverGenresView.as_view(), name="discover-genres"),
     path("search/shows/", ShowSearchView.as_view(), name="search-shows"),
     path("search/universal/", UniversalSearchView.as_view(), name="search-universal"),

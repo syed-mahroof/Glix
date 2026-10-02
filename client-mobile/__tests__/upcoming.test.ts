@@ -7,7 +7,7 @@
 // just here it could pick the WRONG episode as "next" rather than just
 // mislabeling the right one.
 
-import { pickNextEpisode } from '../lib/upcoming';
+import { buildUpcomingItems, pickNextEpisode } from '../lib/upcoming';
 import type { Episode, Show, WatchlistEntry } from '../store/watchStore';
 
 function makeEpisode(overrides: Partial<Episode>): Episode {
@@ -111,5 +111,37 @@ describe('pickNextEpisode', () => {
 
   it('returns null for a show with no episodes at all', () => {
     expect(pickNextEpisode(makeEntry([]))).toBeNull();
+  });
+});
+
+describe('upcoming consistency', () => {
+  const now = new Date(2026, 9, 3, 12);
+  const summary: Partial<Show> = {
+    next_episode_air_date: '2026-10-03', next_episode_season_number: 1, next_episode_number: 1,
+  };
+
+  it('never resurrects a watched episode through a stale next-episode summary', () => {
+    const entry = makeEntry([makeEpisode({ air_date: '2026-10-03', is_watched: true })], summary);
+    expect(buildUpcomingItems([entry], now)).toEqual([]);
+  });
+
+  it('keeps uncached premieres while excluding archived and duplicate shows', () => {
+    const entry = makeEntry([], summary);
+    expect(buildUpcomingItems([entry, entry], now)).toHaveLength(1);
+    expect(buildUpcomingItems([{ ...entry, status: 'ARCHIVED' }], now)).toEqual([]);
+  });
+
+  it('uses the resolved instant for recent releases rather than an obsolete raw date', () => {
+    const entry = makeEntry([makeEpisode({ air_date: '2020-01-01', air_datetime: '2026-10-04T12:00:00Z' })]);
+    expect(buildUpcomingItems([entry], now)[0].episodeId).toBe(1);
+  });
+
+  it('keeps only the earliest recently missed episode per show, excluding old backlog', () => {
+    const entry = makeEntry([
+      makeEpisode({ tmdb_id: 1, air_date: '2020-01-01' }),
+      makeEpisode({ tmdb_id: 2, episode_number: 2, air_date: '2026-10-01' }),
+      makeEpisode({ tmdb_id: 3, episode_number: 3, air_date: '2026-10-02' }),
+    ]);
+    expect(buildUpcomingItems([entry], now).map((item) => item.episodeId)).toEqual([2]);
   });
 });

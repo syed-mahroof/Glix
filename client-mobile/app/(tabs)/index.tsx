@@ -43,6 +43,7 @@ import {
   todayLocalIso,
 } from '../../lib/dateFormat';
 import { clearFlashListLayoutCacheOnChange } from '../../lib/flashListLayout';
+import { useScreenActive } from '../../lib/useScreenActive';
 import { useAppTheme } from '../../lib/theme';
 import {
   buildUpcomingItems,
@@ -52,7 +53,7 @@ import {
   UpcomingListEntry,
 } from '../../lib/upcoming';
 import { useCatchupCascade } from '../../lib/useCatchupCascade';
-import { Episode, useWatchStore, WatchlistBuckets, WatchlistEntry } from '../../store/watchStore';
+import { Episode, isShowFullyCovered, useWatchStore, WatchlistBuckets, WatchlistEntry } from '../../store/watchStore';
 import { useLayoutFor, usePreferencesStore } from '../../store/preferencesStore';
 
 const POSTER_BASE_URL = 'https://image.tmdb.org/t/p/w185';
@@ -164,7 +165,7 @@ function buildRows(entries: WatchlistEntry[], filter: FilterKey): ShowEpisodeRow
     let category: FilterKey;
     if (watched_episode_count === 0) {
       category = 'NOT_STARTED';
-    } else if (aired_episode_count > 0 && watched_episode_count >= aired_episode_count) {
+    } else if (aired_episode_count > 0 && watched_episode_count >= aired_episode_count && isShowFullyCovered(entry)) {
       continue; // Up to date shows are omitted from the main "to watch" queue
     } else {
       let isFreshDrop = false;
@@ -198,7 +199,7 @@ function buildRows(entries: WatchlistEntry[], filter: FilterKey): ShowEpisodeRow
     // Hub). Push a fallback row instead; ZombieRow/its grid equivalent
     // route into the show detail screen, which re-triggers a real fetch.
     rows.push({
-      id: episode ? `${entry.show.tmdb_id}-${episode.tmdb_id}` : `zombie-${entry.show.tmdb_id}`,
+      id: `show-${entry.show.tmdb_id}`,
       showId: entry.show.tmdb_id,
       showTitle: entry.show.title,
       posterPath: entry.show.poster_path,
@@ -557,7 +558,8 @@ export default function ShowsScreen() {
   // operation in the app before dateFormat.ts's Intl.DateTimeFormat caching,
   // and even post-cache still allocates Dates per item. Skipping the whole
   // pass whenever nothing on screen actually consumes it is strictly free.
-  const isUpcomingListTicking = activeTab === 'upcoming' && upcomingView === 'list';
+  const screenActive = useScreenActive();
+  const isUpcomingListTicking = screenActive && activeTab === 'upcoming' && upcomingView === 'list';
   let soonestFutureMs = Infinity;
   if (isUpcomingListTicking) {
     for (const item of upcomingItems) {
@@ -590,10 +592,25 @@ export default function ShowsScreen() {
   // the modal's own state does, not on every ShowsScreen render.
   const catchup = useCatchupCascade(bulkToggleWatchState);
 
+  const lastRefresh = useRef(0);
   useEffect(() => {
-    fetchWatchlist();
-    fetchHistory();
-  }, [fetchWatchlist, fetchHistory]);
+    if (!screenActive || Date.now() - lastRefresh.current < 60_000) return;
+    lastRefresh.current = Date.now();
+    void Promise.all([fetchWatchlist(), fetchHistory()]);
+  }, [screenActive, fetchWatchlist, fetchHistory]);
+
+  useEffect(() => {
+    if (!screenActive) return;
+    let nextRelease = Infinity;
+    const currentTime = Date.now();
+    for (const item of upcomingItems) {
+      const instant = resolveAirInstant(item.airDate, item.airDateTime, item.airsTime, item.airsTimezone).getTime();
+      if (instant > currentTime) nextRelease = Math.min(nextRelease, instant);
+    }
+    if (!Number.isFinite(nextRelease)) return;
+    const timeout = setTimeout(() => { void fetchWatchlist(); }, Math.min(2_147_483_647, nextRelease - currentTime + 1000));
+    return () => clearTimeout(timeout);
+  }, [screenActive, upcomingItems, fetchWatchlist]);
 
   const handleRefresh = useCallback(async () => {
     setIsRefreshing(true);
@@ -612,15 +629,30 @@ export default function ShowsScreen() {
       }),
     [allEntries, hubKind]
   );
-  const rows = useMemo(() => buildRows(hubFilteredEntries, filter), [hubFilteredEntries, filter]);
+  const queueOrder = useRef<{ scope: string; ids: number[] }>({ scope: '', ids: [] });
+  const rows = useMemo(() => {
+    const next = buildRows(hubFilteredEntries, filter);
+    const scope = `${hubKind}-${filter}`;
+    if (queueOrder.current.scope !== scope) queueOrder.current = { scope, ids: [] };
+    const byShow = new Map(next.map((row) => [row.showId, row]));
+    const ordered: ShowEpisodeRow[] = [];
+    for (const id of queueOrder.current.ids) {
+      const row = byShow.get(id);
+      if (row) { ordered.push(row); byShow.delete(id); }
+    }
+    for (const row of byShow.values()) ordered.push(row);
+    queueOrder.current.ids = ordered.map((row) => row.showId);
+    return ordered;
+  }, [hubFilteredEntries, filter, hubKind]);
 
   // Day-wise grouping (user-requested): TODAY/TOMORROW/weekday/exact-date
   // headers, so an episode of one show and an episode of another show
   // releasing on the same day land under one shared header instead of an
   // undifferentiated flat list. See lib/upcoming.ts's groupUpcomingItemsByDate.
+  const currentDay = todayLocalIso(now);
   const upcomingEntries = useMemo(
-    () => groupUpcomingItemsByDate(upcomingItems, now),
-    [upcomingItems, now]
+    () => groupUpcomingItemsByDate(upcomingItems, new Date(`${currentDay}T12:00:00`)),
+    [upcomingItems, currentDay]
   );
 
   // A collapsible header itself always renders (it's the toggle affordance);
@@ -680,24 +712,15 @@ export default function ShowsScreen() {
         return;
       }
 
-      // Watching: check for chronologically-prior unwatched episodes. This
-      // is now an async backend round-trip (CatchupCheckView) — fired here
-      // without awaiting since ShowRow's own tap animation already plays
-      // optimistically and independently, then calls onAnimationComplete
-      // (handleRowAnimationComplete, below) ~420ms later, which flushes the
-      // actual toggle. That toggle is safe to fire either way: if this
-      // check ends up showing the modal, the modal's own finalize call
-      // marks this episode watched too (idempotent — already-watched
-      // episodes are skipped by the bulk endpoint), so there's no
-      // double-toggle risk regardless of which resolves first.
+      // Catch-up runs independently; every modal outcome is idempotent.
       const label = `S${pad(episode.season_number)}E${pad(episode.episode_number)}`;
       catchup.checkEpisode(entry.show.tmdb_id, episodeId, entry.show.title, label);
+      void toggleWatchState(episodeId);
     },
     [catchup, toggleWatchState]
   );
 
-  /** Grid card checkmark — called by ShowPosterCard after its own ~420ms
-   *  confirm animation, same as ShowRow's onAnimationComplete for the list.
+  /** Grid checkmark callback; list rows advance immediately in place.
    *
    *  Bug fix (2026-08-07, grid mark-watched lag): this used to `await
    *  catchup.checkEpisode(...)` before committing — a real POST to a
@@ -745,16 +768,6 @@ export default function ShowsScreen() {
     [handleGridCheckPress]
   );
 
-  /** Fired by ShowRow AFTER its collapse animation finishes.
-   *  This is the moment we flush the Zustand optimistic update so that
-   *  the row is truly gone before the list re-renders with the next episode. */
-  const handleRowAnimationComplete = useCallback(
-    (episodeId: number) => {
-      toggleWatchState(episodeId);
-    },
-    [toggleWatchState]
-  );
-
   const renderRow = useCallback(
     ({ item }: { item: ShowEpisodeRow }): React.ReactElement => {
       if (!item.episode) {
@@ -780,11 +793,10 @@ export default function ShowsScreen() {
           // definition above) specifically so it can be passed straight
           // through like this.
           onCheckPress={handleCheckPress}
-          onAnimationComplete={handleRowAnimationComplete}
         />
       );
     },
-    [handleCheckPress, handleRowAnimationComplete]
+    [handleCheckPress]
   );
 
   const renderGridRow = useCallback(
@@ -1026,6 +1038,7 @@ export default function ShowsScreen() {
               // tells it which cells need to re-render. No key needed.
               ref={watchlistListRef}
               data={rows}
+              maintainVisibleContentPosition={{ disabled: true }}
               keyExtractor={(item) => item.id}
               renderItem={layout === 'grid' ? renderGridRow : renderRow}
               getItemType={() => layout}

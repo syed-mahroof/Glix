@@ -13,6 +13,7 @@ from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db import IntegrityError
 from rest_framework import serializers
 
+
 from core.dates import aired_cutoff_date
 from core.models import (
     CachedEpisode,
@@ -32,6 +33,18 @@ from core.models import (
 
 User = get_user_model()
 _username_validator = UnicodeUsernameValidator()
+
+
+class DiscoverAvailabilitySerializer(serializers.Serializer):
+    region = serializers.RegexField(r"^[A-Z]{2}$", default="IN")
+    providers = serializers.RegexField(r"^\d+(,\d+)*$", required=False, allow_blank=True, max_length=64)
+    monetization = serializers.ChoiceField(choices=("flatrate|free|ads", "flatrate", "free|ads", "rent|buy", "flatrate|free|ads|rent|buy"), default="flatrate|free|ads")
+
+    def validate_providers(self, value):
+        ids = tuple(sorted({int(part) for part in value.split(",")})) if value else ()
+        if len(ids) > 8 or any(provider_id < 1 or provider_id > 999999 for provider_id in ids):
+            raise serializers.ValidationError("Choose up to eight valid streaming platforms.")
+        return ids
 
 
 class UserProfileSerializer(serializers.ModelSerializer):

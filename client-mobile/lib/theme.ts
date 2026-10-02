@@ -47,6 +47,8 @@ export interface ThemeColors {
    *  need stronger legibility than the standard card fill — same neutral,
    *  paired with a BlurView layer underneath, not a new hue. */
   glassFillStrong: string;
+  /** Readable translucent controls over cinematic backdrop imagery. */
+  heroGlassFill: string;
   /** Two-stop gradient for the premium glass recipe. */
   glassGradTop: string;
   glassGradBot: string;
@@ -102,6 +104,7 @@ const darkColors: ThemeColors = {
   bgElevated: '#0A0A0A',
   glassFill: 'rgba(30, 30, 30, 0.65)',
   glassFillStrong: 'rgba(24, 24, 24, 0.88)',
+  heroGlassFill: 'rgba(18, 18, 18, 0.64)',
   glassGradTop: 'rgba(52, 52, 52, 0.72)',
   glassGradBot: 'rgba(22, 22, 22, 0.66)',
   hairline: 'rgba(255, 255, 255, 0.12)',
@@ -114,8 +117,8 @@ const darkColors: ThemeColors = {
   onAccentTrack: 'rgba(0, 0, 0, 0.22)',
 
   textPrimary: '#FFFFFF',
-  textSecondary: 'rgba(255, 255, 255, 0.60)',
-  textTertiary: 'rgba(255, 255, 255, 0.40)',
+  textSecondary: 'rgba(255, 255, 255, 0.75)',
+  textTertiary: 'rgba(255, 255, 255, 0.62)',
 
   negative: '#FF453A',
   negativeDim: 'rgba(255, 69, 58, 0.14)',
@@ -134,6 +137,7 @@ const lightColors: ThemeColors = {
   bgElevated: '#FBFBF8',
   glassFill: 'rgba(251, 251, 248, 0.88)',
   glassFillStrong: 'rgba(251, 251, 248, 0.96)',
+  heroGlassFill: 'rgba(251, 251, 248, 0.70)',
   glassGradTop: 'rgba(255, 255, 255, 0.94)',
   glassGradBot: 'rgba(248, 248, 244, 0.86)',
   hairline: 'rgba(17, 19, 8, 0.10)',
@@ -146,8 +150,8 @@ const lightColors: ThemeColors = {
   onAccentTrack: 'rgba(20, 23, 10, 0.22)',
 
   textPrimary: '#111308', // inky near-black (warm/olive bias) preserves OLED "richness"
-  textSecondary: 'rgba(17, 19, 8, 0.58)',
-  textTertiary: 'rgba(17, 19, 8, 0.40)',
+  textSecondary: 'rgba(17, 19, 8, 0.72)',
+  textTertiary: 'rgba(17, 19, 8, 0.62)',
 
   negative: '#D63A2E', // slightly deepened for legibility on light
   negativeDim: 'rgba(214, 58, 46, 0.12)',

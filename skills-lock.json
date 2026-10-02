@@ -1,0 +1,65 @@
+{
+  "version": 1,
+  "skills": {
+    "apple-design": {
+      "source": "emilkowalski/skills",
+      "sourceType": "github",
+      "skillPath": "skills/apple-design/SKILL.md",
+      "computedHash": "0d19303902efa64eace10e6b183eb29ef3220d424c1a7fd1eafc52adde216932"
+    },
+    "careful": {
+      "source": "garrytan/gstack",
+      "sourceType": "github",
+      "skillPath": "careful/SKILL.md",
+      "computedHash": "82af331e42170388d88a1597d22fc99aa4b5e8d65f85a81d91f39ffa3772a02d"
+    },
+    "design-taste-frontend": {
+      "source": "leonxlnx/taste-skill",
+      "sourceType": "github",
+      "skillPath": "skills/taste-skill/SKILL.md",
+      "computedHash": "899b84384f74f540ea5284d9b2e9234e050998b42eacc805410b518d4226c0b3"
+    },
+    "mobile-design-ulugbek": {
+      "source": "ulugbekeshnazarov409/mobile-design",
+      "sourceType": "github",
+      "skillPath": "SKILL.md",
+      "computedHash": "e2a7c0e16b4fe905a8d3984c341f48a3d8d64b64812a6318ba981d0e1ff3f383"
+    },
+    "mobile-design-rubenglez": {
+      "source": "RubenGlez/mobile-design",
+      "sourceType": "github",
+      "skillPath": "SKILL.md",
+      "computedHash": "4543ec111960fd625c15eb68e63d25a599fb433fc58367ac9cd45fae50968fb5"
+    },
+    "mobile-app-ux-auditor": {
+      "source": "AjnasNB/mobile-app-ux-auditor-skill",
+      "sourceType": "github",
+      "skillPath": "SKILL.md",
+      "computedHash": "1f930a43d2556a9981e869a7e7069706488f4fc43984e29d9c3c6485f5bf01ce"
+    },
+    "mobile-design-director": {
+      "source": "kafka000/mobile-design-director",
+      "sourceType": "github",
+      "skillPath": "SKILL.md",
+      "computedHash": "005f477a4af2fc290f714ce1c45aac59bb8bf6e7e59ff76631229648596e0eb4"
+    },
+    "freeze": {
+      "source": "garrytan/gstack",
+      "sourceType": "github",
+      "skillPath": "freeze/SKILL.md",
+      "computedHash": "d175f54fb5bf4f7448a68f9f6ded96f0062a3b0f5467b84715ee91cedf091a11"
+    },
+    "guard": {
+      "source": "garrytan/gstack",
+      "sourceType": "github",
+      "skillPath": "guard/SKILL.md",
+      "computedHash": "4ac4ed3ec6ce7ba3cee7c8db3f3383ca2fc5ca7c824e7d0fef2d912b35fb2996"
+    },
+    "unfreeze": {
+      "source": "garrytan/gstack",
+      "sourceType": "github",
+      "skillPath": "unfreeze/SKILL.md",
+      "computedHash": "39397f470b5d2a5f25230fdfa9d196236aa15bbf941378338a8095985928745a"
+    }
+  }
+}

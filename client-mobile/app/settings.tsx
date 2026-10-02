@@ -6,7 +6,7 @@
 import axios from 'axios';
 import { useRouter } from 'expo-router';
 import { ArrowLeft, ChevronRight, LayoutGrid, LogOut, Monitor, Moon, Sun } from 'lucide-react-native';
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Alert, ScrollView, StyleSheet, Switch, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
@@ -29,9 +29,11 @@ function SwitchRow({
   label,
   value,
   onValueChange,
+  disabled = false,
 }: {
   label: string;
   value: boolean;
+  disabled?: boolean;
   onValueChange: (next: boolean) => void;
 }) {
   const { theme } = useAppTheme();
@@ -41,6 +43,8 @@ function SwitchRow({
       <Text style={[styles.rowLabel, { color: c.textPrimary }]}>{label}</Text>
       <Switch
         value={value}
+        disabled={disabled}
+        accessibilityLabel={label}
         onValueChange={onValueChange}
         trackColor={{ false: c.trackRing, true: c.accentDim }}
         thumbColor={value ? c.accentFill : c.tabInactive}
@@ -73,6 +77,11 @@ export default function SettingsScreen() {
   const setDefaultLayout = usePreferencesStore((state) => state.setDefaultLayout);
   const [notifyNewEpisode, setNotifyNewEpisode] = useState(true);
   const [notifyWeeklyDigest, setNotifyWeeklyDigest] = useState(false);
+  const notificationLoadController = useRef<AbortController | null>(null);
+  const [notificationsLoaded, setNotificationsLoaded] = useState(false);
+  const [notificationError, setNotificationError] = useState<string | null>(null);
+  const notificationSavePending = useRef(false);
+  const [isSavingNotifications, setIsSavingNotifications] = useState(false);
   const [isLoggingOut, setIsLoggingOut] = useState(false);
   const [editProfileVisible, setEditProfileVisible] = useState(false);
   const [avatarPickerVisible, setAvatarPickerVisible] = useState(false);
@@ -82,27 +91,46 @@ export default function SettingsScreen() {
   }, [profile?.username]);
   const [isLogoutModalVisible, setIsLogoutModalVisible] = useState(false);
 
-  useEffect(() => {
-    (async () => {
-      try {
-        const res = await api.get('/notifications/preferences/');
-        setNotifyNewEpisode(res.data.notify_new_episode);
-        setNotifyWeeklyDigest(res.data.notify_weekly_digest);
-      } catch (error) {
-        console.warn('Failed to fetch notification preferences', error);
-      }
-    })();
+  const loadNotificationPreferences = useCallback(async () => {
+    notificationLoadController.current?.abort();
+    const controller = new AbortController();
+    notificationLoadController.current = controller;
+    setNotificationsLoaded(false);
+    setNotificationError(null);
+    try {
+      const res = await api.get<{ notify_new_episode: boolean; notify_weekly_digest: boolean }>('/notifications/preferences/', { signal: controller.signal });
+      if (controller.signal.aborted) return;
+      setNotifyNewEpisode(res.data.notify_new_episode);
+      setNotifyWeeklyDigest(res.data.notify_weekly_digest);
+      setNotificationsLoaded(true);
+    } catch {
+      if (!controller.signal.aborted) setNotificationError('Could not load notification settings. Tap to retry.');
+    }
   }, []);
+  useEffect(() => {
+    void loadNotificationPreferences();
+    return () => notificationLoadController.current?.abort();
+  }, [loadNotificationPreferences]);
 
-  const handleToggleNewEpisode = async (next: boolean) => {
-    setNotifyNewEpisode(next);
-    await api.patch('/notifications/preferences/', { notify_new_episode: next }).catch(() => {});
+  const saveNotificationPreference = async (field: 'notify_new_episode' | 'notify_weekly_digest', next: boolean) => {
+    if (notificationSavePending.current) return;
+    notificationSavePending.current = true;
+    setIsSavingNotifications(true);
+    const setValue = field === 'notify_new_episode' ? setNotifyNewEpisode : setNotifyWeeklyDigest;
+    const previous = field === 'notify_new_episode' ? notifyNewEpisode : notifyWeeklyDigest;
+    setValue(next);
+    try {
+      await api.patch('/notifications/preferences/', { [field]: next });
+    } catch {
+      setValue(previous);
+      Alert.alert('Could not save preference', 'Your previous setting has been restored. Please try again.');
+    } finally {
+      notificationSavePending.current = false;
+      setIsSavingNotifications(false);
+    }
   };
-
-  const handleToggleWeeklyDigest = async (next: boolean) => {
-    setNotifyWeeklyDigest(next);
-    await api.patch('/notifications/preferences/', { notify_weekly_digest: next }).catch(() => {});
-  };
+  const handleToggleNewEpisode = (next: boolean) => saveNotificationPreference('notify_new_episode', next);
+  const handleToggleWeeklyDigest = (next: boolean) => saveNotificationPreference('notify_weekly_digest', next);
 
   const performLogout = async () => {
     setIsLogoutModalVisible(false);
@@ -161,17 +189,20 @@ export default function SettingsScreen() {
 
       <ScrollView contentContainerStyle={styles.content}>
         <Text style={[styles.sectionTitle, { color: c.textSecondary }]}>Notifications</Text>
+        {!notificationsLoaded && (notificationError ? <PressableScale accessibilityRole="button" onPress={() => void loadNotificationPreferences()} style={{ minHeight: 48, paddingHorizontal: 16, justifyContent: 'center' }}><Text style={{ color: c.negative }}>{notificationError}</Text></PressableScale> : <Text style={{ color: c.textSecondary, paddingHorizontal: 16, paddingBottom: 12 }}>Loading notification settings…</Text>)}
         <View style={[styles.card, { backgroundColor: c.glassFill, borderColor: c.hairline }]}>
           <SwitchRow
             label="New episode alerts"
             value={notifyNewEpisode}
             onValueChange={handleToggleNewEpisode}
+            disabled={isSavingNotifications || !notificationsLoaded}
           />
           <View style={[styles.divider, { backgroundColor: c.hairline }]} />
           <SwitchRow
             label="Weekly digest"
             value={notifyWeeklyDigest}
             onValueChange={handleToggleWeeklyDigest}
+            disabled={isSavingNotifications || !notificationsLoaded}
           />
         </View>
 

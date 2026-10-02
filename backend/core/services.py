@@ -643,28 +643,30 @@ class TMDBService:
         } for item in payload.get("results", [])]
         return {"results": results}
 
-    def get_popular_characters(self, limit: int = 40) -> dict[str, Any]:
-        """
-        TMDB has no standalone "character" entity or dedicated character
-        portrait — a character's only image is the credited actor's own
-        headshot (`profile_path` on a cast credit). There is no
-        `/character/popular` endpoint. This builds a "character" pool (used
-        by the Profile avatar picker's "Cast" tab) instead of a "random
-        celebrity" pool by pulling top-billed cast off currently trending TV
-        shows and popular movies and keeping each entry's `character` name
-        rather than the actor's real name — so the picker reads as "pick a
-        character from a show," the closest TMDB-backed approximation of
-        what was asked for. The underlying photo is unavoidably the actor's
-        real headshot; TMDB simply doesn't store anything else.
+    def get_popular_characters(self, limit: int = 40, collection: str = "trending") -> dict[str, Any]:
+        """Cast portraits from trending or highly rated titles, deduplicated by image.
+
+        TMDB provides actors' headshots rather than in-character portraits.
+        The client labels both the credited character and source title.
         """
         characters: list[dict] = []
         seen_profile_paths: set[str] = set()
 
-        tv = self.get_trending_shows(time_window="week", page=1)
-        movies = self.get_popular_movies(page=1)
-        titles = [{**t, "media_type": "tv"} for t in tv.get("results", [])[:8]] + [
-            {**m, "media_type": "movie"} for m in movies.get("results", [])[:8]
-        ]
+        if collection == "classics":
+            tv = self.discover_tv(sort_by="vote_average.desc", min_vote_count=1000)
+            movies = self.get_top_rated_movies(page=1)
+            title_limit = 6
+        else:
+            tv = self.get_trending_shows(time_window="week", page=1)
+            movies = self.get_popular_movies(page=1)
+            title_limit = 8
+        # Interleave film and series casts so neither collection dominates.
+        titles = []
+        for index in range(title_limit):
+            for source, media_type in ((tv, "tv"), (movies, "movie")):
+                results = source.get("results", [])
+                if index < len(results):
+                    titles.append({**results[index], "media_type": media_type})
 
         # Each title's credits call is independent of every other, but this
         # used to run up to 16 of them sequentially — a cold cache could
@@ -684,7 +686,7 @@ class TMDBService:
             except TMDBServiceError:
                 return None
 
-        with ThreadPoolExecutor(max_workers=8) as pool:
+        with ThreadPoolExecutor(max_workers=4) as pool:
             credits_by_title = list(pool.map(_fetch_credits, titles))
 
         for title, credits in zip(titles, credits_by_title):
@@ -699,6 +701,8 @@ class TMDBService:
                 seen_profile_paths.add(profile_path)
                 characters.append({
                     "character": character,
+                    "actor_name": member.get("name", ""),
+                    "media_type": title["media_type"],
                     "show_title": title.get("title", ""),
                     "profile_path": profile_path,
                 })
@@ -715,6 +719,10 @@ class TMDBService:
         min_vote_count: int = 100,
         original_language: Optional[str] = None,
         require_anime: bool = False,
+        provider_ids: tuple[int, ...] = (),
+        watch_region: Optional[str] = None,
+        monetization: str = "flatrate|free|ads",
+        recent_releases: bool = False,
     ) -> dict[str, Any]:
         """
         GET /discover/tv — genre + sort browsing for the Discover Hub's
@@ -743,6 +751,10 @@ class TMDBService:
         silently doing something the caller more likely meant.
         """
         params: dict[str, Any] = {"page": page, "sort_by": sort_by}
+        params.update(self._availability_params(provider_ids, watch_region, monetization))
+        if recent_releases:
+            today = timezone.now().date()
+            params.update({"air_date.gte": (today - timedelta(days=30)).isoformat(), "air_date.lte": today.isoformat()})
         genre_ids = [str(genre_id)] if genre_id else []
         if require_anime:
             genre_ids.append(str(ANIME_GENRE_ID))
@@ -759,7 +771,7 @@ class TMDBService:
 
         payload = self._request("/discover/tv", params=params, use_cache=True)
         if payload is None:
-            return {"page": page, "total_pages": 1, "total_results": 0, "results": []}
+            raise TMDBServiceError("Discovery is temporarily unavailable.")
 
         results = [
             {
@@ -789,10 +801,20 @@ class TMDBService:
         min_vote_count: int = 100,
         original_language: Optional[str] = None,
         require_anime: bool = False,
+        provider_ids: tuple[int, ...] = (),
+        watch_region: Optional[str] = None,
+        monetization: str = "flatrate|free|ads",
+        recent_releases: bool = False,
     ) -> dict[str, Any]:
         """GET /discover/movie — movie counterpart to discover_tv(). Same
         `min_vote_count`/`original_language`/`require_anime` reasoning."""
         params: dict[str, Any] = {"page": page, "sort_by": sort_by}
+        params.update(self._availability_params(provider_ids, watch_region, monetization))
+        if recent_releases:
+            today = timezone.now().date()
+            # Type 4 is digital. Regional release dates can differ from the
+            # original theatrical date and must use release_date, not year.
+            params.update({"region": watch_region, "with_release_type": "4", "release_date.gte": (today - timedelta(days=30)).isoformat(), "release_date.lte": today.isoformat()})
         genre_ids = [str(genre_id)] if genre_id else []
         if require_anime:
             genre_ids.append(str(ANIME_GENRE_ID))
@@ -806,7 +828,7 @@ class TMDBService:
 
         payload = self._request("/discover/movie", params=params, use_cache=True)
         if payload is None:
-            return {"page": page, "total_pages": 1, "total_results": 0, "results": []}
+            raise TMDBServiceError("Discovery is temporarily unavailable.")
 
         results = [
             {
@@ -826,6 +848,25 @@ class TMDBService:
             "total_pages": payload.get("total_pages", 1),
             "total_results": payload.get("total_results", len(results)),
             "results": results,
+        }
+
+    @staticmethod
+    def _availability_params(provider_ids: tuple[int, ...], watch_region: Optional[str], monetization: str) -> dict[str, Any]:
+        if not watch_region:
+            return {}
+        params: dict[str, Any] = {"watch_region": watch_region, "with_watch_monetization_types": monetization}
+        if provider_ids:
+            params["with_watch_providers"] = "|".join(str(provider_id) for provider_id in sorted(set(provider_ids)))
+        return params
+
+    def get_discover_providers(self, media_type: str, region: str) -> dict[str, Any]:
+        providers = self._request(f"/watch/providers/{media_type}", params={"watch_region": region}, use_cache=True, cache_ttl=TMDB_PROVIDERS_CACHE_TTL)
+        regions = self._request("/watch/providers/regions", use_cache=True, cache_ttl=7 * 24 * 3600)
+        if providers is None or regions is None:
+            raise TMDBServiceError("Streaming platforms are temporarily unavailable.")
+        return {
+            "providers": [{"provider_id": item["provider_id"], "provider_name": item["provider_name"], "logo_path": item.get("logo_path")} for item in providers.get("results", [])],
+            "regions": [{"code": item["iso_3166_1"], "name": item.get("english_name", item["iso_3166_1"])} for item in regions.get("results", [])],
         }
 
     def search_multi(self, query: str, page: int = 1) -> dict[str, Any]:
@@ -1081,16 +1122,27 @@ class TMDBService:
         if payload is None:
             raise TMDBServiceError(f"Watch providers for show {tmdb_show_id} unavailable.")
 
+        if cached_payload is None:
+            safe_cache_set(f"tmdb_show_providers_{tmdb_show_id}", payload, timeout=TMDB_PROVIDERS_CACHE_TTL)
+        return self._regional_providers(payload, region)
+
+    @staticmethod
+    def _regional_providers(payload: dict, region: str) -> list[dict[str, Any]]:
         region_data = payload.get("results", {}).get(region, {})
-        providers = region_data.get("flatrate", []) + region_data.get("ads", [])
-        return [
-            {
-                "provider_id": p.get("provider_id"),
-                "provider_name": p.get("provider_name"),
-                "logo_path": p.get("logo_path"),
-            }
-            for p in providers
-        ]
+        providers: dict[int, dict[str, Any]] = {}
+        for access in ("flatrate", "free", "ads", "rent", "buy"):
+            for provider in region_data.get(access, []):
+                provider_id = provider.get("provider_id")
+                if provider_id is None:
+                    continue
+                item = providers.setdefault(provider_id, {
+                    "provider_id": provider_id,
+                    "provider_name": provider.get("provider_name", ""),
+                    "logo_path": provider.get("logo_path"),
+                    "access_types": [],
+                })
+                item["access_types"].append(access)
+        return list(providers.values())
 
     # ------------------------------------------------------------------
     # Trailers (YouTube, via TMDB's videos endpoint)
@@ -1216,7 +1268,6 @@ class TMDBService:
             key=lambda m: m.get("order", 999),
         )[:25]
         crew_raw = cached_payload.get("crew", [])
-        director_jobs = {"Director"}
         crew_filtered = [m for m in crew_raw if m.get("job") in {"Director", "Producer", "Screenplay", "Story", "Writer"}][:15]
 
         cast = [
@@ -1250,16 +1301,7 @@ class TMDBService:
             cached_payload = payload
             safe_cache_set(f"tmdb_movie_providers_{tmdb_id}", payload, timeout=TMDB_PROVIDERS_CACHE_TTL)
 
-        region_data = cached_payload.get("results", {}).get(region, {})
-        providers = region_data.get("flatrate", []) + region_data.get("ads", [])
-        return [
-            {
-                "provider_id": p.get("provider_id"),
-                "provider_name": p.get("provider_name"),
-                "logo_path": p.get("logo_path"),
-            }
-            for p in providers
-        ]
+        return self._regional_providers(cached_payload, region)
 
     def get_movie_recommendations(self, tmdb_id: int, page: int = 1) -> dict[str, Any]:
         """Movie recommendations from TMDB, lightly cached."""

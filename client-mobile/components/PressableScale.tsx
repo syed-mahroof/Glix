@@ -46,7 +46,7 @@ function PressableScale({
 
   return (
     <AnimatedPressable
-      style={[animatedStyle, style as any]}
+      style={[animatedStyle, style]}
       onPressIn={(e) => {
         if (!isReduceMotionEnabled()) {
           scale.value = withSpring(scaleTo, { damping: 16, stiffness: 400 });
@@ -54,9 +54,7 @@ function PressableScale({
         onPressIn?.(e);
       }}
       onPressOut={(e) => {
-        if (!isReduceMotionEnabled()) {
-          scale.value = withSpring(1, { damping: 14, stiffness: 300 });
-        }
+        scale.value = isReduceMotionEnabled() ? 1 : withSpring(1, { damping: 14, stiffness: 300 });
         onPressOut?.(e);
       }}
       {...rest}

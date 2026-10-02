@@ -29,6 +29,9 @@ export function SegmentedControl<T extends string>({
         const isActive = selectedValue === segment.value;
         return (
           <PressableScale
+            accessibilityRole="tab"
+            accessibilityLabel={segment.label}
+            accessibilityState={{ selected: isActive }}
             key={segment.value}
             style={[styles.segment, isActive && { backgroundColor: c.accentFill }]}
             onPress={() => onValueChange(segment.value)}
@@ -52,6 +55,8 @@ const styles = StyleSheet.create({
   },
   segment: {
     flex: 1,
+    minHeight: 48,
+    justifyContent: 'center',
     paddingVertical: 8,
     borderRadius: 9,
     alignItems: 'center',

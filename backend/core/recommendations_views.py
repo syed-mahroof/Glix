@@ -219,7 +219,12 @@ class ForYouRecommendationsView(APIView):
         cache_key = recommendations_cache_key(user.id, media_type)
         cached = safe_cache_get(cache_key)
         if cached is not None:
-            return Response(cached)
+            # Retain expensive recommendation seeds, but immediately exclude
+            # titles added to the library since this snapshot was generated.
+            library = Watchlist if media_type == "tv" else MovieWatchlist
+            id_field = "show_id" if media_type == "tv" else "movie_id"
+            tracked = set(library.objects.filter(user=user).values_list(id_field, flat=True))
+            return Response([item for item in cached if item["tmdb_id"] not in tracked])
 
         tmdb = TMDBService()
         if media_type == "tv":

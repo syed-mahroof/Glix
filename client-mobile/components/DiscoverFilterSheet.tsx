@@ -1,416 +1,167 @@
-// client-mobile/components/DiscoverFilterSheet.tsx
-// Reanimated-based bottom sheet for Discover Hub filtering.
-// No external bottom-sheet library needed — pure Reanimated + GestureHandler.
-
-import { LinearGradient } from 'expo-linear-gradient';
-import { Award, Flame, Languages, Sparkles, Star, Trophy, X, type LucideIcon } from 'lucide-react-native';
-import React, { useEffect, useState } from 'react';
-import {
-  Dimensions,
-  Pressable,
-  ScrollView,
-  StyleSheet,
-  Text,
-  View,
-} from 'react-native';
-import Animated, {
-  Extrapolation,
-  interpolate,
-  runOnJS,
-  useAnimatedStyle,
-  useSharedValue,
-  withSpring,
-} from 'react-native-reanimated';
-import PressableScale from './PressableScale';
-import LanguageFilterModal, { LANGUAGE_NAMES, languageDisplayName } from './LanguageFilterModal';
-import {
-  ActiveSegment,
-  SortOrder,
-  useDiscoverStore,
-} from '../store/discoverStore';
-import { MOVIE_GENRES, TV_GENRES } from '../lib/genres';
-import { useAppTheme } from '../lib/theme';
+import { FlashList } from '@shopify/flash-list';
+import { Image } from 'expo-image';
+import { Check, ChevronRight, Globe, SlidersHorizontal, X } from 'lucide-react-native';
+import React, { useEffect, useMemo, useState } from 'react';
+import { Alert, KeyboardAvoidingView, Modal, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, useWindowDimensions, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { MOVIE_GENRES, TV_GENRES } from '../lib/genres';
+import { usePrefersReducedMotion } from '../lib/motion';
+import { useAppTheme } from '../lib/theme';
+import { type ActiveSegment, type DiscoverFilters, type Monetization, type SortOrder, useDiscoverStore } from '../store/discoverStore';
+import { LANGUAGE_NAMES, languageDisplayName } from './LanguageFilterModal';
+import PressableScale from './PressableScale';
 
-// Discover has no pre-loaded local list of "languages present in this data"
-// the way My Shows/My Movies derives from the user's own cached watchlist
-// (Phase H) — it browses live TMDB results instead. Reuses the exact same
-// curated code→name map so the picker UI is consistent either way.
-const DISCOVER_LANGUAGE_CODES = Object.keys(LANGUAGE_NAMES);
+const DEFAULT_FILTERS: DiscoverFilters = { selectedGenreId: null, sortOrder: 'trending', selectedLanguage: null, animeOnly: false, selectedProviderIds: [], monetization: 'flatrate|free|ads' };
+const SORTS: { key: SortOrder; label: string }[] = [
+  { key: 'trending', label: 'Trending' }, { key: 'popular', label: 'Popular' },
+  { key: 'top_rated', label: 'Top Rated' }, { key: 'critically_acclaimed', label: 'Critically Acclaimed' },
+];
+const ACCESS: { key: Monetization; label: string }[] = [
+  { key: 'flatrate|free|ads', label: 'Streaming' }, { key: 'flatrate', label: 'Subscription' },
+  { key: 'free|ads', label: 'Free / Ads' }, { key: 'rent|buy', label: 'Rent / Buy' },
+  { key: 'flatrate|free|ads|rent|buy', label: 'Any access' },
+];
 
-const { height: SCREEN_HEIGHT } = Dimensions.get('window');
-const SHEET_HEIGHT = SCREEN_HEIGHT * 0.72;
-
-// ─── Sub-components ────────────────────────────────────────────────────────────
-
-function SortPill({
-  label,
-  Icon,
-  active,
-  onPress,
-}: {
-  label: string;
-  Icon: LucideIcon;
-  active: boolean;
-  onPress: () => void;
-}) {
-  const { theme } = useAppTheme();
-  const c = theme.colors;
+function Pill({ label, selected, onPress }: { label: string; selected: boolean; onPress: () => void }) {
+  const { theme: { colors: c } } = useAppTheme();
   return (
-    <PressableScale
-      style={[
-        styles.pill,
-        { backgroundColor: c.glassFill, borderColor: c.hairline },
-        active && { backgroundColor: c.accentFill, borderColor: c.accentFill },
-      ]}
-      onPress={onPress}
-    >
-      <Icon color={active ? c.onAccent : c.textSecondary} size={14} strokeWidth={2.25} />
-      <Text style={[styles.pillText, { color: c.textSecondary }, active && { color: c.onAccent }]}>
-        {label}
-      </Text>
+    <PressableScale accessibilityRole="button" accessibilityState={{ selected }} onPress={onPress}
+      style={[styles.pill, { backgroundColor: selected ? c.accentFill : c.glassFill, borderColor: selected ? c.accentFill : c.hairline }]}>
+      <Text style={[styles.pillText, { color: selected ? c.onAccent : c.textPrimary }]}>{label}</Text>
     </PressableScale>
   );
 }
 
-function GenrePill({
-  name,
-  color,
-  active,
-  onPress,
-}: {
-  name: string;
-  color: string;
-  active: boolean;
-  onPress: () => void;
+interface PickerItem { key: string; label: string; logo?: string | null }
+function Picker({ visible, title, items, selected, onSelect, onClose }: {
+  visible: boolean; title: string; items: PickerItem[]; selected: string[];
+  onSelect: (key: string) => void; onClose: () => void;
 }) {
-  const { theme } = useAppTheme();
-  const c = theme.colors;
-  return (
-    <PressableScale
-      style={[
-        styles.genrePill,
-        { backgroundColor: c.glassFill, borderColor: c.hairline },
-        active && { borderColor: color, backgroundColor: `${color}22` },
-      ]}
-      onPress={onPress}
-    >
-      {active && (
-        <View style={[styles.genreDot, { backgroundColor: color }]} />
-      )}
-      <Text
-        style={[styles.genrePillText, { color: c.textSecondary }, active && { color: color }]}
-        numberOfLines={1}
-      >
-        {name}
-      </Text>
-    </PressableScale>
-  );
-}
-
-// ─── Main Component ────────────────────────────────────────────────────────────
-
-interface Props {
-  activeSegment: ActiveSegment;
-}
-
-export default function DiscoverFilterSheet({ activeSegment }: Props) {
-  // Scoped selectors, not a bare useDiscoverStore() — this sheet is
-  // mounted alongside the main Discover screen at all times (including
-  // while closed), so a bare destructure re-rendered it on every
-  // discoverStore mutation anywhere — every search keystroke, every feed
-  // fetch — not just its own filter fields. Same fix as discover.tsx.
-  const filterSheetVisible = useDiscoverStore((s) => s.filterSheetVisible);
-  const selectedGenreId = useDiscoverStore((s) => s.selectedGenreId);
-  const sortOrder = useDiscoverStore((s) => s.sortOrder);
-  const selectedLanguage = useDiscoverStore((s) => s.selectedLanguage);
-  const animeOnly = useDiscoverStore((s) => s.animeOnly);
-  const closeFilterSheet = useDiscoverStore((s) => s.closeFilterSheet);
-  const setSelectedGenreId = useDiscoverStore((s) => s.setSelectedGenreId);
-  const setSortOrder = useDiscoverStore((s) => s.setSortOrder);
-  const setSelectedLanguage = useDiscoverStore((s) => s.setSelectedLanguage);
-  const setAnimeOnly = useDiscoverStore((s) => s.setAnimeOnly);
-  const resetFilters = useDiscoverStore((s) => s.resetFilters);
-  const { theme } = useAppTheme();
-  const c = theme.colors;
+  const { theme: { colors: c } } = useAppTheme();
   const insets = useSafeAreaInsets();
-  const [isLanguageModalVisible, setIsLanguageModalVisible] = useState(false);
-
-  const translateY = useSharedValue(SHEET_HEIGHT);
-  const backdropOpacity = useSharedValue(0);
-
-  useEffect(() => {
-    if (filterSheetVisible) {
-      translateY.value = withSpring(0, { damping: 20, stiffness: 200 });
-      backdropOpacity.value = withSpring(1, { damping: 20 });
-    } else {
-      translateY.value = withSpring(SHEET_HEIGHT, { damping: 22, stiffness: 250 });
-      backdropOpacity.value = withSpring(0, { damping: 22 });
-    }
-  }, [filterSheetVisible]);
-
-  const sheetStyle = useAnimatedStyle(() => ({
-    transform: [{ translateY: translateY.value }],
-  }));
-
-  const backdropStyle = useAnimatedStyle(() => ({
-    opacity: backdropOpacity.value,
-    pointerEvents: backdropOpacity.value > 0 ? 'auto' : 'none',
-  }));
-
-  const genres = activeSegment === 'tv' ? TV_GENRES : MOVIE_GENRES;
-
-  // Real lucide icons, not emoji — matches the fix already made to the
-  // Shows/Movies segment toggle above this sheet ("read as amateurish next
-  // to the rest of the app's icon language"); this sheet had the same
-  // issue and was missed in that earlier pass.
-  const SORT_OPTIONS: { key: SortOrder; label: string; Icon: LucideIcon }[] = [
-    { key: 'trending', label: 'Trending', Icon: Flame },
-    { key: 'popular', label: 'Popular', Icon: Star },
-    { key: 'top_rated', label: 'Top Rated', Icon: Trophy },
-    // Reuses the exact same vote_count.gte anti-gaming pattern Top Rated
-    // already has (DiscoverFilterView), just with a stricter floor —
-    // genuine broad consensus, not a raw average a single vote could game.
-    { key: 'critically_acclaimed', label: 'Critically Acclaimed', Icon: Award },
-  ];
-
+  const [query, setQuery] = useState('');
+  const filtered = useMemo(() => items.filter((item) => item.label.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase())), [items, query]);
+  useEffect(() => { if (visible) setQuery(''); }, [visible]);
+  if (!visible) return null;
   return (
-    <View style={StyleSheet.absoluteFill} pointerEvents="box-none">
-      {/* Backdrop */}
-      <Animated.View style={[styles.backdrop, backdropStyle]}>
-        <Pressable style={StyleSheet.absoluteFill} onPress={closeFilterSheet} />
-      </Animated.View>
-
-      {/* Sheet */}
-      <Animated.View
-        style={[styles.sheet, { backgroundColor: c.glassFill, borderColor: c.hairline }, sheetStyle]}
-      >
-        {/* Handle */}
-        <View style={[styles.handle, { backgroundColor: c.hairline }]} />
-
-        {/* Header */}
-        <View style={[styles.sheetHeader, { borderBottomColor: c.hairline }]}>
-          <Text style={[styles.sheetTitle, { color: c.textPrimary }]}>Filter & Sort</Text>
-          <PressableScale
-            onPress={closeFilterSheet}
-            style={[styles.closeBtn, { backgroundColor: c.glassFill }]}
-            hitSlop={12}
-          >
-            <X color={c.textSecondary} size={20} strokeWidth={2} />
-          </PressableScale>
+    <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={[StyleSheet.absoluteFill, styles.scrim]}>
+      <Pressable accessibilityLabel="Dismiss picker" onPress={onClose} style={StyleSheet.absoluteFill} />
+        <View accessibilityViewIsModal style={[styles.picker, { backgroundColor: c.bgElevated, paddingBottom: Math.max(16, insets.bottom) }]}>
+          <View style={styles.header}>
+            <Text style={[styles.title, { color: c.textPrimary }]}>{title}</Text>
+            <PressableScale accessibilityLabel="Close picker" accessibilityRole="button" onPress={onClose} style={styles.close}><X color={c.textPrimary} size={22} /></PressableScale>
+          </View>
+          <TextInput accessibilityLabel={`Search ${title.toLowerCase()}`} placeholder="Search…" placeholderTextColor={c.textSecondary}
+            value={query} onChangeText={setQuery} autoCorrect={false} style={[styles.input, { color: c.textPrimary, backgroundColor: c.glassFill, borderColor: c.hairline }]} />
+          <FlashList data={filtered} keyExtractor={(item) => item.key} extraData={selected}
+            keyboardShouldPersistTaps="handled" renderItem={({ item }) => {
+              const checked = selected.includes(item.key);
+              return <PressableScale accessibilityRole="checkbox" accessibilityLabel={item.label} accessibilityState={{ checked }} onPress={() => onSelect(item.key)}
+                style={[styles.option, { borderBottomColor: c.hairline }]}>
+                {item.logo && <Image source={{ uri: `https://image.tmdb.org/t/p/w92${item.logo}` }} recyclingKey={item.key} style={styles.logo} contentFit="contain" />}
+                <Text style={[styles.optionText, { color: c.textPrimary }]}>{item.label}</Text>
+                {checked && <Check size={20} color={c.accentInk} />}
+              </PressableScale>;
+            }} ListEmptyComponent={<Text style={[styles.note, { color: c.textSecondary }]}>No matches. Try another name.</Text>} />
+          <Pill label="Done" selected onPress={onClose} />
         </View>
-
-        <ScrollView
-          style={styles.scroll}
-          showsVerticalScrollIndicator
-          persistentScrollbar
-          contentContainerStyle={[styles.scrollContent, { paddingBottom: 96 + insets.bottom }]}
-        >
-          {/* Sort By — every pill, including Trending, highlights exactly
-              when it's the current sort (Trending is also the default, so
-              it reads as selected on first open — accurate, since it is).
-              Tapping the already-active pill resets to 'trending'; tapping
-              a different one selects it. A prior pass suppressed Trending's
-              own highlight on the theory that it's a "neutral" state with
-              nothing to turn off, but that read as the pill being dead —
-              tapping it did work, it just never looked selected either way,
-              which is what "can't toggle Trending" actually meant. */}
-          <Text style={[styles.sectionLabel, { color: c.textSecondary }]}>Sort By</Text>
-          <View style={styles.pillRow}>
-            {SORT_OPTIONS.map((opt) => (
-              <SortPill
-                key={opt.key}
-                label={opt.label}
-                Icon={opt.Icon}
-                active={sortOrder === opt.key}
-                onPress={() => setSortOrder(sortOrder === opt.key ? 'trending' : opt.key)}
-              />
-            ))}
-          </View>
-
-          {/* Genres */}
-          <Text style={[styles.sectionLabel, { color: c.textSecondary, marginTop: 28 }]}>
-            Browse by Genre
-          </Text>
-          <View style={styles.genreGrid}>
-            {genres.map((genre) => (
-              <GenrePill
-                key={genre.id}
-                name={genre.name}
-                color={genre.color}
-                active={selectedGenreId === genre.id}
-                onPress={() =>
-                  setSelectedGenreId(
-                    selectedGenreId === genre.id ? null : genre.id
-                  )
-                }
-              />
-            ))}
-          </View>
-
-          {/* Language + Anime (Phase K) */}
-          <Text style={[styles.sectionLabel, { color: c.textSecondary, marginTop: 28 }]}>
-            Language
-          </Text>
-          <View style={styles.pillRow}>
-            <SortPill
-              label={selectedLanguage ? languageDisplayName(selectedLanguage) : 'Any Language'}
-              Icon={Languages}
-              active={selectedLanguage !== null}
-              onPress={() => setIsLanguageModalVisible(true)}
-            />
-            {/* Anime forces the language to Japanese server-side (see
-                DiscoverFilterView) — selecting it here mirrors that by
-                clearing any picked language, so the sheet never shows a
-                contradictory "Anime + Korean" state that wouldn't match
-                anything. */}
-            <SortPill
-              label="Anime"
-              Icon={Sparkles}
-              active={animeOnly}
-              onPress={() => setAnimeOnly(!animeOnly)}
-            />
-          </View>
-
-          {/* Reset */}
-          {(selectedGenreId || sortOrder !== 'trending' || selectedLanguage || animeOnly) && (
-            <PressableScale
-              style={[styles.resetBtn, { backgroundColor: c.glassFill, borderColor: c.hairline }]}
-              onPress={resetFilters}
-            >
-              <Text style={[styles.resetText, { color: c.textSecondary }]}>Reset Filters</Text>
-            </PressableScale>
-          )}
-        </ScrollView>
-      </Animated.View>
-
-      <LanguageFilterModal
-        visible={isLanguageModalVisible}
-        languages={DISCOVER_LANGUAGE_CODES}
-        selected={selectedLanguage}
-        onSelect={setSelectedLanguage}
-        onClose={() => setIsLanguageModalVisible(false)}
-      />
-    </View>
+    </KeyboardAvoidingView>
   );
 }
 
-// ─── Styles ───────────────────────────────────────────────────────────────────
+export default function DiscoverFilterSheet({ activeSegment }: { activeSegment: ActiveSegment }) {
+  const visible = useDiscoverStore((s) => s.filterSheetVisible);
+  const providers = useDiscoverStore((s) => s.providerOptions);
+  const regions = useDiscoverStore((s) => s.availableRegions);
+  const region = useDiscoverStore((s) => s.watchRegion);
+  const loading = useDiscoverStore((s) => s.isLoadingProviders);
+  const error = useDiscoverStore((s) => s.providersError);
+  const { closeFilterSheet, applyFilters, fetchProviders, setWatchRegion } = useDiscoverStore.getState();
+  const { theme: { colors: c } } = useAppTheme();
+  const reducedMotion = usePrefersReducedMotion();
+  const { height } = useWindowDimensions();
+  const insets = useSafeAreaInsets();
+  const [draft, setDraft] = useState<DiscoverFilters>(DEFAULT_FILTERS);
+  const [picker, setPicker] = useState<'platform' | 'region' | 'language' | null>(null);
+  useEffect(() => {
+    if (!visible) { setPicker(null); return; }
+    const state = useDiscoverStore.getState();
+    setDraft({ selectedGenreId: state.selectedGenreId, sortOrder: state.sortOrder, selectedLanguage: state.selectedLanguage, animeOnly: state.animeOnly, selectedProviderIds: state.selectedProviderIds, monetization: state.monetization });
+    void fetchProviders(activeSegment);
+  }, [visible, activeSegment, fetchProviders]);
+  const genres = activeSegment === 'tv' ? TV_GENRES : MOVIE_GENRES;
+  const platformItems = useMemo(() => providers.map((provider) => ({ key: String(provider.provider_id), label: provider.provider_name, logo: provider.logo_path })), [providers]);
+  const regionItems = useMemo(() => regions.map((item) => ({ key: item.code, label: item.name })), [regions]);
+  const selectedNames = providers.filter((provider) => draft.selectedProviderIds.includes(provider.provider_id)).map((provider) => provider.provider_name);
+  const update = (value: Partial<DiscoverFilters>) => setDraft((current) => {
+    const next = { ...current, ...value };
+    if ((next.selectedProviderIds.length || next.monetization !== 'flatrate|free|ads') && next.sortOrder === 'trending') next.sortOrder = 'popular';
+    return next;
+  });
+  const labelStyle = [styles.label, { color: c.textSecondary }];
+
+  return (
+    <Modal visible={visible} transparent animationType={reducedMotion ? 'none' : 'slide'} onRequestClose={() => picker ? setPicker(null) : closeFilterSheet()}>
+      <View style={styles.scrim}>
+        <Pressable accessibilityLabel="Dismiss filters" onPress={closeFilterSheet} style={StyleSheet.absoluteFill} />
+        <View accessibilityViewIsModal accessibilityElementsHidden={picker !== null} importantForAccessibility={picker ? 'no-hide-descendants' : 'auto'} style={[styles.sheet, { maxHeight: height - insets.top - 16, backgroundColor: c.bgElevated, paddingBottom: Math.max(12, insets.bottom) }]}>
+          <View style={[styles.handle, { backgroundColor: c.hairline }]} />
+          <View style={styles.header}>
+            <Text style={[styles.title, { color: c.textPrimary }]}>Find your next watch</Text>
+            <PressableScale accessibilityRole="button" accessibilityLabel="Close filters" onPress={closeFilterSheet} style={styles.close}><X color={c.textPrimary} size={22} /></PressableScale>
+          </View>
+          <ScrollView style={{ flexShrink: 1 }} contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled">
+            <Text style={labelStyle}>Where to watch</Text>
+            <PressableScale onPress={() => setPicker('region')} accessibilityRole="button" accessibilityLabel="Change streaming country" style={[styles.option, { backgroundColor: c.glassFill, borderBottomColor: c.hairline }]}>
+              <Globe color={c.textSecondary} size={20} /><Text style={[styles.optionText, { color: c.textPrimary }]}>{regions.find((item) => item.code === region)?.name ?? region}</Text><ChevronRight size={18} color={c.textSecondary} />
+            </PressableScale>
+            <PressableScale onPress={() => setPicker('platform')} disabled={loading || !!error} accessibilityRole="button" accessibilityLabel="Choose streaming platforms" accessibilityState={{ disabled: loading || !!error }} style={[styles.option, { borderBottomColor: c.hairline }]}>
+              <SlidersHorizontal color={c.textSecondary} size={20} /><Text style={[styles.optionText, { color: c.textPrimary }]}>{loading ? 'Loading platforms…' : selectedNames.join(', ') || 'All platforms'}</Text><ChevronRight size={18} color={c.textSecondary} />
+            </PressableScale>
+            {error && <PressableScale onPress={() => void fetchProviders(activeSegment)} accessibilityRole="button"><Text style={[styles.note, { color: c.negative }]}>{error} Tap to retry.</Text></PressableScale>}
+            <Text style={[styles.note, { color: c.textSecondary }]}>Choose up to 8 platforms. Matches any selected platform in this country. Availability by TMDB / JustWatch.</Text>
+            <View style={styles.pills}>{ACCESS.map((item) => <Pill key={item.key} label={item.label} selected={draft.monetization === item.key} onPress={() => update({ monetization: item.key })} />)}</View>
+            <Text style={labelStyle}>Sort by</Text>
+            <View style={styles.pills}>{SORTS.filter((item) => item.key !== 'trending' || (!draft.selectedProviderIds.length && draft.monetization === 'flatrate|free|ads')).map((item) => <Pill key={item.key} label={item.label} selected={draft.sortOrder === item.key || (item.key === 'popular' && draft.sortOrder === 'trending' && !!draft.selectedProviderIds.length)} onPress={() => update({ sortOrder: item.key })} />)}</View>
+            <Text style={labelStyle}>Genre</Text>
+            <View style={styles.pills}><Pill label="Any genre" selected={draft.selectedGenreId === null} onPress={() => update({ selectedGenreId: null })} />{genres.map((genre) => <Pill key={genre.id} label={genre.name} selected={draft.selectedGenreId === genre.id} onPress={() => update({ selectedGenreId: draft.selectedGenreId === genre.id ? null : genre.id })} />)}</View>
+            <Text style={labelStyle}>Language</Text>
+            <View style={styles.pills}><Pill label={draft.selectedLanguage ? languageDisplayName(draft.selectedLanguage) : 'Any language'} selected={draft.selectedLanguage !== null} onPress={() => setPicker('language')} /><Pill label="Anime" selected={draft.animeOnly} onPress={() => update({ animeOnly: !draft.animeOnly, selectedLanguage: null })} /></View>
+          </ScrollView>
+          <View style={[styles.footer, { borderTopColor: c.hairline }]}>
+            <PressableScale accessibilityRole="button" onPress={() => setDraft(DEFAULT_FILTERS)} style={styles.reset}><Text style={{ color: c.textSecondary, fontWeight: '600' }}>Reset</Text></PressableScale>
+            <PressableScale accessibilityRole="button" onPress={() => { applyFilters(draft); closeFilterSheet(); }} style={[styles.apply, { backgroundColor: c.accentFill }]}><Text style={{ color: c.onAccent, fontWeight: '700', fontSize: 16 }}>Show matches</Text></PressableScale>
+          </View>
+        </View>
+      </View>
+      <Picker visible={picker === 'platform'} title="Streaming platforms" items={platformItems} selected={draft.selectedProviderIds.map(String)} onClose={() => setPicker(null)} onSelect={(key) => {
+        const id = Number(key);
+        if (!draft.selectedProviderIds.includes(id) && draft.selectedProviderIds.length >= 8) { Alert.alert('Platform limit', 'Choose up to eight platforms. Remove one to add another.'); return; }
+        update({ selectedProviderIds: draft.selectedProviderIds.includes(id) ? draft.selectedProviderIds.filter((value) => value !== id) : draft.selectedProviderIds.length < 8 ? [...draft.selectedProviderIds, id] : draft.selectedProviderIds });
+      }} />
+      <Picker visible={picker === 'region'} title="Streaming country" items={regionItems} selected={[region]} onClose={() => setPicker(null)} onSelect={(key) => { setWatchRegion(key); update({ selectedProviderIds: [] }); setPicker(null); }} />
+      <Picker visible={picker === 'language'} title="Languages" items={[{ key: '*', label: 'Any language' }, ...Object.entries(LANGUAGE_NAMES).map(([key, label]) => ({ key, label }))]} selected={[draft.selectedLanguage ?? '*']} onClose={() => setPicker(null)} onSelect={(language) => { update({ selectedLanguage: language === '*' ? null : language, animeOnly: false }); setPicker(null); }} />
+    </Modal>
+  );
+}
 
 const styles = StyleSheet.create({
-  backdrop: {
-    ...StyleSheet.absoluteFillObject,
-    backgroundColor: 'rgba(0,0,0,0.6)',
-  },
-  sheet: {
-    position: 'absolute',
-    bottom: 0,
-    left: 0,
-    right: 0,
-    height: SHEET_HEIGHT,
-    borderTopLeftRadius: 24,
-    borderTopRightRadius: 24,
-    borderTopWidth: StyleSheet.hairlineWidth,
-  },
-  handle: {
-    width: 40,
-    height: 4,
-    borderRadius: 2,
-    alignSelf: 'center',
-    marginTop: 12,
-    marginBottom: 4,
-  },
-  sheetHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingHorizontal: 20,
-    paddingVertical: 16,
-    borderBottomWidth: StyleSheet.hairlineWidth,
-  },
-  sheetTitle: {
-    fontSize: 18,
-    fontWeight: '700',
-    letterSpacing: -0.3,
-  },
-  closeBtn: {
-    width: 32,
-    height: 32,
-    borderRadius: 16,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  // Without this, the ScrollView sizes itself to its content instead of
-  // the sheet's remaining space — once genres + language + anime + reset
-  // pushed content past SHEET_HEIGHT, the tail was clipped (Android's
-  // implicit overflow:hidden from the sheet's borderRadius) with no way to
-  // scroll to it, since the ScrollView's own viewport was never bounded
-  // (Phase 58).
-  scroll: {
-    flex: 1,
-  },
-  scrollContent: {
-    paddingHorizontal: 20,
-    paddingTop: 20,
-    paddingBottom: 48,
-  },
-  sectionLabel: {
-    fontSize: 12,
-    fontWeight: '700',
-    letterSpacing: 0.8,
-    textTransform: 'uppercase',
-    marginBottom: 12,
-  },
-  pillRow: {
-    flexDirection: 'row',
-    gap: 10,
-    flexWrap: 'wrap',
-  },
-  pill: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-    paddingHorizontal: 16,
-    paddingVertical: 9,
-    borderRadius: 20,
-    borderWidth: StyleSheet.hairlineWidth,
-  },
-  pillText: {
-    fontSize: 14,
-    fontWeight: '600',
-  },
-  genreGrid: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 10,
-  },
-  genrePill: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingHorizontal: 14,
-    paddingVertical: 8,
-    borderRadius: 20,
-    borderWidth: StyleSheet.hairlineWidth,
-    gap: 6,
-  },
-  genreDot: {
-    width: 8,
-    height: 8,
-    borderRadius: 4,
-  },
-  genrePillText: {
-    fontSize: 13,
-    fontWeight: '600',
-  },
-  resetBtn: {
-    marginTop: 28,
-    paddingVertical: 14,
-    borderRadius: 14,
-    borderWidth: StyleSheet.hairlineWidth,
-    alignItems: 'center',
-  },
-  resetText: {
-    fontSize: 14,
-    fontWeight: '600',
-  },
+  scrim: { flex: 1, justifyContent: 'flex-end', backgroundColor: 'rgba(0,0,0,0.6)' },
+  sheet: { borderTopLeftRadius: 24, borderTopRightRadius: 24, overflow: 'hidden' },
+  picker: { height: '85%', paddingHorizontal: 20, borderTopLeftRadius: 24, borderTopRightRadius: 24 },
+  handle: { alignSelf: 'center', width: 40, height: 4, borderRadius: 2, marginTop: 12 },
+  header: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 20, paddingVertical: 8 },
+  title: { flex: 1, fontSize: 20, fontWeight: '700' }, close: { width: 48, height: 48, alignItems: 'center', justifyContent: 'center' },
+  content: { paddingHorizontal: 20, paddingBottom: 24 },
+  label: { fontSize: 13, fontWeight: '700', marginTop: 24, marginBottom: 12 },
+  pills: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
+  pill: { minHeight: 48, paddingHorizontal: 16, paddingVertical: 12, borderRadius: 24, borderWidth: StyleSheet.hairlineWidth, justifyContent: 'center' },
+  pillText: { fontSize: 14, fontWeight: '600' },
+  option: { flexDirection: 'row', gap: 12, alignItems: 'center', minHeight: 56, paddingVertical: 12, paddingHorizontal: 12, borderBottomWidth: StyleSheet.hairlineWidth, borderRadius: 12 },
+  optionText: { flex: 1, fontSize: 15 }, logo: { width: 36, height: 36, borderRadius: 8 },
+  note: { fontSize: 13, lineHeight: 19, marginVertical: 12 },
+  input: { minHeight: 48, fontSize: 16, padding: 12, borderRadius: 12, borderWidth: StyleSheet.hairlineWidth, marginBottom: 12 },
+  footer: { flexDirection: 'row', gap: 16, paddingHorizontal: 20, paddingTop: 12, borderTopWidth: StyleSheet.hairlineWidth },
+  reset: { minHeight: 48, paddingHorizontal: 12, justifyContent: 'center' },
+  apply: { flex: 1, minHeight: 48, borderRadius: 16, alignItems: 'center', justifyContent: 'center', padding: 12 },
 });

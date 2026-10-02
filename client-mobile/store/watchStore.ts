@@ -34,6 +34,11 @@ const watchStorage = createDebouncedStorage();
 // the LATEST call is ever applied to state. An older response finishing
 // after a newer one already landed is discarded rather than clobbering it.
 let watchlistFetchSeq = 0;
+let historyFetchSeq = 0;
+let watchMutationVersion = 0;
+const pendingEpisodeIds = new Set<number>();
+let concurrentWatchMutations = false;
+let needsWatchReconciliation = false;
 import { extractErrorMessage } from '../lib/errors';
 import { Platform } from 'react-native';
 import { requestWidgetUpdate } from 'react-native-android-widget';
@@ -755,7 +760,7 @@ export function findEntryAndEpisode(
  *  purely because later seasons were never fetched, not because it's
  *  actually finished. seasons_cached (backend: WatchlistView / core.dates)
  *  is how many distinct seasons have any cached episode at all. */
-function isShowFullyCovered(entry: WatchlistEntry): boolean {
+export function isShowFullyCovered(entry: WatchlistEntry): boolean {
   return entry.show.total_seasons > 0 && entry.seasons_cached >= entry.show.total_seasons;
 }
 
@@ -775,6 +780,89 @@ export function isShowComplete(entry: WatchlistEntry): boolean {
     entry.watched_episode_count >= entry.aired_episode_count &&
     isShowFullyCovered(entry)
   );
+}
+
+export function reconcileWatchlistBuckets(buckets: WatchlistBuckets): WatchlistBuckets {
+  const results: Record<'to_watch' | 'up_to_date', WatchlistEntry[]> = { to_watch: [], up_to_date: [] };
+  const changed = { to_watch: false, up_to_date: false };
+  for (const key of ['to_watch', 'up_to_date'] as const) {
+    for (const entry of buckets[key].results) {
+      const caughtUp = entry.aired_episode_count > 0 && entry.watched_episode_count >= entry.aired_episode_count && isShowFullyCovered(entry);
+      const destination = caughtUp ? 'up_to_date' : 'to_watch';
+      const status = caughtUp ? 'UP_TO_DATE' : 'TO_WATCH';
+      const updated: WatchlistEntry = entry.status === status ? entry : { ...entry, status };
+      results[destination].push(updated);
+      if (destination !== key || updated !== entry) { changed[key] = true; changed[destination] = true; }
+    }
+  }
+  return {
+    ...buckets,
+    to_watch: changed.to_watch ? { ...buckets.to_watch, results: results.to_watch, count: results.to_watch.length } : buckets.to_watch,
+    up_to_date: changed.up_to_date ? { ...buckets.up_to_date, results: results.up_to_date, count: results.up_to_date.length } : buckets.up_to_date,
+  };
+}
+
+function rollbackEpisodes(state: WatchStoreState, previous: WatchlistBuckets, previousHistory: HistoryPage, ids: Set<number>, mutationTime: string) {
+  const originals = new Map<number, Episode>();
+  const originalRecency = new Map<number, string | null>();
+  for (const bucket of [previous.to_watch, previous.up_to_date, previous.archived]) for (const entry of bucket.results) {
+    for (const episode of entry.show.episodes) if (ids.has(episode.tmdb_id)) {
+      originals.set(episode.tmdb_id, episode);
+      originalRecency.set(entry.show.tmdb_id, entry.last_watched_at);
+    }
+  }
+  const currentHistory = state.history.results.filter((row) => !ids.has(row.episode.tmdb_id));
+  const restoredHistory = previousHistory.results.filter((row) => ids.has(row.episode.tmdb_id));
+  const history: HistoryEntry[] = [];
+  let currentIndex = 0;
+  let restoredIndex = 0;
+  // Both source pages already have descending timestamps; merge in O(n).
+  while (currentIndex < currentHistory.length || restoredIndex < restoredHistory.length) {
+    const current = currentHistory[currentIndex];
+    const restored = restoredHistory[restoredIndex];
+    if (!restored || (current && Date.parse(current.watched_at) >= Date.parse(restored.watched_at))) {
+      history.push(current); currentIndex += 1;
+    } else { history.push(restored); restoredIndex += 1; }
+  }
+  const latestWatchByShow = new Map<number, string>();
+  const historyEpisodeIds = new Set<number>();
+  for (const row of history) {
+    historyEpisodeIds.add(row.episode.tmdb_id);
+    if (!latestWatchByShow.has(row.show_id)) latestWatchByShow.set(row.show_id, row.watched_at);
+  }
+  for (const row of previousHistory.results) {
+    if (row.id.startsWith('optimistic-') && row.watched_at === originalRecency.get(row.show_id) && !historyEpisodeIds.has(row.episode.tmdb_id)) originalRecency.set(row.show_id, null);
+  }
+  let runtimeDelta = 0;
+  let watchedDelta = 0;
+  const watchlist = { ...state.watchlist };
+  for (const key of Object.keys(watchlist) as (keyof WatchlistBuckets)[]) {
+    const results = watchlist[key].results.map((entry) => {
+      if (!originalRecency.has(entry.show.tmdb_id)) return entry;
+      let delta = 0;
+      let changed = false;
+      const episodes = entry.show.episodes.map((episode) => {
+        const original = originals.get(episode.tmdb_id);
+        if (!original || original.is_watched === episode.is_watched) return episode;
+        changed = true;
+        const direction = original.is_watched ? 1 : -1;
+        delta += direction;
+        runtimeDelta += direction * episode.runtime_minutes;
+        return { ...episode, is_watched: original.is_watched };
+      });
+      if (!changed) return entry;
+      watchedDelta += delta;
+      const watchedCount = Math.max(0, entry.watched_episode_count + delta);
+      return { ...entry, last_watched_at: entry.last_watched_at === mutationTime ? latestWatchByShow.get(entry.show.tmdb_id) ?? originalRecency.get(entry.show.tmdb_id) ?? null : entry.last_watched_at, show: { ...entry.show, episodes }, watched_episode_count: watchedCount, progress_percentage: entry.aired_episode_count > 0 ? Math.min(100, Math.round(watchedCount / entry.aired_episode_count * 1000) / 10) : 0 };
+    });
+    watchlist[key] = { ...watchlist[key], results };
+  }
+  return {
+    watchlist: reconcileWatchlistBuckets(watchlist),
+    history: { ...state.history, count: Math.max(0, state.history.count + watchedDelta), results: history },
+    profile: state.profile ? { ...state.profile, total_time_watched: Math.max(0, state.profile.total_time_watched + runtimeDelta) } : null,
+    completedShow: null,
+  };
 }
 
 /** True only when the episode is both present in the cached watchlist AND
@@ -833,6 +921,7 @@ export const useWatchStore = create<WatchStoreState>()(
 
   fetchWatchlist: async () => {
     const seq = ++watchlistFetchSeq;
+    const mutationVersion = watchMutationVersion;
     set({ isLoadingWatchlist: true, error: null });
     try {
       // page_size=all: load every entry unpaginated. The whole app derives
@@ -844,7 +933,11 @@ export const useWatchStore = create<WatchStoreState>()(
       // did — see watchlistFetchSeq's own comment. isLoadingWatchlist is
       // left alone too: the newer call already owns that flag's lifecycle.
       if (seq !== watchlistFetchSeq) return;
-      set({ watchlist: response.data, isLoadingWatchlist: false });
+      if (mutationVersion !== watchMutationVersion || pendingEpisodeIds.size) {
+        set({ isLoadingWatchlist: false });
+        return;
+      }
+      set({ watchlist: reconcileWatchlistBuckets(response.data), isLoadingWatchlist: false });
       get().syncWidgetData();
     } catch (error) {
       if (seq !== watchlistFetchSeq) return;
@@ -853,9 +946,13 @@ export const useWatchStore = create<WatchStoreState>()(
   },
 
   fetchHistory: async (page = 1) => {
+    const seq = ++historyFetchSeq;
+    const mutationVersion = watchMutationVersion;
     set({ isLoadingHistory: true, error: null });
     try {
       const response = await api.get<HistoryPage>(`/watch-history/?page=${page}`);
+      if (seq !== historyFetchSeq) return;
+      if (mutationVersion !== watchMutationVersion || pendingEpisodeIds.size) { set({ isLoadingHistory: false }); return; }
       set((state) => ({
         history: page === 1 
           ? response.data 
@@ -866,6 +963,7 @@ export const useWatchStore = create<WatchStoreState>()(
         isLoadingHistory: false
       }));
     } catch (error) {
+      if (seq !== historyFetchSeq) return;
       set({ error: extractErrorMessage(error), isLoadingHistory: false });
     }
   },
@@ -962,6 +1060,7 @@ export const useWatchStore = create<WatchStoreState>()(
   },
 
   toggleWatchState: async (episodeId: number) => {
+    if (pendingEpisodeIds.has(episodeId)) return;
     const location = findEntryAndEpisode(get().watchlist, episodeId);
     if (!location) {
       set({ error: `Episode ${episodeId} not found in current watchlist state.` });
@@ -970,14 +1069,17 @@ export const useWatchStore = create<WatchStoreState>()(
 
     const { bucketKey, entryIndex, episodeIndex } = location;
     const previousWatchlist = get().watchlist;
-    const previousProfile = get().profile;
     const previousHistory = get().history;
     const entrySnapshot = previousWatchlist[bucketKey].results[entryIndex];
     const episode = entrySnapshot.show.episodes[episodeIndex];
     const optimisticWatched = !episode.is_watched;
     const runtimeDelta = optimisticWatched ? episode.runtime_minutes : -episode.runtime_minutes;
     const watchedAtIso = new Date().toISOString();
+    concurrentWatchMutations ||= pendingEpisodeIds.size > 0;
+    pendingEpisodeIds.add(episodeId);
+    watchMutationVersion += 1;
 
+    let completionCandidate: CompletedShowInfo | null = null;
     set((state) => {
       // Only the touched bucket gets a new array/object reference — the
       // other two used to be shallow-copied unconditionally on every
@@ -1030,7 +1132,7 @@ export const useWatchStore = create<WatchStoreState>()(
         watched_episode_count: entrySnapshot.watched_episode_count,
         aired_episode_count: entrySnapshot.aired_episode_count,
       });
-      const justCompletedShow =
+      completionCandidate =
         optimisticWatched && !wasComplete && isShowComplete(entry)
           ? { showId: entry.show.tmdb_id, title: entry.show.title, posterPath: entry.show.poster_path }
           : null;
@@ -1061,14 +1163,14 @@ export const useWatchStore = create<WatchStoreState>()(
           }
         : {
             ...state.history,
-            count: Math.max(0, state.history.count - (state.history.results.some((h) => h.episode.tmdb_id === episodeId) ? 1 : 0)),
+            count: Math.max(0, state.history.count - 1),
             results: state.history.results.filter((h) => h.episode.tmdb_id !== episodeId),
           };
 
       return {
-        watchlist: nextWatchlist,
+        watchlist: reconcileWatchlistBuckets(nextWatchlist),
+        analyticsDirtyAt: Math.max(Date.now(), state.analyticsDirtyAt + 1),
         history,
-        completedShow: justCompletedShow ?? state.completedShow,
         profile: state.profile
           ? {
               ...state.profile,
@@ -1082,9 +1184,15 @@ export const useWatchStore = create<WatchStoreState>()(
       const response = await api.post<ToggleResponse>('/watch-state/toggle/', {
         episode_id: episodeId,
       });
+      if (response.data.watched !== optimisticWatched) {
+        needsWatchReconciliation = true;
+        set((state) => rollbackEpisodes(state, previousWatchlist, previousHistory, new Set([episodeId]), watchedAtIso));
+      }
       set((state) => {
+        const current = findEntryAndEpisode(state.watchlist, episodeId);
+        const currentEntry = current ? state.watchlist[current.bucketKey].results[current.entryIndex] : null;
         let nextProfile = state.profile;
-        if (state.profile) {
+        if (state.profile && !concurrentWatchMutations) {
           nextProfile = {
             ...state.profile,
             total_time_watched: response.data.total_time_watched,
@@ -1095,23 +1203,29 @@ export const useWatchStore = create<WatchStoreState>()(
         }
         return {
           profile: nextProfile,
+          completedShow: response.data.watched && currentEntry && isShowComplete(currentEntry) ? completionCandidate ?? state.completedShow : state.completedShow,
           unlockedBadges: response.data.newly_earned_badges?.length
-            ? response.data.newly_earned_badges
+            ? [...new Set([...state.unlockedBadges, ...response.data.newly_earned_badges])]
             : state.unlockedBadges,
         };
       });
-      get().syncWidgetData();
     } catch (error) {
-      set({
-        watchlist: previousWatchlist,
-        profile: previousProfile,
-        history: previousHistory,
-        error: extractErrorMessage(error),
-        // Bug fix: completedShow is set inside the optimistic block above,
-        // BEFORE the server confirms — a failed request left the confetti's
-        // trigger armed for a toggle that never actually completed the show.
-        completedShow: null,
-      });
+      needsWatchReconciliation = true;
+      set((state) => ({ ...rollbackEpisodes(state, previousWatchlist, previousHistory, new Set([episodeId]), watchedAtIso), error: extractErrorMessage(error) }));
+    } finally {
+      pendingEpisodeIds.delete(episodeId);
+      watchMutationVersion += 1;
+      if (!pendingEpisodeIds.size && concurrentWatchMutations) {
+        concurrentWatchMutations = false;
+        void get().fetchProfile();
+      }
+      if (!pendingEpisodeIds.size) {
+        if (needsWatchReconciliation) {
+          needsWatchReconciliation = false;
+          void Promise.all([get().fetchWatchlist(), get().fetchHistory()]);
+        }
+        void get().syncWidgetData();
+      }
     }
   },
 
@@ -1185,7 +1299,7 @@ export const useWatchStore = create<WatchStoreState>()(
         movie_id: movieId,
       });
       set((state) => {
-        if (!state.profile) return {};
+        if (!state.profile || concurrentWatchMutations) return {};
         return {
           profile: {
             ...state.profile,
@@ -1195,7 +1309,7 @@ export const useWatchStore = create<WatchStoreState>()(
               : state.profile.earned_badges,
           },
           unlockedBadges: response.data.newly_earned_badges?.length
-            ? response.data.newly_earned_badges
+            ? [...new Set([...state.unlockedBadges, ...response.data.newly_earned_badges])]
             : state.unlockedBadges,
         };
       });
@@ -1490,7 +1604,6 @@ export const useWatchStore = create<WatchStoreState>()(
   bulkToggleWatchState: async (episodeIds: number[], watched: boolean) => {
     if (episodeIds.length === 0) return;
     const previousWatchlist = get().watchlist;
-    const previousProfile = get().profile;
     const previousHistory = get().history;
 
     // Bug fix (2026-08-07): /watch-state/toggle/ (single-episode) is a FLIP;
@@ -1521,18 +1634,23 @@ export const useWatchStore = create<WatchStoreState>()(
         }
       }
     }
-    const idsToSend = episodeIds.filter((id) => !alreadyMatching.has(id));
+    const idsToSend = [...new Set(episodeIds)].filter((id) => !alreadyMatching.has(id) && !pendingEpisodeIds.has(id));
+    if (!idsToSend.length) return;
+    concurrentWatchMutations ||= pendingEpisodeIds.size > 0;
+    idsToSend.forEach((id) => pendingEpisodeIds.add(id));
+    watchMutationVersion += 1;
 
+    const watchedAtIso = new Date().toISOString();
+    let bulkCompletedShow: CompletedShowInfo | null = null;
     // Optimistic update for all affected episodes
-    set((state) => {
+    set((state: WatchStoreState) => {
       const nextWatchlist: WatchlistBuckets = {
         to_watch: { ...state.watchlist.to_watch, results: [...state.watchlist.to_watch.results] },
         up_to_date: { ...state.watchlist.up_to_date, results: [...state.watchlist.up_to_date.results] },
         archived: { ...state.watchlist.archived, results: [...state.watchlist.archived.results] },
       };
-      const idSet = new Set(episodeIds);
+      const idSet = new Set(idsToSend);
       let totalRuntimeDelta = 0;
-      const watchedAtIso = new Date().toISOString();
       // Phase 56: mirror toggleWatchState's optimistic Watch History update
       // here too — Mark/Unmark Season Watched and the Catch-Up cascade both
       // go through this path, and hit the exact same desync bug.
@@ -1545,7 +1663,6 @@ export const useWatchStore = create<WatchStoreState>()(
       // more than one show — first genuine completion found wins, since
       // only one celebration can show at a time anyway (completedShow is a
       // single value, not a queue).
-      let bulkCompletedShow: CompletedShowInfo | null = null;
 
       for (const bucketKey of Object.keys(nextWatchlist) as (keyof WatchlistBuckets)[]) {
         nextWatchlist[bucketKey].results = nextWatchlist[bucketKey].results.map((entry) => {
@@ -1636,70 +1753,61 @@ export const useWatchStore = create<WatchStoreState>()(
           : state.history;
 
       return {
-        watchlist: nextWatchlist,
+        watchlist: reconcileWatchlistBuckets(nextWatchlist),
+        analyticsDirtyAt: Math.max(Date.now(), state.analyticsDirtyAt + 1),
         history,
-        completedShow: bulkCompletedShow ?? state.completedShow,
         profile: state.profile
           ? { ...state.profile, total_time_watched: Math.max(0, state.profile.total_time_watched + totalRuntimeDelta) }
           : state.profile,
       };
     });
 
-    if (idsToSend.length === 0) {
-      // Every requested id already matched the target state client-side
-      // (e.g. the tapped episode a catch-up cascade confirmed, already
-      // committed by toggleWatchState moments earlier) — nothing left to
-      // send. The optimistic update above already applied to all of
-      // episodeIds; just get it to the widget.
-      get().syncWidgetData();
-      return;
-    }
-
     try {
       const response = await api.post<BulkToggleResponse>('/watch-state/bulk-toggle/', {
         episode_ids: idsToSend,
         watched,
       });
-      set((state) => {
-        if (!state.profile) return {};
+      if (response.data.skipped_unaired_ids?.length) {
+        const skipped = new Set(response.data.skipped_unaired_ids);
+        set((state: WatchStoreState) => ({ ...rollbackEpisodes(state, previousWatchlist, previousHistory, skipped, watchedAtIso), error: `${skipped.size} episode(s) haven't aired yet and were not marked watched.` }));
+      }
+      set((state: WatchStoreState) => {
+        let confirmedCompletion: CompletedShowInfo | null = null;
+        if (bulkCompletedShow) for (const bucket of [state.watchlist.to_watch, state.watchlist.up_to_date, state.watchlist.archived]) {
+          const entry = bucket.results.find((item) => item.show.tmdb_id === bulkCompletedShow?.showId);
+          if (entry && isShowComplete(entry)) { confirmedCompletion = bulkCompletedShow; break; }
+        }
         return {
-          profile: {
+          completedShow: confirmedCompletion ?? state.completedShow,
+          profile: state.profile && !concurrentWatchMutations ? {
             ...state.profile,
             total_time_watched: response.data.total_time_watched,
             earned_badges: response.data.newly_earned_badges?.length
               ? [...state.profile.earned_badges, ...response.data.newly_earned_badges]
               : state.profile.earned_badges,
-          },
+          } : state.profile,
           unlockedBadges: response.data.newly_earned_badges?.length
-            ? response.data.newly_earned_badges
+            ? [...new Set([...state.unlockedBadges, ...response.data.newly_earned_badges])]
             : state.unlockedBadges,
         };
       });
-      // The optimistic update above marked every requested id watched —
-      // if the server actually skipped some (unaired), that's now wrong in
-      // the in-memory watchlist/history (episode is_watched, watched_episode_
-      // count, progress_percentage, last_watched_at all diverge). Rather
-      // than hand-reversing that per-episode transform, resync from the
-      // server, which is already authoritative for total_time_watched above.
-      if (response.data.skipped_unaired_ids?.length) {
-        set({
-          error: `${response.data.skipped_unaired_ids.length} episode(s) haven't aired yet and were not marked watched.`,
-        });
-        get().fetchWatchlist();
-        if (watched) get().fetchHistory();
-      }
-      get().syncWidgetData();
     } catch (error) {
-      set({
-        watchlist: previousWatchlist,
-        profile: previousProfile,
-        history: previousHistory,
-        error: extractErrorMessage(error),
-        // Bug fix: completedShow is set inside the optimistic block above,
-        // BEFORE the server confirms — a failed request left the confetti's
-        // trigger armed for a toggle that never actually completed the show.
-        completedShow: null,
-      });
+      needsWatchReconciliation = true;
+      set((state: WatchStoreState) => ({ ...rollbackEpisodes(state, previousWatchlist, previousHistory, new Set(idsToSend), watchedAtIso), error: extractErrorMessage(error) }));
+    } finally {
+      idsToSend.forEach((id) => pendingEpisodeIds.delete(id));
+      watchMutationVersion += 1;
+      if (!pendingEpisodeIds.size && concurrentWatchMutations) {
+        concurrentWatchMutations = false;
+        void get().fetchProfile();
+      }
+      if (!pendingEpisodeIds.size) {
+        if (needsWatchReconciliation) {
+          needsWatchReconciliation = false;
+          void Promise.all([get().fetchWatchlist(), get().fetchHistory()]);
+        }
+        void get().syncWidgetData();
+      }
     }
   },
 

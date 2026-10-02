@@ -54,7 +54,6 @@ const SLIDES: Slide[] = [
 // Quick-add is its own final page (not in SLIDES — it needs a picker
 // layout, not the icon/title/description template the others share).
 const TOTAL_PAGES = SLIDES.length + 1;
-const PICKER_PAGE_INDEX = SLIDES.length;
 
 interface PickerShow {
   tmdb_id: number;

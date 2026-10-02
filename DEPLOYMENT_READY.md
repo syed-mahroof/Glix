@@ -1,5 +1,15 @@
 # DEPLOYMENT_READY.md — Glix V2 Pre-Deployment Rapid Audit
 
+> **Document status (2026-09-24):** This is the original July deployment audit and remains useful as a checklist, but it is not the current product inventory. For current screens, features, architecture, and design rules read [CONTEXT.md](CONTEXT.md) and [DESIGN.md](DESIGN.md). The latest verification history is in [AUDIT.md](AUDIT.md) and [PROJECT_STATUS.md](PROJECT_STATUS.md).
+
+## Current Readiness Snapshot
+
+- Current app surface: 29 active route surfaces, plus two layouts and one retired Upcoming redirect route.
+- Current client state: six Zustand stores, not one global store.
+- Current verification recorded: backend pytest 241/241, client Jest 69/69, and `npm run typecheck` with zero errors.
+- Current production blocker: replace the `EXPO_PUBLIC_API_URL` placeholder in `client-mobile/eas.json` with the real deployed API URL before a production build.
+- Device-only verification remains necessary for native widgets, real push delivery, production OAuth, and full visual light/dark review.
+
 Date: 2026-07-19 (updated same day with 2 feature additions requested mid-audit — see §5)
 
 ## 1. Security & Config — PASS

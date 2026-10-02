@@ -1,3 +1,16 @@
+> **Current documentation (2026-09-24):** For the live route, feature, architecture, and model inventory, read [CONTEXT.md](CONTEXT.md). For the complete product and visual guide, read [DESIGN.md](DESIGN.md). This file remains the historical audit and verification log.
+
+## 2026-10-03 — Watch flow, discovery, and profile refinements
+
+- Watched cached episodes now suppress stale TMDB upcoming summaries. Computed watchlist statuses match their buckets; duplicate taps, stale fetches, and failed concurrent updates are reconciled. History totals update even when the affected episode is outside the loaded page. Queued release notifications exclude users who already watched every announced episode.
+- Watch Next advances in the same show row and retains queue order. Navigation uses a 200 ms UI-thread indicator. Countdown and hero timers pause offscreen/background; hero autoplay has a pause control and respects reduced motion, rotation, and larger text.
+- Discover supports combined media type, genre, platform, country, language, sort, and streaming/rental/purchase access. Filters apply together, provider pickers are searchable, and detail pages show the same region with explicit access labels. Movie rails use recent regional digital release dates; TV rails describe recent episodes, not dates when a title joined an OTT catalogue.
+- Added a series watch calculator with known/estimated runtimes, remaining/whole-series modes, daily time budgets, weekdays, and completion-date estimates. Future release dates can extend the estimate.
+- Added Classics cast portraits from highly rated films and series, 24 new illustrated avatars, searchable character/title labels, selection previews, and explicit confirmation. TMDB portraits remain credited actors' headshots. Shared controls gained larger touch targets; notification writes restore the prior setting on failure.
+- Removed compiler-proven unused declarations and enabled TypeScript unused-local/parameter checks. Existing user/episode and user/watch-time indexes cover the changed queries; no schema migration, app dependency, or production deployment was added.
+- Verification: client strict typecheck, Jest 88/88 (14 suites), and Expo production web export pass. Backend full suite passed 259/259 before the final recommendation/release-label changes; the final changed-path run passed 52/52, and the current suite collects 261 tests. Django checks pass with no pending migrations. Browser automation could not initialize (missing runtime assets). Native smoothness, visual appearance, and haptics still require device verification; peak performance has not been benchmarked on hardware.
+
+
 ## 🟢 CLOSED — Phase 86, Batch 8: permanent fix for the `tsc` Windows stack-overflow crash (2026-09-08)
 
 **Symptom.** Plain `npx tsc --noEmit` in `client-mobile/` crashed on this Windows machine with `RangeError: Maximum call stack size exceeded` thrown from deep inside the TypeScript checker (`checkPropertyAccessExpression` → `checkNonNullExpression` → `checkExpression` → ... → `resolveNameHelper` → `addLazyDiagnostic`), instead of printing type errors or exiting cleanly. First seen in Batch 7 while verifying that batch's edits; user asked this session to confirm whether it's fixable and, if so, fix it (rather than leave it as a manual workaround).

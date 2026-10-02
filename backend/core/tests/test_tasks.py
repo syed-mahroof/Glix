@@ -13,9 +13,30 @@ from core.models import (
     Watchlist,
     WatchState,
 )
-from core.tasks import refresh_show_cache, send_weekly_digest
+from core.tasks import notify_watchers_of_new_episodes, refresh_show_cache, send_weekly_digest
 
 User = get_user_model()
+
+
+@pytest.mark.django_db
+def test_queued_release_notification_excludes_fully_watched_users():
+    show = CachedShow.objects.create(tmdb_id=98001, title="Release")
+    episodes = [CachedEpisode.objects.create(tmdb_id=980010 + index, show=show, season_number=1, episode_number=index, title="New episode") for index in (1, 2)]
+    watched = User.objects.create_user(username="already-watched")
+    partial = User.objects.create_user(username="partly-watched")
+    archived = User.objects.create_user(username="archived-watcher")
+    for user in (watched, partial):
+        Watchlist.objects.create(user=user, show=show)
+    Watchlist.objects.create(user=archived, show=show, status=Watchlist.Status.ARCHIVED)
+    for episode in episodes:
+        WatchState.objects.create(user=watched, episode=episode)
+    WatchState.objects.create(user=partial, episode=episodes[0])
+    with patch("core.tasks.notify_users") as notify:
+        notify_watchers_of_new_episodes.run(show.pk, [episode.pk for episode in episodes])
+    assert notify.call_args.args[0] == [partial.pk]
+    with patch("core.tasks.notify_users") as notify:
+        notify_watchers_of_new_episodes.run(show.pk, [episodes[0].pk])
+    notify.assert_not_called()
 
 
 @pytest.fixture

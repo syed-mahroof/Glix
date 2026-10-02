@@ -12,7 +12,6 @@ import {
   CheckCircle,
   Clock,
   ListPlus,
-  MessageCircle,
   RotateCcw,
   Share2,
   Star,
@@ -48,6 +47,7 @@ import { ProviderBadge } from '../../components/ProviderBadge';
 import RatingReviewCard from '../../components/RatingReviewCard';
 import Snackbar from '../../components/Snackbar';
 import TrailerButton from '../../components/TrailerButton';
+import { useDiscoverStore } from '../../store/discoverStore';
 import { api } from '../../lib/api';
 import { hasAired } from '../../lib/dateFormat';
 import { extractErrorMessage } from '../../lib/errors';
@@ -58,7 +58,6 @@ const { width: SCREEN_WIDTH } = Dimensions.get('window');
 const BACKDROP_BASE_URL = 'https://image.tmdb.org/t/p/w1280';
 const POSTER_BASE_URL = 'https://image.tmdb.org/t/p/w342';
 const REC_POSTER_URL = 'https://image.tmdb.org/t/p/w185';
-const PROFILE_BASE_URL = 'https://image.tmdb.org/t/p/w185';
 
 interface MovieDetail {
   tmdb_id: number;
@@ -92,6 +91,7 @@ interface ProviderItem {
   provider_id: number;
   provider_name: string;
   logo_path: string | null;
+  access_types?: string[];
 }
 
 interface RecItem {
@@ -254,7 +254,7 @@ export default function MovieDetailScreen() {
     setSectionError(null);
     const [creditsRes, providersRes, recsRes] = await Promise.allSettled([
       api.get<{ cast: CastMember[]; crew: CrewMember[] }>(`/movies/${tmdbId}/credits/`),
-      api.get<ProviderItem[]>(`/movies/${tmdbId}/watch-providers/`),
+      api.get<ProviderItem[]>(`/movies/${tmdbId}/watch-providers/`, { params: { region: useDiscoverStore.getState().watchRegion } }),
       api.get<{ results: RecItem[] }>(`/movies/${tmdbId}/recommendations/`),
     ]);
     if (creditsRes.status === 'fulfilled') {
@@ -681,10 +681,10 @@ export default function MovieDetailScreen() {
         {/* ── Where to Watch ──────────────────────────────────────────── */}
         {providers.length > 0 && (
           <View style={styles.section}>
-            <Text style={[styles.sectionTitle, { color: c.textPrimary }]}>Where to Watch</Text>
+            <Text style={[styles.sectionTitle, { color: c.textPrimary }]}>Where to Watch · {useDiscoverStore.getState().watchRegion}</Text>
             <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.hList}>
               {providers.map((p, i) => (
-                <ProviderBadge key={`${p.provider_id}-${i}`} providerName={p.provider_name} logoPath={p.logo_path} />
+                <ProviderBadge key={`${p.provider_id}-${i}`} providerName={p.provider_name} logoPath={p.logo_path} accessTypes={p.access_types} />
               ))}
             </ScrollView>
           </View>

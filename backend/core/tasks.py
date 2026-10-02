@@ -179,16 +179,23 @@ def notify_watchers_of_new_episodes(tmdb_id: int, episode_tmdb_ids: list):
     except CachedShow.DoesNotExist:
         return
 
+    episodes = list(CachedEpisode.objects.filter(show=show, tmdb_id__in=episode_tmdb_ids).order_by("season_number", "episode_number"))
+    if not episodes:
+        return
+    # The delivery task may run after the user has already watched a release.
+    # A grouped subquery reuses the existing user/episode index, without N+1 reads.
+    already_watched = (
+        WatchState.objects.filter(episode_id__in=[episode.pk for episode in episodes])
+        .values("user_id").annotate(release_count=Count("episode_id"))
+        .filter(release_count=len(episodes)).values("user_id")
+    )
     user_ids = list(
         Watchlist.objects.filter(show=show)
         .exclude(status=Watchlist.Status.ARCHIVED)
+        .exclude(user_id__in=already_watched)
         .values_list("user_id", flat=True)
     )
     if not user_ids:
-        return
-
-    episodes = list(CachedEpisode.objects.filter(tmdb_id__in=episode_tmdb_ids).order_by("season_number", "episode_number"))
-    if not episodes:
         return
 
     if len(episodes) == 1:

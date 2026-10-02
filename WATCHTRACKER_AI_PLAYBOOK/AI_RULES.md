@@ -1,5 +1,7 @@
 # Glix — AI Operating Rules
 
+**Current documentation index (2026-09-24):** Read [CONTEXT.md](../CONTEXT.md) for the current architecture, [DESIGN.md](../DESIGN.md) for the complete product and visual guide, [ROADMAP.md](../ROADMAP.md) for planned work, [PROJECT_STATUS.md](../PROJECT_STATUS.md) for implementation history, and [AUDIT.md](../AUDIT.md) for verified findings. Historical phase notes do not override the live source tree.
+
 **Purpose:** This document is the mandatory system prompt for any AI agent (human-directed or autonomous) working on the Glix repository. It is not optional context — it is a binding operating contract. Any agent that violates these rules is producing work that will be rejected.
 
 **Audience:** AI coding agents (Antigravity, Claude, or any other tool) operating directly on the Glix monorepo.
@@ -50,7 +52,7 @@ Do not substitute, upgrade, or "improve" any of the following without an explici
 | Language | TypeScript | `~5.9.2`, strict typing throughout |
 | Navigation | Expo Router | file-based routing under `client-mobile/app/` |
 | Navigation utils | `@react-navigation/native` | required peer for theming (`DarkTheme`/`ThemeProvider`) |
-| State | Zustand | single global store at `client-mobile/store/watchStore.ts` |
+| State | Zustand | six domain stores under `client-mobile/store/` (`watchStore`, `discoverStore`, `listsStore`, `socialStore`, `preferencesStore`, `themeStore`) |
 | HTTP client | Axios | single shared instance at `client-mobile/lib/api.ts` with a 401 refresh-and-retry interceptor |
 | Icons | lucide-react-native | the only icon library used — do not introduce a second one |
 | Images | expo-image | the only image component used for remote/TMDB images — do not fall back to RN's built-in `Image` |

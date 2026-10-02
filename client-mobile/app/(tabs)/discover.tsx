@@ -14,17 +14,13 @@ import React, {
 } from 'react';
 import {
   ActivityIndicator,
-  Dimensions,
-  KeyboardAvoidingView,
-  Platform,
-  Pressable,
   RefreshControl,
-  ScrollView,
   StyleSheet,
   Text,
   TextInput,
   View,
   ViewStyle,
+  useWindowDimensions,
 } from 'react-native';
 import Animated, {
   AnimatedStyle,
@@ -35,7 +31,7 @@ import Animated, {
   useAnimatedScrollHandler,
   useAnimatedStyle,
   useSharedValue,
-  withSpring,
+  ReduceMotion,
   withTiming,
 } from 'react-native-reanimated';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -47,7 +43,12 @@ import GlassBlur from '../../components/GlassBlur';
 import GlassSurface from '../../components/GlassSurface';
 import HeroCarousel from '../../components/HeroCarousel';
 import HorizontalMediaList from '../../components/HorizontalMediaList';
+import MediaSkeleton from '../../components/MediaSkeleton';
 import PressableScale from '../../components/PressableScale';
+import { MOVIE_GENRES, TV_GENRES } from '../../lib/genres';
+import { usePrefersReducedMotion } from '../../lib/motion';
+import { useWatchStore } from '../../store/watchStore';
+import { useScreenActive } from '../../lib/useScreenActive';
 import { useAppTheme } from '../../lib/theme';
 import { useColdStartHint } from '../../lib/warmup';
 import {
@@ -55,10 +56,11 @@ import {
   DiscoverFeedResponse,
   DiscoverMediaItem,
   ForYouItem,
+  FeedSection,
+  hasDiscoverFilters,
   useDiscoverStore,
 } from '../../store/discoverStore';
 
-const { width: SCREEN_WIDTH } = Dimensions.get('window');
 const POSTER_BASE_URL = 'https://image.tmdb.org/t/p/w342';
 
 // ─── Debounce Hook ─────────────────────────────────────────────────────────────
@@ -92,15 +94,13 @@ function AnimatedSegmentControl({
 }) {
   const { theme } = useAppTheme();
   const c = theme.colors;
-  const indicatorX = useSharedValue(0);
-  const segmentWidth = (SCREEN_WIDTH - 40) / 2;
+  const { width } = useWindowDimensions();
+  const segmentWidth = (width - 46) / 2;
+  const indicatorX = useSharedValue(value === 'tv' ? 0 : segmentWidth);
 
   useEffect(() => {
-    indicatorX.value = withSpring(value === 'tv' ? 0 : segmentWidth, {
-      damping: 18,
-      stiffness: 220,
-    });
-  }, [value]);
+    indicatorX.value = withTiming(value === 'tv' ? 0 : segmentWidth, { duration: 200, reduceMotion: ReduceMotion.System });
+  }, [value, segmentWidth, indicatorX]);
 
   const indicatorStyle = useAnimatedStyle(() => ({
     transform: [{ translateX: indicatorX.value }],
@@ -112,8 +112,8 @@ function AnimatedSegmentControl({
           a translucent wash alone was invisible against a bright photo.
           Same two-layer recipe as LiquidTabBar: blur whatever's behind,
           then a theme tint ON TOP of the blur for real contrast. */}
-      <GlassBlur intensity={70} tint={theme.blurTint} style={StyleSheet.absoluteFill} />
-      <View style={[StyleSheet.absoluteFill, { backgroundColor: c.glassFill }]} />
+      <GlassBlur intensity={24} tint={theme.blurTint} style={StyleSheet.absoluteFill} />
+      <View style={[StyleSheet.absoluteFill, { backgroundColor: c.heroGlassFill }]} />
       {/* Sliding indicator — solid fill (not a translucent wash), matching
           the same "black icon/text on solid yellow" active-state language
           already established on the bottom tab bar and main SegmentedControl. */}
@@ -125,6 +125,9 @@ function AnimatedSegmentControl({
         return (
           <PressableScale
             key={seg_item.value}
+            accessibilityRole="tab"
+            accessibilityLabel={seg_item.label}
+            accessibilityState={{ selected: isActive }}
             style={[seg.tab, { width: segmentWidth }]}
             onPress={() => onChange(seg_item.value)}
           >
@@ -165,7 +168,8 @@ const seg = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     gap: 6,
-    paddingVertical: 9,
+    paddingVertical: 12,
+    minHeight: 48,
     zIndex: 1,
   },
   tabText: {
@@ -400,6 +404,7 @@ function DiscoverSearchHeader({
 }: DiscoverSearchHeaderProps) {
   const { theme } = useAppTheme();
   const c = theme.colors;
+  const reducedMotion = usePrefersReducedMotion();
 
   return (
     <View
@@ -442,17 +447,18 @@ function DiscoverSearchHeader({
                 same "floats over image-heavy content" case that token's own
                 doc comment names. */}
             <GlassBlur
-              intensity={80}
+              intensity={24}
               tint={theme.blurTint}
               style={[StyleSheet.absoluteFill, styles.pillClip]}
             />
             <View
-              style={[StyleSheet.absoluteFill, styles.pillClip, { backgroundColor: c.glassFillStrong }]}
+              style={[StyleSheet.absoluteFill, styles.pillClip, { backgroundColor: c.heroGlassFill }]}
             />
             <TextInput
               ref={inputRef}
+              accessibilityLabel="Search shows and movies"
               style={[styles.searchInput, { color: c.textPrimary }]}
-              placeholder="Search shows, movies, actors..."
+              placeholder="Search shows and movies…"
               placeholderTextColor={c.textTertiary}
               value={searchQuery}
               onChangeText={onSearchChange}
@@ -488,7 +494,7 @@ function DiscoverSearchHeader({
               accessibilityState={{ selected: filterSheetVisible || filterActive }}
             >
               <GlassBlur
-                intensity={80}
+                intensity={24}
                 tint={theme.blurTint}
                 style={[StyleSheet.absoluteFill, styles.pillClip]}
               />
@@ -498,7 +504,7 @@ function DiscoverSearchHeader({
                   styles.pillClip,
                   {
                     backgroundColor:
-                      filterSheetVisible || filterActive ? c.accentDim : c.glassFillStrong,
+                      filterSheetVisible || filterActive ? c.accentDim : c.heroGlassFill,
                   },
                 ]}
               />
@@ -526,7 +532,7 @@ function DiscoverSearchHeader({
 
         {/* Segment control (hidden during search) */}
         {!isSearchActive && (
-          <Animated.View entering={FadeIn.duration(150)} exiting={FadeOut.duration(100)} style={styles.segmentWrapper}>
+          <Animated.View entering={reducedMotion ? undefined : FadeIn.duration(150)} exiting={reducedMotion ? undefined : FadeOut.duration(100)} style={styles.segmentWrapper}>
             <AnimatedSegmentControl value={activeSegment} onChange={onSegmentChange} />
           </Animated.View>
         )}
@@ -573,6 +579,9 @@ interface DiscoverFeedBodyProps {
    *  intentionally renders full-bleed BEHIND the header, unaffected by this
    *  value. */
   headerHeight: number;
+  releases: FeedSection | null;
+  releasesError: string | null;
+  onRetryReleases: () => void;
 }
 
 function DiscoverFeedBodyComponent({
@@ -589,6 +598,9 @@ function DiscoverFeedBodyComponent({
   onSelectGenre,
   onRetry,
   headerHeight,
+  releases,
+  releasesError,
+  onRetryReleases,
 }: DiscoverFeedBodyProps) {
   const { theme } = useAppTheme();
   const c = theme.colors;
@@ -601,8 +613,8 @@ function DiscoverFeedBodyComponent({
 
   if (isLoadingFeed && !currentFeed) {
     return (
-      <View style={styles.loadingContainer}>
-        <ActivityIndicator color={c.accentInk} size="large" />
+      <View style={[styles.loadingContainer, { paddingTop: headerHeight, justifyContent: 'flex-start' }]}>
+        <MediaSkeleton hero />
         {isWakingBackend && (
           <Text style={[styles.wakingText, { color: c.textTertiary }]}>
             Waking up the server — this can take up to a minute.
@@ -666,6 +678,9 @@ function DiscoverFeedBodyComponent({
           into one shared list regardless of segment). */}
       <HorizontalMediaList title="For You" items={forYouItems} />
 
+      {releases && <HorizontalMediaList title={releases.title} subtitle={releases.subtitle} items={releases.items} />}
+      {releasesError && <PressableScale accessibilityRole="button" onPress={onRetryReleases} style={{ padding: 20 }}><Text style={{ color: c.textSecondary }}>Streaming releases unavailable. Tap to retry.</Text></PressableScale>}
+
       {/* Sections */}
       <View style={styles.feedContent}>
         {currentFeed?.sections?.map((section) => (
@@ -709,20 +724,26 @@ export default function DiscoverScreen() {
   const isLoadingFiltered = useDiscoverStore((s) => s.isLoadingFiltered);
   const isLoadingMoreFiltered = useDiscoverStore((s) => s.isLoadingMoreFiltered);
   const filteredError = useDiscoverStore((s) => s.filteredError);
+  const filteredPage = useDiscoverStore((s) => s.filteredPage);
+  const filteredTotalPages = useDiscoverStore((s) => s.filteredTotalPages);
   const forYou = useDiscoverStore((s) => s.forYou);
-  const filterActive = useDiscoverStore(
-    (s) =>
-      s.selectedGenreId !== null ||
-      s.sortOrder !== 'trending' ||
-      s.selectedLanguage !== null ||
-      s.animeOnly
-  );
+  const filterActive = useDiscoverStore(hasDiscoverFilters);
+  const releases = useDiscoverStore((s) => s.releases[activeSegment]);
+  const releasesError = useDiscoverStore((s) => s.releasesError);
+  const watchRegion = useDiscoverStore((s) => s.watchRegion);
+  const selectedProviderIds = useDiscoverStore((s) => s.selectedProviderIds);
+  const providers = useDiscoverStore((s) => s.providerOptions);
+  const selectedGenreId = useDiscoverStore((s) => s.selectedGenreId);
+  const searchError = useDiscoverStore((s) => s.searchError);
+
 
   const {
     setActiveSegment,
     setSearchQuery,
     toggleFilterSheet,
     fetchFeed,
+    fetchReleases,
+    resetFilters,
     loadMoreSearchResults,
     runSearch,
     clearSearch,
@@ -736,13 +757,12 @@ export default function DiscoverScreen() {
   const c = theme.colors;
   const insets = useSafeAreaInsets();
 
-  // Discover has no persisted fallback (discoverStore.ts is in-memory only)
-  // — unlike Shows/Movies Hub, which paint real content from AsyncStorage
-  // regardless of the network, this screen has nothing to show until the
-  // initial feed fetch below actually resolves. See lib/warmup.ts's
-  // useColdStartHint for why that matters after a fresh Render redeploy.
+  // Show the cold-start hint only when no persisted feed is available.
   const isWakingBackend = useColdStartHint(isLoadingFeed && !feedData[activeSegment]);
 
+  const screenActive = useScreenActive();
+  const watchVersion = useWatchStore((state) => state.analyticsDirtyAt);
+  const recommendationVersion = useRef({ tv: 0, movie: 0 });
   const inputRef = useRef<TextInput>(null);
   const [isSearchActive, setIsSearchActive] = useState(false);
   const [isRefreshing, setIsRefreshing] = useState(false);
@@ -759,14 +779,12 @@ export default function DiscoverScreen() {
   const debouncedQuery = useDebounce(searchQuery, 400);
 
   const scrollY = useSharedValue(0);
-  const searchBarHeight = useSharedValue(0);
 
   // ── Effects ────────────────────────────────────────────────────────────────
 
   // Initial feed/ForYou/genre-covers fetch, for whichever segment is
   // actually active when this screen first mounts — not hardcoded to 'tv'.
-  // discoverStore is in-memory only (no persistence), so activeSegment is
-  // 'tv' on a cold app launch, but a remount while it's already 'movie'
+  // A remount while the selected segment is already 'movie'
   // (e.g. detachInactiveScreens reclaiming this screen under memory
   // pressure, then Discover getting focused again) used to still kick off
   // a 'tv' fetch nobody asked for while the segment actually on screen got
@@ -777,9 +795,15 @@ export default function DiscoverScreen() {
   useEffect(() => {
     const segment = initialSegmentRef.current;
     fetchFeed(segment);
-    fetchForYou(segment);
     fetchGenreCovers(segment);
+    fetchReleases(segment);
   }, []);
+
+  useEffect(() => {
+    if (!screenActive || filterActive || isSearchActive || recommendationVersion.current[activeSegment] === watchVersion) return;
+    recommendationVersion.current[activeSegment] = watchVersion;
+    void fetchForYou(activeSegment, true);
+  }, [screenActive, filterActive, isSearchActive, activeSegment, watchVersion, fetchForYou]);
 
   // Run search when debounced query changes
   useEffect(() => {
@@ -811,24 +835,17 @@ export default function DiscoverScreen() {
 
   const handleRefresh = useCallback(async () => {
     setIsRefreshing(true);
-    // Force re-fetch by temporarily clearing cache
-    useDiscoverStore.setState((state) => ({
-      feedData: { ...state.feedData, [activeSegment]: null },
-    }));
-    await fetchFeed(activeSegment);
+    await Promise.all([fetchFeed(activeSegment, true), fetchReleases(activeSegment, true), fetchForYou(activeSegment, true)]);
     setIsRefreshing(false);
-  }, [activeSegment, fetchFeed]);
+  }, [activeSegment, fetchFeed, fetchReleases, fetchForYou]);
 
   // Stable identity (not an inline arrow in the JSX below) so DiscoverFeedBody's
   // React.memo actually holds when the parent re-renders for an unrelated
   // reason (e.g. the filter sheet opening over the feed).
   const handleRetryFeed = useCallback(() => {
-    useDiscoverStore.setState((state) => ({
-      feedData: { ...state.feedData, [activeSegment]: null },
-      feedError: null,
-    }));
-    fetchFeed(activeSegment);
+    void fetchFeed(activeSegment, true);
   }, [activeSegment, fetchFeed]);
+  const handleRetryReleases = useCallback(() => { void fetchReleases(activeSegment, true); }, [activeSegment, fetchReleases]);
 
   // ── Animated styles ────────────────────────────────────────────────────────
 
@@ -874,8 +891,11 @@ export default function DiscoverScreen() {
         // ── Search Results ─────────────────────────────────────────────────
         <View style={[styles.searchResults, { marginTop: headerHeight }]}>
           {isSearching ? (
+              <MediaSkeleton />
+          ) : searchError ? (
             <View style={styles.centerState}>
-              <ActivityIndicator color={c.accentInk} />
+              <Text style={{ color: c.textSecondary }}>{searchError}</Text>
+              <PressableScale accessibilityRole="button" onPress={() => void runSearch(searchQuery)} style={styles.retryBtn}><Text style={{ color: c.accentInk }}>Retry search</Text></PressableScale>
             </View>
           ) : searchResults.length > 0 ? (
             <FlashList
@@ -914,10 +934,17 @@ export default function DiscoverScreen() {
         // sort applied) — a flat TMDB-backed grid, same card/layout as
         // universal search, instead of the fixed curated sections. ─────────
         <View style={[styles.searchResults, { marginTop: headerHeight }]}>
+          <View style={{ paddingHorizontal: 20, paddingVertical: 12, flexDirection: 'row', gap: 12, alignItems: 'center' }}>
+            <Text style={{ color: c.textSecondary, flex: 1, fontSize: 13 }}>{[
+              activeSegment === 'movie' ? 'Movies' : 'Shows',
+              (activeSegment === 'movie' ? MOVIE_GENRES : TV_GENRES).find((genre) => genre.id === selectedGenreId)?.name,
+              selectedProviderIds.length ? providers.filter((provider) => selectedProviderIds.includes(provider.provider_id)).map((provider) => provider.provider_name).join(' / ') || 'Selected platforms' : null,
+              watchRegion,
+            ].filter(Boolean).join(' · ')}</Text>
+            <PressableScale accessibilityRole="button" onPress={resetFilters} hitSlop={8}><Text style={{ color: c.accentInk, fontWeight: '600' }}>Clear</Text></PressableScale>
+          </View>
           {isLoadingFiltered ? (
-            <View style={styles.centerState}>
-              <ActivityIndicator color={c.accentInk} />
-            </View>
+              <MediaSkeleton />
           ) : filteredError ? (
             <View style={styles.errorContainer}>
               <GlassSurface radius={18} style={styles.errorCard}>
@@ -947,8 +974,10 @@ export default function DiscoverScreen() {
           ) : (
             <View style={styles.centerState}>
               <Text style={[styles.emptyText, { color: c.textTertiary }]}>
-                No results match this filter.
+                No results match this filter. Try another country or access type.
               </Text>
+              {filteredPage < filteredTotalPages && <PressableScale accessibilityRole="button" disabled={isLoadingMoreFiltered} onPress={loadMoreFilteredResults} style={styles.retryBtn}><Text style={{ color: c.accentInk }}>{isLoadingMoreFiltered ? 'Loading…' : 'Check more titles'}</Text></PressableScale>}
+              <PressableScale accessibilityRole="button" onPress={toggleFilterSheet} style={styles.retryBtn}><Text style={{ color: c.accentInk }}>Adjust filters</Text></PressableScale>
             </View>
           )}
         </View>
@@ -968,6 +997,9 @@ export default function DiscoverScreen() {
           onSelectGenre={setSelectedGenreId}
           onRetry={handleRetryFeed}
           headerHeight={headerHeight}
+          releases={releases}
+          releasesError={releasesError}
+          onRetryReleases={handleRetryReleases}
         />
       )}
 

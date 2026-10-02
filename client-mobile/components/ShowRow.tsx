@@ -1,38 +1,22 @@
-// client-mobile/components/ShowRow.tsx
-// Dense episode row for the Shows Hub (index.tsx).
-// Layout: Poster | Show Title / Episode Label / Air Badge | Giant Checkmark
-//
-// V2.5 — Checkmark Fill & Auto-Advance animations:
-//   1. On tap: border contract → neon fill erupts → tick scales in (spring)
-//   2. Haptic feedback fires at the exact moment of tap
-//   3. After 420ms the row collapses (height + opacity → 0) via spring
-//   4. onAnimationComplete fires so the parent can trigger the Zustand update
-//      which queues the next episode row into the list
-
 import * as Haptics from 'expo-haptics';
 import { Image } from 'expo-image';
 import { useRouter } from 'expo-router';
-import React, { memo, useCallback, useRef } from 'react';
+import React, { memo, useCallback } from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 import Animated, {
   interpolate,
   interpolateColor,
-  runOnJS,
   useAnimatedStyle,
   useSharedValue,
-  withDelay,
   withSequence,
   withSpring,
   withTiming,
-  Easing,
 } from 'react-native-reanimated';
 
+import { isReduceMotionEnabled } from '../lib/motion';
 import { useAppTheme } from '../lib/theme';
 
 const POSTER_BASE_URL = 'https://image.tmdb.org/t/p/w185';
-
-// Row height used to animate collapse. Matches padding + poster height + margin.
-const ROW_HEIGHT = 100; // poster 80 + 10+10 padding + 8 margin ≈ 108, clamp slightly lower for snap
 
 export interface ShowRowProps {
   showId: number;
@@ -48,13 +32,7 @@ export interface ShowRowProps {
    *  watched — the checkmark is disabled + dimmed when false. Defaults true
    *  so callers that don't pass it keep the old behaviour. */
   isAired?: boolean;
-  /** Called by parent to initiate the watch-state toggle. The component
-   *  will run its full animation sequence first, then fire this. */
   onCheckPress: (episodeId: number) => void;
-  /** Optional: called after the exit animation fully completes.
-   *  Use this to flush the Zustand update that replaces this row with
-   *  the next episode, preventing a harsh jump before the animation ends. */
-  onAnimationComplete?: (episodeId: number) => void;
 }
 
 // ─── Air date badge helper ────────────────────────────────────────────────────
@@ -97,157 +75,33 @@ function ShowRowComponent({
   isWatched,
   isAired = true,
   onCheckPress,
-  onAnimationComplete,
 }: ShowRowProps) {
   const router = useRouter();
   const { theme } = useAppTheme();
   const c = theme.colors;
-  // Guard against double-tap during animation
-  const isAnimating = useRef(false);
-
-  // ── Shared values ────────────────────────────────────────────────────────
-  // fillProgress: 0 = empty circle, 1 = fully filled neon yellow
   const fillProgress = useSharedValue(isWatched ? 1 : 0);
-  // tickScale: the ✓ icon's scale
   const tickScale = useSharedValue(isWatched ? 1 : 0);
-  // checkBounce: outer container spring-bounce
   const checkBounce = useSharedValue(1);
 
-  // Row exit animation values
-  const rowHeight = useSharedValue(ROW_HEIGHT);
-  const rowOpacity = useSharedValue(1);
-  const rowMargin = useSharedValue(8); // matches marginBottom in styles
-
-  // Reset animation state when FlashList recycles this row for a new episode
   React.useEffect(() => {
-    isAnimating.current = false;
-    rowHeight.value = ROW_HEIGHT;
-    rowOpacity.value = 1;
-    rowMargin.value = 8;
     fillProgress.value = isWatched ? 1 : 0;
     tickScale.value = isWatched ? 1 : 0;
     checkBounce.value = 1;
-  }, [episodeId, isWatched, rowHeight, rowOpacity, rowMargin, fillProgress, tickScale, checkBounce]);
-
-  // ── Callbacks ────────────────────────────────────────────────────────────
-
-  const notifyParent = useCallback(
-    (epId: number) => {
-      onCheckPress(epId);
-    },
-    [onCheckPress]
-  );
-
-  const notifyComplete = useCallback(
-    (epId: number) => {
-      onAnimationComplete?.(epId);
-    },
-    [onAnimationComplete]
-  );
-
-  const triggerHaptic = useCallback(() => {
-    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
-  }, []);
+  }, [episodeId, isWatched, fillProgress, tickScale, checkBounce]);
 
   const handleCheckPress = useCallback(() => {
-    if (isAnimating.current) return;
-    // Can't mark a future episode watched. (Un-watching is impossible here
-    // anyway since an unaired episode can't already be watched.)
     if (!isAired && !isWatched) return;
-
-    // ── 1. Haptic fires immediately ──────────────────────────────────────
-    runOnJS(triggerHaptic)();
-
-    // ── 2. Notify parent (optimistic store update starts) ────────────────
-    runOnJS(notifyParent)(episodeId);
-
-    if (!isWatched) {
-      isAnimating.current = true;
-
-      // ── 3. Checkmark bounce + fill sequence ──────────────────────────────
-      // The outer ring contracts slightly then bounces back
+    void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {});
+    if (!isReduceMotionEnabled()) {
       checkBounce.value = withSequence(
-        withSpring(0.78, { damping: 10, stiffness: 380 }),
-        withSpring(1.18, { damping: 7, stiffness: 300 }),
-        withSpring(1.0, { damping: 16, stiffness: 260 })
-      );
-
-      // The fill floods in on a quick spring
-      fillProgress.value = withSpring(1, { damping: 14, stiffness: 200 });
-
-      // The tick icon pops in with a snap-overshoot
-      tickScale.value = withDelay(
-        80,
-        withSpring(1, { damping: 9, stiffness: 320 })
-      );
-
-      // ── 4. Row collapse after 420ms ──────────────────────────────────────
-      const COLLAPSE_DELAY = 420;
-      const COLLAPSE_DURATION = 340;
-
-      rowOpacity.value = withDelay(
-        COLLAPSE_DELAY,
-        withTiming(0, { duration: COLLAPSE_DURATION, easing: Easing.out(Easing.ease) })
-      );
-      rowHeight.value = withDelay(
-        COLLAPSE_DELAY,
-        withTiming(0, { duration: COLLAPSE_DURATION, easing: Easing.out(Easing.cubic) })
-      );
-      rowMargin.value = withDelay(
-        COLLAPSE_DELAY,
-        withTiming(0, { duration: COLLAPSE_DURATION, easing: Easing.out(Easing.ease) })
-      );
-      // Bug fix (2026-08-07): the commit used to live in this withTiming's
-      // own completion callback, gated on `finished`. A FlashList recycle
-      // (or the store changing this exact episode from elsewhere) during
-      // the 420-760ms collapse window hits the reset effect below, which
-      // assigns rowMargin.value directly — cancelling this in-flight
-      // withTiming, which then fires its callback with finished=false, so
-      // the commit never happened and the tap was silently lost with no
-      // feedback (the checkmark had already visibly filled). The deferral's
-      // whole purpose is cosmetic — let the tick be seen before the row
-      // leaves — it was never meant to gate whether the mark actually
-      // reaches the store. A plain timer fires unconditionally: episodeId
-      // was captured at tap time, so delivering it is always correct
-      // regardless of what this row instance ends up displaying by the
-      // time the timer fires (and if two taps land in the same slot across
-      // a recycle, each timer independently commits its own correct id —
-      // there's no shared state between them to race over).
-      setTimeout(() => {
-        notifyComplete(episodeId);
-      }, COLLAPSE_DELAY + COLLAPSE_DURATION);
-    } else {
-      // Un-watching: just reverse fill smoothly
-      fillProgress.value = withSpring(0, { damping: 16, stiffness: 200 });
-      tickScale.value = withTiming(0, { duration: 160 });
-      checkBounce.value = withSequence(
-        withSpring(0.88, { damping: 12, stiffness: 300 }),
-        withSpring(1.0, { damping: 14, stiffness: 240 })
+        withTiming(0.94, { duration: 80 }),
+        withSpring(1, { damping: 20, stiffness: 350 })
       );
     }
-  }, [
-    episodeId,
-    isWatched,
-    fillProgress,
-    tickScale,
-    checkBounce,
-    rowHeight,
-    rowOpacity,
-    rowMargin,
-    notifyParent,
-    notifyComplete,
-    triggerHaptic,
-  ]);
-
-  // ── Animated styles ──────────────────────────────────────────────────────
-
-  // Row wrapper: height + opacity collapse on exit
-  const rowWrapperStyle = useAnimatedStyle(() => ({
-    height: isWatched ? 'auto' : rowHeight.value,
-    opacity: rowOpacity.value,
-    marginBottom: rowMargin.value,
-    overflow: 'hidden',
-  }));
+    // Commit at tap time. Keep the show's cell and height while its episode
+    // advances; delayed collapse made the next action move off-screen.
+    onCheckPress(episodeId);
+  }, [episodeId, isAired, isWatched, onCheckPress, checkBounce]);
 
   // Outer bounce wrapper for the checkmark button
   const checkBounceStyle = useAnimatedStyle(() => ({
@@ -286,7 +140,7 @@ function ShowRowComponent({
   const badge = airDateBadge(airDate);
 
   return (
-    <Animated.View style={rowWrapperStyle}>
+    <View style={{ marginBottom: 8 }}>
       <Pressable
         style={[styles.row, { backgroundColor: c.glassFill, borderColor: c.hairline }]}
         onPress={() => router.push(`/show/${showId}`)}
@@ -320,7 +174,7 @@ function ShowRowComponent({
                 styles.badge,
                 { backgroundColor: c.glassFill, borderColor: c.hairline },
                 badge.style === 'imminent' && { backgroundColor: c.accentDim, borderColor: c.accentInk },
-                badge.style === 'future' && styles.badgeFuture,
+
               ]}
             >
               <Text
@@ -339,7 +193,7 @@ function ShowRowComponent({
         {/* ── Giant Animated Checkmark ── */}
         <Animated.View style={[checkBounceStyle, !isAired && !isWatched && styles.checkDisabled]}>
           <Pressable
-            onPress={handleCheckPress}
+            onPress={(event) => { event.stopPropagation(); handleCheckPress(); }}
             disabled={!isAired && !isWatched}
             hitSlop={12}
             accessibilityRole="checkbox"
@@ -360,7 +214,7 @@ function ShowRowComponent({
           </Pressable>
         </Animated.View>
       </Pressable>
-    </Animated.View>
+    </View>
   );
 }
 
@@ -406,10 +260,6 @@ const styles = StyleSheet.create({
     paddingVertical: 3,
     borderRadius: 6,
     borderWidth: StyleSheet.hairlineWidth,
-  },
-  badgeFuture: {
-    backgroundColor: 'rgba(120,120,200,0.15)',
-    borderColor: 'rgba(120,120,200,0.3)',
   },
   badgeText: {
     fontSize: 10,

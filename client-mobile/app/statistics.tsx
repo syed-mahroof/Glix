@@ -1,6 +1,6 @@
 // client-mobile/app/statistics.tsx
 import { useRouter } from 'expo-router';
-import { ArrowLeft, TrendingUp } from 'lucide-react-native';
+import { ArrowLeft } from 'lucide-react-native';
 import React, { useEffect, useState } from 'react';
 import {
   ActivityIndicator,

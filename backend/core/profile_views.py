@@ -21,7 +21,7 @@ from core.cache_keys import movie_watchlist_cache_key, watchlist_cache_key
 from core.cache_utils import safe_cache_delete, safe_cache_get, safe_cache_set
 from core.models import MovieWatchlist, MovieWatchState, UserProfile, Watchlist, WatchState
 from core.serializers import UserProfileSerializer
-from core.services import TMDBService
+from core.services import TMDBService, TMDBServiceError
 
 
 class ProfileView(APIView):
@@ -97,39 +97,25 @@ class ProfileStatsResyncView(APIView):
 
 
 class AvatarOptionsView(APIView):
-    """
-    GET /api/profile/avatar-options/
-
-    Feeds the Profile avatar picker ("EDIT" on the Profile hub). Returns a
-    "cast" pool of real TMDB character headshots — top-billed cast pulled
-    from currently trending TV shows and popular movies, keeping each
-    entry's in-show `character` name rather than the actor's real name (see
-    `TMDBService.get_popular_characters()` for why: TMDB has no dedicated
-    character-portrait asset, so the underlying photo is still the actor's
-    headshot, but the picker is now sourced/labeled as "characters from
-    shows" instead of "random popular people"). The picker's other pool,
-    illustrated/cartoon-style avatars, is generated client-side from a fixed
-    seed list — no TMDB data applies there, and hard-coding TMDB image paths
-    client-side is the anti-pattern GenreGrid.tsx's "stale hand-typed path"
-    bug already taught this repo to avoid, see AUDIT.md).
-
-    Cached 24h server-side: this is decorative profile-picker content, not
-    live data, and without caching every Profile > Edit tap would cost
-    ~16 TMDB credits calls (8 shows + 8 movies).
-    """
+    """Cached cast portraits; collections share no private user data."""
 
     permission_classes = [IsAuthenticated]
     CACHE_TTL_SECONDS = 60 * 60 * 24
-    CACHE_KEY = "profile_avatar_character_options"
+    CACHE_KEY = "profile_avatar_character_options_v2"
 
     def get(self, request):
-        cached = safe_cache_get(self.CACHE_KEY)
+        collection = request.query_params.get("collection", "trending")
+        if collection not in ("trending", "classics"):
+            return Response({"detail": "Choose trending or classics."}, status=status.HTTP_400_BAD_REQUEST)
+        cache_key = f"{self.CACHE_KEY}:{collection}"
+        cached = safe_cache_get(cache_key)
         if cached is not None:
-            return Response(cached, status=status.HTTP_200_OK)
-
-        tmdb = TMDBService()
-        data = tmdb.get_popular_characters(limit=40)
-
+            return Response(cached)
+        try:
+            data = TMDBService().get_popular_characters(limit=48, collection=collection)
+        except TMDBServiceError:
+            return Response({"detail": "Cast portraits are temporarily unavailable. Please retry or choose an illustrated avatar."}, status=status.HTTP_502_BAD_GATEWAY)
         payload = {"cast": data.get("results", [])}
-        safe_cache_set(self.CACHE_KEY, payload, timeout=self.CACHE_TTL_SECONDS)
-        return Response(payload, status=status.HTTP_200_OK)
+        if payload["cast"]:
+            safe_cache_set(cache_key, payload, timeout=self.CACHE_TTL_SECONDS)
+        return Response(payload)

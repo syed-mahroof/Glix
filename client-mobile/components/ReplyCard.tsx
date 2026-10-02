@@ -21,7 +21,6 @@ import { CommentComposer } from './CommentComposer';
 import PressableScale from './PressableScale';
 import { SpoilerOverlay } from './SpoilerOverlay';
 
-const AVATAR_BASE_URL = 'https://image.tmdb.org/t/p/w185';
 
 const REPORT_REASONS: { value: string; label: string }[] = [
   { value: 'SPAM', label: 'Spam' },

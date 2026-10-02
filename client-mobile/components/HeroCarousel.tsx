@@ -1,9 +1,8 @@
-import { useIsFocused } from '@react-navigation/native';
 import { Image } from 'expo-image';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useRouter } from 'expo-router';
 import React, { useRef, useState } from 'react';
-import { Dimensions, StyleSheet, Text, View } from 'react-native';
+import { useWindowDimensions, StyleSheet, Text, View } from 'react-native';
 import Animated, {
   Extrapolation,
   interpolate,
@@ -15,9 +14,11 @@ import Animated, {
 } from 'react-native-reanimated';
 
 import PressableScale from './PressableScale';
+import { Pause, Play } from 'lucide-react-native';
+import { usePrefersReducedMotion } from '../lib/motion';
+import { useScreenActive } from '../lib/useScreenActive';
 import { useAppTheme } from '../lib/theme';
 
-const { width: SCREEN_WIDTH } = Dimensions.get('window');
 const HEIGHT = 450;
 // Full-bleed at SCREEN_WIDTH: on a 3x-density phone (iPhone Pro / most
 // Android flagships, ~390-430pt wide) that's ~1170-1290 physical pixels —
@@ -54,34 +55,22 @@ interface Props {
   items: HeroMedia[];
 }
 
-// Custom hook to run interval manually, bypassing the lack of FlashList autoScroll natively.
-// Phase 83 perf: this ran forever regardless of whether Discover was even
-// the visible tab — a background setInterval imperatively scrolling a
-// ScrollView that isn't on screen, indefinitely. Gated on `isFocused` so it
-// stops the moment the user leaves this tab and restarts on return.
-function useAutoPlay(scrollRef: React.RefObject<Animated.ScrollView | null>, itemsCount: number, isFocused: boolean) {
+function useAutoPlay(scrollRef: React.RefObject<Animated.ScrollView | null>, itemsCount: number, width: number, enabled: boolean) {
   const [currentIndex, setCurrentIndex] = useState(0);
-  const timerRef = useRef<NodeJS.Timeout | null>(null);
-
-  const startTimer = () => {
-    if (timerRef.current) clearInterval(timerRef.current);
-    timerRef.current = setInterval(() => {
-      setCurrentIndex((prev) => {
-        const next = prev + 1 >= itemsCount ? 0 : prev + 1;
-        scrollRef.current?.scrollTo({ x: next * SCREEN_WIDTH, animated: true });
-        return next;
-      });
-    }, 5000);
-  };
-
   React.useEffect(() => {
-    if (itemsCount > 0 && isFocused) startTimer();
-    return () => {
-      if (timerRef.current) clearInterval(timerRef.current);
-    };
-  }, [itemsCount, isFocused]);
-
-  return { currentIndex, setCurrentIndex, startTimer };
+    if (!enabled || itemsCount < 2) return;
+    const timer = setTimeout(() => {
+      const next = (currentIndex + 1) % itemsCount;
+      scrollRef.current?.scrollTo({ x: next * width, animated: true });
+      setCurrentIndex(next);
+    }, 5000);
+    return () => clearTimeout(timer);
+  }, [itemsCount, currentIndex, width, enabled, scrollRef]);
+  React.useEffect(() => {
+    setCurrentIndex(0);
+    scrollRef.current?.scrollTo({ x: 0, animated: false });
+  }, [itemsCount, width, scrollRef]);
+  return setCurrentIndex;
 }
 
 // Bug fix (2026-08-07): this body used to live inline inside HeroCarousel's
@@ -100,15 +89,19 @@ interface HeroSlideProps {
   index: number;
   scrollX: SharedValue<number>;
   onPress: (item: HeroMedia) => void;
+  width: number;
+  height: number;
+  reducedMotion: boolean;
 }
 
-const HeroSlide = React.memo(function HeroSlide({ item, index, scrollX, onPress }: HeroSlideProps) {
+const HeroSlide = React.memo(function HeroSlide({ item, index, scrollX, onPress, width, height, reducedMotion }: HeroSlideProps) {
   const animatedStyle = useAnimatedStyle(() => {
-    const inputRange = [(index - 1) * SCREEN_WIDTH, index * SCREEN_WIDTH, (index + 1) * SCREEN_WIDTH];
+    if (reducedMotion) return { transform: [{ translateX: 0 }] };
+    const inputRange = [(index - 1) * width, index * width, (index + 1) * width];
     const translateX = interpolate(
       scrollX.value,
       inputRange,
-      [SCREEN_WIDTH * 0.4, 0, -SCREEN_WIDTH * 0.4],
+      [width * 0.4, 0, -width * 0.4],
       Extrapolation.CLAMP
     );
     return {
@@ -117,13 +110,14 @@ const HeroSlide = React.memo(function HeroSlide({ item, index, scrollX, onPress 
   });
 
   return (
-    <View style={styles.slide}>
-      <Animated.View style={[styles.imageContainer, animatedStyle]}>
+    <View style={[styles.slide, { width, height }]}>
+      <Animated.View style={[styles.imageContainer, { width, height }, animatedStyle]}>
         <Image
-          source={{ uri: `${POSTER_BASE_URL}${item.backdrop_path}` }}
+          source={item.backdrop_path ? { uri: `${POSTER_BASE_URL}${item.backdrop_path}` } : undefined}
+          recyclingKey={`${item.media_type}-${item.tmdb_id}`}
           style={styles.image}
           contentFit="cover"
-          transition={200}
+          transition={reducedMotion ? 0 : 200}
           cachePolicy="memory-disk"
         />
       </Animated.View>
@@ -147,7 +141,7 @@ const HeroSlide = React.memo(function HeroSlide({ item, index, scrollX, onPress 
           {item.overview}
         </Text>
 
-        <PressableScale style={styles.btn} onPress={() => onPress(item)}>
+        <PressableScale accessibilityRole="button" accessibilityLabel={`View ${item.title}`} style={styles.btn} onPress={() => onPress(item)}>
           <Text style={styles.btnText}>View Details</Text>
         </PressableScale>
       </View>
@@ -159,16 +153,17 @@ interface HeroDotProps {
   index: number;
   scrollX: SharedValue<number>;
   accentFill: string;
+  pageWidth: number;
 }
 
-const HeroDot = React.memo(function HeroDot({ index, scrollX, accentFill }: HeroDotProps) {
+const HeroDot = React.memo(function HeroDot({ index, scrollX, accentFill, pageWidth }: HeroDotProps) {
   const dotStyle = useAnimatedStyle(() => {
-    const inputRange = [(index - 1) * SCREEN_WIDTH, index * SCREEN_WIDTH, (index + 1) * SCREEN_WIDTH];
+    const inputRange = [(index - 1) * pageWidth, index * pageWidth, (index + 1) * pageWidth];
     const width = interpolate(scrollX.value, inputRange, [8, 20, 8], Extrapolation.CLAMP);
     const opacity = interpolate(scrollX.value, inputRange, [0.3, 1, 0.3], Extrapolation.CLAMP);
     const isActive =
-      scrollX.value >= index * SCREEN_WIDTH - SCREEN_WIDTH / 2 &&
-      scrollX.value <= index * SCREEN_WIDTH + SCREEN_WIDTH / 2;
+      scrollX.value >= index * pageWidth - pageWidth / 2 &&
+      scrollX.value <= index * pageWidth + pageWidth / 2;
     return {
       width,
       opacity,
@@ -184,16 +179,20 @@ function HeroCarousel({ items }: Props) {
   const accentFill = theme.colors.accentFill;
   const scrollX = useSharedValue(0);
   const scrollRef = useRef<Animated.ScrollView>(null);
-  const isFocused = useIsFocused();
-
-  const { setCurrentIndex } = useAutoPlay(scrollRef, items.length, isFocused);
+  const screenActive = useScreenActive();
+  const reducedMotion = usePrefersReducedMotion();
+  const { width, fontScale } = useWindowDimensions();
+  const height = HEIGHT + Math.max(0, fontScale - 1) * 120;
+  const [paused, setPaused] = useState(false);
+  const [dragging, setDragging] = useState(false);
+  const setCurrentIndex = useAutoPlay(scrollRef, items.length, width, screenActive && !reducedMotion && !paused && !dragging);
 
   const scrollHandler = useAnimatedScrollHandler({
     onScroll: (event) => {
       scrollX.value = event.contentOffset.x;
     },
     onMomentumEnd: (event) => {
-      runOnJS(setCurrentIndex)(Math.round(event.contentOffset.x / SCREEN_WIDTH));
+      runOnJS(setCurrentIndex)(Math.round(event.contentOffset.x / width));
     },
   });
 
@@ -215,12 +214,14 @@ function HeroCarousel({ items }: Props) {
   if (!items || items.length === 0) return null;
 
   return (
-    <View style={styles.container}>
+    <View style={[styles.container, { width, height }]}>
       <Animated.ScrollView
         ref={scrollRef}
         horizontal
         pagingEnabled
         showsHorizontalScrollIndicator={false}
+        onScrollBeginDrag={() => setDragging(true)}
+        onScrollEndDrag={() => setDragging(false)}
         onScroll={scrollHandler}
         scrollEventThrottle={16}
       >
@@ -231,14 +232,20 @@ function HeroCarousel({ items }: Props) {
             index={index}
             scrollX={scrollX}
             onPress={handlePress}
+            width={width}
+            height={height}
+            reducedMotion={reducedMotion}
           />
         ))}
       </Animated.ScrollView>
 
+      {!reducedMotion && items.length > 1 && <PressableScale accessibilityRole="button" accessibilityLabel={paused ? 'Resume featured titles' : 'Pause featured titles'} onPress={() => setPaused((value) => !value)} style={styles.playback}>
+        {paused ? <Play size={16} color="#fff" /> : <Pause size={16} color="#fff" />}
+      </PressableScale>}
       {/* Pagination dots */}
       <View style={styles.pagination}>
         {items.map((_, i) => (
-          <HeroDot key={i} index={i} scrollX={scrollX} accentFill={accentFill} />
+          <HeroDot key={i} index={i} scrollX={scrollX} accentFill={accentFill} pageWidth={width} />
         ))}
       </View>
     </View>
@@ -248,17 +255,15 @@ function HeroCarousel({ items }: Props) {
 export default React.memo(HeroCarousel);
 
 const styles = StyleSheet.create({
+  playback: { position: 'absolute', right: 12, bottom: 0, width: 48, height: 48, alignItems: 'center', justifyContent: 'center', zIndex: 2 },
   container: {
     height: HEIGHT,
-    width: SCREEN_WIDTH,
   },
   slide: {
-    width: SCREEN_WIDTH,
     height: HEIGHT,
     overflow: 'hidden',
   },
   imageContainer: {
-    width: SCREEN_WIDTH,
     height: HEIGHT,
   },
   image: {
@@ -313,6 +318,7 @@ const styles = StyleSheet.create({
   btn: {
     backgroundColor: 'rgba(255, 255, 255, 0.1)',
     paddingHorizontal: 24,
+    minHeight: 48,
     paddingVertical: 12,
     borderRadius: 24,
     borderWidth: 1,

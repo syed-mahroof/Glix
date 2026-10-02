@@ -94,6 +94,20 @@ def test_watchlist_view_zero_counts_for_untouched_show(api_client, create_user):
 
 
 @pytest.mark.django_db
+def test_watchlist_serialized_status_matches_computed_bucket(api_client, create_user):
+    user = create_user()
+    api_client.force_authenticate(user=user)
+    show, episodes = _make_show_with_episodes(9599, episode_count=1)
+    show.total_seasons = 1
+    show.save(update_fields=["total_seasons"])
+    Watchlist.objects.create(user=user, show=show, status=Watchlist.Status.TO_WATCH)
+    WatchState.objects.create(user=user, episode=episodes[0])
+    response = api_client.get(reverse("watchlist"), {"page_size": "all"})
+    entry = response.data["up_to_date"]["results"][0]
+    assert entry["status"] == "UP_TO_DATE"
+
+
+@pytest.mark.django_db
 def test_continue_watching_includes_started_but_unfinished_show(api_client, create_user):
     user = create_user()
     api_client.force_authenticate(user=user)

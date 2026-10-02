@@ -33,10 +33,11 @@ export interface MediaItem {
 
 interface Props {
   title: string;
+  subtitle?: string;
   items: MediaItem[];
 }
 
-function HorizontalMediaList({ title, items }: Props) {
+function HorizontalMediaList({ title, subtitle, items }: Props) {
   const router = useRouter();
   const { theme } = useAppTheme();
   const c = theme.colors;
@@ -46,6 +47,7 @@ function HorizontalMediaList({ title, items }: Props) {
   return (
     <View style={styles.container}>
       <Text style={[styles.title, { color: c.textPrimary }]}>{title}</Text>
+      {subtitle && <Text style={{ color: c.textSecondary, fontSize: 13, lineHeight: 19, marginHorizontal: 20, marginBottom: 12 }}>{subtitle}</Text>}
       <View style={{ minHeight: 250 }}>
         <FlashList
           data={items}

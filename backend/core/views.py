@@ -41,6 +41,7 @@ from core.pagination import StandardResultsPagination
 from core.serializers import (
     LEAN_EPISODE_FIELDS,
     ContinueWatchingSerializer,
+    DiscoverAvailabilitySerializer,
     EpisodeInteractionSerializer,
     ImportJobSerializer,
     MovieCacheSerializer,
@@ -80,6 +81,52 @@ class HealthCheckView(APIView):
 
 
 DISCOVER_FEED_CACHE_TTL_SECONDS = 30 * 60  # 30 minutes
+
+
+def discover_availability(request):
+    values = request.query_params.copy()
+    if "region" in values:
+        values["region"] = values["region"].upper()
+    serializer = DiscoverAvailabilitySerializer(data=values)
+    serializer.is_valid(raise_exception=True)
+    return serializer.validated_data
+
+
+class DiscoverProvidersView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        values = discover_availability(request)
+        media_type = request.query_params.get("type", "tv")
+        if media_type not in ("tv", "movie"):
+            return Response({"detail": "Choose shows or movies."}, status=400)
+        try:
+            data = TMDBService().get_discover_providers(media_type, values["region"])
+        except TMDBServiceError:
+            return Response({"detail": "Streaming platforms are temporarily unavailable."}, status=502)
+        return Response({**data, "region": values["region"]})
+
+
+class DiscoverReleasesView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        values = discover_availability(request)
+        media_type = request.query_params.get("type", "tv")
+        if media_type not in ("tv", "movie"):
+            return Response({"detail": "Choose shows or movies."}, status=400)
+        tmdb = TMDBService()
+        try:
+            discover = tmdb.discover_movies if media_type == "movie" else tmdb.discover_tv
+            access = values["monetization"]
+            if media_type == "movie" and "monetization" not in request.query_params:
+                access = "flatrate|free|ads|rent|buy"
+            data = discover(watch_region=values["region"], provider_ids=values.get("providers", ()), monetization=access, recent_releases=True)
+        except TMDBServiceError:
+            return Response({"detail": "Recent streaming releases are temporarily unavailable."}, status=502)
+        # A capped rail, not an unbounded catalogue. TV dates describe recent
+        # episodes; TMDB does not supply dates when a series joins a platform.
+        return Response({"id": "new_streaming", "title": "New Digital Releases" if media_type == "movie" else "New on Streaming", "subtitle": f'{"Includes streaming, rent and buy" if media_type == "movie" else "Series with recent episodes"} · {values["region"]} · Last 30 days', "items": data["results"][:15]})
 
 
 def build_discover_feed_payload(media_type: str) -> dict:
@@ -291,71 +338,82 @@ class DiscoverFilterView(APIView):
 
         tmdb = TMDBService()
 
-        if sort_key == "trending":
-            trending = tmdb.get_trending(
-                media_type=media_type,
-                time_window="week",
-                page=page,
-                include_genre_ids=True,
-                include_original_language=True,
-            )
-            results = trending.get("results", [])
-            if genre_id:
-                results = [r for r in results if genre_id in (r.get("genre_ids") or [])]
-            if anime:
-                results = [
-                    r
-                    for r in results
-                    if ANIME_GENRE_ID in (r.get("genre_ids") or [])
-                    and r.get("original_language") == ANIME_ORIGINAL_LANGUAGE
-                ]
-            elif language:
-                results = [r for r in results if r.get("original_language") == language]
-            for r in results:
-                r.pop("genre_ids", None)
-                r.pop("original_language", None)
+        availability = discover_availability(request)
+        provider_ids = availability.get("providers", ())
+        availability_active = bool(provider_ids or "monetization" in request.query_params)
+        page = max(1, min(page, 500))
 
-            is_filtered = bool(genre_id or anime or language)
-            # TMDB's /trending endpoint has no with_genres/original_language
-            # support, so this filtering happens page-by-page in Python
-            # after the fact — there is no way to know the TRUE cross-page
-            # total without fetching and filtering every one of TMDB's
-            # pages up front. total_results is honest (this page's actual
-            # count, which can legitimately be 0-3 after filtering); raw
-            # trending total_pages, left uncapped, would let the client
-            # "load more" dozens of times past the point where filtered
-            # pages are reliably empty. Capped defensively when a filter is
-            # active — not a real fix (that would need TMDB to support
-            # server-side genre filtering on /trending, which it doesn't),
-            # just a bound on how much wasted pagination this can cause.
-            FILTERED_TRENDING_MAX_PAGES = 20
-            data = {
-                "page": trending.get("page", page),
-                "total_pages": (
-                    min(trending.get("total_pages", 1), FILTERED_TRENDING_MAX_PAGES)
-                    if is_filtered
-                    else trending.get("total_pages", 1)
-                ),
-                "total_results": len(results),
-                "results": results,
-            }
-        else:
-            sort_by = self.SORT_TO_TMDB.get(sort_key, "popularity.desc")
-            min_vote_count = (
-                self.CRITICALLY_ACCLAIMED_MIN_VOTE_COUNT if sort_key == "critically_acclaimed" else 100
-            )
-            discover_kwargs = dict(
-                genre_id=genre_id,
-                sort_by=sort_by,
-                page=page,
-                min_vote_count=min_vote_count,
-                original_language=language,
-                require_anime=anime,
-            )
-            if media_type == "tv":
-                data = tmdb.discover_tv(**discover_kwargs)
+        try:
+            if sort_key == "trending" and not availability_active:
+                trending = tmdb.get_trending(
+                    media_type=media_type,
+                    time_window="week",
+                    page=page,
+                    include_genre_ids=True,
+                    include_original_language=True,
+                )
+                results = trending.get("results", [])
+                if genre_id:
+                    results = [r for r in results if genre_id in (r.get("genre_ids") or [])]
+                if anime:
+                    results = [
+                        r
+                        for r in results
+                        if ANIME_GENRE_ID in (r.get("genre_ids") or [])
+                        and r.get("original_language") == ANIME_ORIGINAL_LANGUAGE
+                    ]
+                elif language:
+                    results = [r for r in results if r.get("original_language") == language]
+                for r in results:
+                    r.pop("genre_ids", None)
+                    r.pop("original_language", None)
+
+                is_filtered = bool(genre_id or anime or language)
+                # TMDB's /trending endpoint has no with_genres/original_language
+                # support, so this filtering happens page-by-page in Python
+                # after the fact — there is no way to know the TRUE cross-page
+                # total without fetching and filtering every one of TMDB's
+                # pages up front. total_results is honest (this page's actual
+                # count, which can legitimately be 0-3 after filtering); raw
+                # trending total_pages, left uncapped, would let the client
+                # "load more" dozens of times past the point where filtered
+                # pages are reliably empty. Capped defensively when a filter is
+                # active — not a real fix (that would need TMDB to support
+                # server-side genre filtering on /trending, which it doesn't),
+                # just a bound on how much wasted pagination this can cause.
+                FILTERED_TRENDING_MAX_PAGES = 20
+                data = {
+                    "page": trending.get("page", page),
+                    "total_pages": (
+                        min(trending.get("total_pages", 1), FILTERED_TRENDING_MAX_PAGES)
+                        if is_filtered
+                        else trending.get("total_pages", 1)
+                    ),
+                    "total_results": len(results),
+                    "results": results,
+                }
             else:
-                data = tmdb.discover_movies(**discover_kwargs)
+                sort_by = self.SORT_TO_TMDB.get(sort_key, "popularity.desc")
+                min_vote_count = (
+                    self.CRITICALLY_ACCLAIMED_MIN_VOTE_COUNT if sort_key == "critically_acclaimed" else 100
+                )
+                discover_kwargs = dict(
+                    genre_id=genre_id,
+                    sort_by=sort_by,
+                    page=page,
+                    min_vote_count=min_vote_count,
+                    original_language=language,
+                    require_anime=anime,
+                )
+                if availability_active:
+                    discover_kwargs.update(provider_ids=provider_ids, watch_region=availability["region"], monetization=availability["monetization"])
+                if media_type == "tv":
+                    data = tmdb.discover_tv(**discover_kwargs)
+                else:
+                    data = tmdb.discover_movies(**discover_kwargs)
+
+        except TMDBServiceError:
+            return Response({"detail": "Discovery is temporarily unavailable. Please try again."}, status=status.HTTP_502_BAD_GATEWAY)
 
         return Response(data, status=status.HTTP_200_OK)
 
@@ -647,6 +705,8 @@ class WatchlistView(APIView):
                 bucket = "up_to_date"
             else:
                 bucket = "to_watch"
+            if bucket != "archived":
+                entry.status = Watchlist.Status.UP_TO_DATE if bucket == "up_to_date" else Watchlist.Status.TO_WATCH
             buckets[bucket].append(entry)
 
         # `?page_size=all` returns every entry in one shot, unpaginated. The

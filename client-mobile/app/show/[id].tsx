@@ -35,7 +35,9 @@ import { ProgressRing } from '../../components/ProgressRing';
 import { ProviderBadge } from '../../components/ProviderBadge';
 import RatingReviewCard from '../../components/RatingReviewCard';
 import { SeasonCard } from '../../components/SeasonCard';
+import SeriesWatchCalculator from '../../components/SeriesWatchCalculator';
 import Snackbar from '../../components/Snackbar';
+import { useDiscoverStore } from '../../store/discoverStore';
 import { api } from '../../lib/api';
 import { hasAired } from '../../lib/dateFormat';
 import { extractErrorMessage } from '../../lib/errors';
@@ -79,6 +81,7 @@ interface ProviderItem {
   provider_id: number;
   provider_name: string;
   logo_path: string | null;
+  access_types?: string[];
 }
 
 const STATUS_LABEL: Record<Show['status'], string> = {
@@ -179,7 +182,7 @@ export default function ShowDetailScreen() {
     const [creditsResult, recsResult, providersResult] = await Promise.allSettled([
       api.get<{ cast: CastMember[]; crew: CrewMember[] }>(`/shows/${tmdbId}/credits/`),
       api.get<{ results: RecommendationItem[] }>(`/shows/${tmdbId}/recommendations/`),
-      api.get<ProviderItem[]>(`/shows/${tmdbId}/watch-providers/`),
+      api.get<ProviderItem[]>(`/shows/${tmdbId}/watch-providers/`, { params: { region: useDiscoverStore.getState().watchRegion } }),
     ]);
 
     if (creditsResult.status === 'fulfilled') {
@@ -687,7 +690,7 @@ export default function ShowDetailScreen() {
 
         {providers.length > 0 && (
           <View style={styles.section}>
-            <Text style={[styles.sectionTitle, { color: c.textPrimary }]}>Where to Watch</Text>
+            <Text style={[styles.sectionTitle, { color: c.textPrimary }]}>Where to Watch · {useDiscoverStore.getState().watchRegion}</Text>
             <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.horizontalList}>
               {providers.map((provider, index) => (
                 <ProviderBadge
@@ -699,6 +702,8 @@ export default function ShowDetailScreen() {
             </ScrollView>
           </View>
         )}
+
+        {show && <SeriesWatchCalculator show={show} entry={watchlistEntry} />}
 
         {displayShow?.total_seasons && displayShow.total_seasons > 0 ? (
         <View style={styles.section}>

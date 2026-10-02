@@ -10,7 +10,6 @@ import React, { useCallback, useEffect } from 'react';
 import { ActivityIndicator, Alert, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
-import GlassSurface from '../../components/GlassSurface';
 import PressableScale from '../../components/PressableScale';
 import { useAppTheme } from '../../lib/theme';
 import { type CustomListItem, useListsStore } from '../../store/listsStore';

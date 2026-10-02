@@ -30,16 +30,14 @@ export function pickNextEpisode(entry: WatchlistEntry): Episode | null {
     ep.air_date
       ? resolveDisplayDateIso(ep.air_date, ep.air_datetime, entry.show.airs_time, entry.show.airs_timezone)
       : null;
-  const airedUnwatched = entry.show.episodes.filter((ep) => {
+  let future: Episode | null = null;
+  for (const ep of entry.show.episodes) {
+    if (ep.is_watched) continue;
     const d = displayDate(ep);
-    return d !== null && d <= todayIso && !ep.is_watched;
-  });
-  if (airedUnwatched.length > 0) return airedUnwatched[0];
-  const future = entry.show.episodes.filter((ep) => {
-    const d = displayDate(ep);
-    return d !== null && d > todayIso && !ep.is_watched;
-  });
-  if (future.length > 0) return future[0];
+    if (d !== null && d <= todayIso) return ep;
+    if (d !== null && future === null) future = ep;
+  }
+  if (future) return future;
   if (entry.show.episodes.length > 0)
     return entry.show.episodes[entry.show.episodes.length - 1];
   return null;
@@ -82,12 +80,15 @@ export interface UpcomingItem {
 
 const PAST_WINDOW_MS = PAST_WINDOW_DAYS * 24 * 60 * 60 * 1000;
 
-export function buildUpcomingItems(entries: WatchlistEntry[]): UpcomingItem[] {
-  const todayIso = todayLocalIso();
-  const nowMs = Date.now();
+export function buildUpcomingItems(entries: WatchlistEntry[], now: Date = new Date()): UpcomingItem[] {
+  const todayIso = todayLocalIso(now);
+  const nowMs = now.getTime();
   const items: UpcomingItem[] = [];
+  const seenShows = new Set<number>();
   for (const entry of entries) {
     const show = entry.show;
+    if (entry.status === 'ARCHIVED' || seenShows.has(show.tmdb_id)) continue;
+    seenShows.add(show.tmdb_id);
     const seen = new Set<string>();
 
     // Missed-but-recently-aired: the Upcoming tab is for what's coming and
@@ -101,21 +102,20 @@ export function buildUpcomingItems(entries: WatchlistEntry[]): UpcomingItem[] {
     // visible instead of being represented by an ancient one that then gets
     // discarded. Once marked watched it stops qualifying on the next
     // recompute — nothing needs to track it as "dismissed".
-    const missed = show.episodes
-      .filter(
-        (ep) =>
-          ep.air_date &&
-          ep.air_date < todayIso &&
-          !ep.is_watched &&
-          nowMs -
-            resolveAirInstant(ep.air_date, ep.air_datetime, show.airs_time, show.airs_timezone).getTime() <=
-            PAST_WINDOW_MS
-      )
-      .sort((a, b) => {
-        if (a.air_date! !== b.air_date!) return a.air_date! < b.air_date! ? -1 : 1;
-        if (a.season_number !== b.season_number) return a.season_number - b.season_number;
-        return a.episode_number - b.episode_number;
-      })[0];
+    let missed: Episode | null = null;
+    let missedInstant = Infinity;
+    for (const ep of show.episodes) {
+      // Record every cached coordinate, including watched episodes. A stale
+      // next_episode_to_air summary must never resurrect a watched release.
+      seen.add(`${ep.season_number}-${ep.episode_number}`);
+      if (!ep.air_date || ep.is_watched) continue;
+      const displayDate = resolveDisplayDateIso(ep.air_date, ep.air_datetime, show.airs_time, show.airs_timezone);
+      const instant = resolveAirInstant(ep.air_date, ep.air_datetime, show.airs_time, show.airs_timezone).getTime();
+      if (displayDate < todayIso && nowMs - instant <= PAST_WINDOW_MS && instant < missedInstant) {
+        missed = ep;
+        missedInstant = instant;
+      }
+    }
     if (missed) {
       seen.add(`${missed.season_number}-${missed.episode_number}`);
       items.push({
@@ -136,7 +136,8 @@ export function buildUpcomingItems(entries: WatchlistEntry[]): UpcomingItem[] {
     }
 
     for (const episode of show.episodes) {
-      if (!episode.air_date || episode.air_date < todayIso || episode.is_watched) continue;
+      if (!episode.air_date || episode.is_watched) continue;
+      if (resolveDisplayDateIso(episode.air_date, episode.air_datetime, show.airs_time, show.airs_timezone) < todayIso) continue;
       seen.add(`${episode.season_number}-${episode.episode_number}`);
       items.push({
         key: String(episode.tmdb_id),
@@ -164,7 +165,7 @@ export function buildUpcomingItems(entries: WatchlistEntry[]): UpcomingItem[] {
     const key = `${show.next_episode_season_number}-${show.next_episode_number}`;
     if (
       show.next_episode_air_date &&
-      show.next_episode_air_date >= todayIso &&
+      resolveDisplayDateIso(show.next_episode_air_date, show.next_episode_air_datetime, show.airs_time, show.airs_timezone) >= todayIso &&
       show.next_episode_season_number != null &&
       show.next_episode_number != null &&
       !seen.has(key)

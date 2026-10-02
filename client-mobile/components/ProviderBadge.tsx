@@ -10,9 +10,10 @@ const LOGO_BASE_URL = 'https://image.tmdb.org/t/p/w92';
 export interface ProviderBadgeProps {
   providerName: string;
   logoPath: string | null;
+  accessTypes?: string[];
 }
 
-function ProviderBadgeComponent({ providerName, logoPath }: ProviderBadgeProps) {
+function ProviderBadgeComponent({ providerName, logoPath, accessTypes }: ProviderBadgeProps) {
   const { theme } = useAppTheme();
   const c = theme.colors;
   return (
@@ -27,9 +28,12 @@ function ProviderBadgeComponent({ providerName, logoPath }: ProviderBadgeProps) 
       ) : (
         <View style={[styles.logoFallback, { backgroundColor: c.bgElevated }]} />
       )}
-      <Text style={[styles.name, { color: c.textPrimary }]} numberOfLines={1}>
-        {providerName}
-      </Text>
+      <View style={{ flexShrink: 1 }}>
+        <Text style={[styles.name, { color: c.textPrimary }]}>{providerName}</Text>
+        {accessTypes?.length ? <Text style={{ color: c.textSecondary, fontSize: 11 }}>
+          {accessTypes.map((access) => ({ flatrate: 'Subscription', free: 'Free', ads: 'With ads', rent: 'Rent', buy: 'Buy' })[access] ?? access).join(' · ')}
+        </Text> : null}
+      </View>
     </View>
   );
 }
@@ -38,6 +42,7 @@ export const ProviderBadge = memo(ProviderBadgeComponent);
 
 const styles = StyleSheet.create({
   badge: {
+    maxWidth: '100%',
     flexDirection: 'row',
     alignItems: 'center',
     gap: 8,

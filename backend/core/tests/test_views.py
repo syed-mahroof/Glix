@@ -52,6 +52,21 @@ def test_watchlist_unauthenticated(api_client):
     assert response.status_code == 401
 
 
+@pytest.mark.django_db
+def test_cached_recommendations_exclude_titles_added_after_cache_warmed(api_client, create_user):
+    user = create_user()
+    api_client.force_authenticate(user=user)
+    show = CachedShow.objects.create(tmdb_id=12345, title="Just added")
+    Watchlist.objects.create(user=user, show=show)
+    cached = [{"tmdb_id": 12345, "title": "Just added"}, {"tmdb_id": 54321, "title": "Still available"}]
+    with patch("core.recommendations_views.safe_cache_get", return_value=cached), patch("core.recommendations_views.TMDBService") as tmdb:
+        response = api_client.get('/api/v1/recommendations/for-you/', {"type": "tv"})
+    assert response.status_code == 200
+    assert [item["tmdb_id"] for item in response.data] == [54321]
+    assert len(cached) == 2
+    tmdb.assert_not_called()
+
+
 # ── Phase F: full-delete Remove from Watchlist ────────────────────────────
 
 @pytest.mark.django_db
