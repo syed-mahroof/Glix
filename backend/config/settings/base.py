@@ -175,6 +175,7 @@ SIMPLE_JWT = {
 
 # TMDB proxy (see core/services.py)
 TMDB_API_KEY = os.environ.get("TMDB_API_KEY", "")
+WATCHMODE_API_KEY = os.environ.get("WATCHMODE_API_KEY", "")
 
 # Sign in with Google/Apple (core/social_auth.py). These are the accepted
 # ID-token audiences, not secrets — comma-separated so ops can add e.g. a

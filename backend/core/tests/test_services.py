@@ -8,18 +8,15 @@ from core.models import CachedEpisode, CachedShow
 from core.services import TMDBService
 
 @pytest.mark.django_db
-@patch("core.services.requests.get")
+@patch("core.services.requests.Session.get")
 def test_tmdb_service_proxy(mock_get):
     mock_get.return_value.status_code = 200
     mock_get.return_value.json.return_value = {"id": 1, "name": "Test Show", "status": "Ended", "genres": [], "seasons": []}
 
-    try:
-        result = TMDBService.get_show_details(1)
-    except Exception:
-        pass
-    # The actual implementation caches things, so if it's the first time it will hit the API
-    # Since this requires DB for CachedShow, we just mark it django_db
-    pass
+    result = TMDBService(api_key="test-key").get_show_details(1)
+    assert result.title == "Test Show"
+    assert CachedShow.objects.get(pk=1) == result
+    mock_get.assert_called_once()
 
 
 # ── A1: next_episode_air_datetime must not go stale when TMDB advances

@@ -13,7 +13,7 @@ import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { BadgeUnlockModal } from '../components/BadgeUnlockModal';
 import CompletionCelebration from '../components/CompletionCelebration';
 import ErrorBoundary from '../components/ErrorBoundary';
-import { api, getAccessToken, setSessionExpiredHandler } from '../lib/api';
+import { api, getAccessToken, setSessionExpiredHandler, subscribeAuthChanges } from '../lib/api';
 import { BADGE_META } from '../lib/badges';
 import { registerForPushNotificationsAsync } from '../lib/notifications';
 import { flushPersist } from '../lib/persistStorage';
@@ -98,6 +98,9 @@ function RootLayoutInner() {
   const router = useRouter();
   const [isAuthChecked, setIsAuthChecked] = useState(false);
   const [isAuthenticated, setIsAuthenticated] = useState(false);
+  // Root remains mounted across /login → /loading → tabs. A boot-only
+  // auth check left its widget background-sync guard false after login.
+  useEffect(() => subscribeAuthChanges(setIsAuthenticated), []);
 
   // "Akony" wordmark font (Phase J) — no custom font asset was loaded
   // anywhere in this app before this phase, so this is genuinely new
@@ -191,14 +194,16 @@ function RootLayoutInner() {
     // capacity. The update check is never boot-critical — deferred past
     // the initial interaction burst (InteractionManager) plus a short fixed
     // delay so it lands well after those requests are underway.
+    let updateTimer: ReturnType<typeof setTimeout> | undefined;
+    let canceled = false;
     const task = InteractionManager.runAfterInteractions(() => {
-      setTimeout(() => {
+      updateTimer = setTimeout(() => {
         (async () => {
           try {
             const result = await Updates.checkForUpdateAsync();
-            if (result.isAvailable) {
+            if (!canceled && result.isAvailable) {
               await Updates.fetchUpdateAsync();
-              await Updates.reloadAsync();
+              if (!canceled) await Updates.reloadAsync();
             }
           } catch {
             // best-effort — app just continues on the bundle it already has
@@ -206,7 +211,7 @@ function RootLayoutInner() {
         })();
       }, 3000);
     });
-    return () => task.cancel();
+    return () => { canceled = true; task.cancel(); if (updateTimer !== undefined) clearTimeout(updateTimer); };
   }, []);
 
   useEffect(() => {
@@ -222,9 +227,8 @@ function RootLayoutInner() {
     // the OS potentially suspends the process. Gated on auth so a
     // logged-out background doesn't push stale/empty pre-login state.
     if (!isAuthenticated) return;
-    // Also flush once on mount: the persisted store is rehydrated by now, so
-    // even a cold start with the backend unreachable pushes the last known
-    // watchlist to the widget instead of leaving whatever it had.
+    // Attempt a mount flush. syncWidgetData guards against unresolved or
+    // failed hydration so an initializing store cannot erase saved content.
     try {
       useWatchStore.getState().syncWidgetData();
     } catch {

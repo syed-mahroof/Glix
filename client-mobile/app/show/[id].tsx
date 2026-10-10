@@ -703,7 +703,7 @@ export default function ShowDetailScreen() {
           </View>
         )}
 
-        {show && <SeriesWatchCalculator show={show} entry={watchlistEntry} />}
+        {show && <View style={{ marginTop: 20 }}><SeriesWatchCalculator show={show} entry={watchlistEntry} /></View>}
 
         {displayShow?.total_seasons && displayShow.total_seasons > 0 ? (
         <View style={styles.section}>

@@ -12,10 +12,21 @@ from core.services import TMDBService, TMDBServiceError
 
 @pytest.fixture
 def client(db):
+    from django.core.cache import cache
+    cache.clear()
     user = get_user_model().objects.create_user(username="availability", password="test-password")
     client = APIClient()
     client.force_authenticate(user)
     return client
+
+
+def test_new_releases_combines_platform_genre_and_region(client):
+    with patch("core.views.TMDBService") as service:
+        service.return_value.discover_movies.return_value = {"results": [], "page": 1, "total_pages": 1}
+        response = client.get(reverse("discover-filter"), {"type": "movie", "providers": "8", "region": "IN", "genre": "35", "recent": "true"})
+    assert response.status_code == 200
+    assert service.return_value.discover_movies.call_args.kwargs["recent_releases"] is True
+    assert service.return_value.discover_movies.call_args.kwargs["genre_id"] == 35
 
 
 def test_combined_movie_availability_params():

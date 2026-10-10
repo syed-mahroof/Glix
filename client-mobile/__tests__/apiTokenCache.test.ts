@@ -107,4 +107,28 @@ describe('getAccessToken / setTokens / clearTokens', () => {
     await expect(getAccessToken()).resolves.toBeNull();
     expect(mockGetItemAsync).not.toHaveBeenCalled();
   });
+
+  it.each(['rotate', 'logout'])('ignores a stale native token read after %s', async (action) => {
+    let resolve: (value: string) => void = () => {};
+    mockGetItemAsync.mockReturnValueOnce(new Promise<string>((done) => { resolve = done; }));
+    const { getAccessToken, setTokens, clearTokens } = require('../lib/api');
+    const read = getAccessToken();
+    if (action === 'rotate') await setTokens('rotated', 'refresh');
+    else await clearTokens();
+    resolve('stale');
+    await expect(read).resolves.toBe(action === 'rotate' ? 'rotated' : null);
+    await expect(getAccessToken()).resolves.toBe(action === 'rotate' ? 'rotated' : null);
+  });
+
+  it('updates root auth guards on login/logout and releases the subscription', async () => {
+    const { subscribeAuthChanges, setTokens, clearTokens } = require('../lib/api');
+    const listener = jest.fn();
+    const unsubscribe = subscribeAuthChanges(listener);
+    await setTokens('login-token');
+    await clearTokens();
+    expect(listener.mock.calls).toEqual([[true], [false]]);
+    unsubscribe();
+    await setTokens('another-token');
+    expect(listener).toHaveBeenCalledTimes(2);
+  });
 });

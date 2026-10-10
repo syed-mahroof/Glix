@@ -84,6 +84,18 @@ def test_dashboard_reports_rewatch_tile_separately_from_total(api_client, create
     # total_episodes_watched (WatchState-derived) must NOT move — a rewatch
     # tick is not a new distinct episode watched.
     assert after.data["total_episodes_watched"] == 2
+    assert after.data["series_minutes_watched"] == 90
+    assert after.data["series_daily_pace"] == 0.1
+    movie = MovieCache.objects.create(tmdb_id=9499, title="Separate movie", runtime_minutes=120, release_date=timezone.now().date() - timedelta(days=1))
+    assert api_client.post(reverse("movies-toggle"), {"movie_id": movie.pk}).status_code == 200
+    mixed = api_client.get(reverse("analytics-dashboard"))
+    assert mixed.data["series_minutes_watched"] == 90
+    assert mixed.data["total_minutes_watched"] == 210
+    assert api_client.post(reverse("movie-rewatch", args=[movie.pk])).status_code == 201
+    movies = api_client.get(reverse("analytics-movies"))
+    assert movies.data["total_runtime_minutes"] == 240
+    assert movies.data["rewatch_count"] == 1
+    assert movies.data["movies_watched"] == 1
 
 
 @pytest.mark.django_db

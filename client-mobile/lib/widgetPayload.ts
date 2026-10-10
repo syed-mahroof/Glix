@@ -96,8 +96,10 @@ export function buildWidgetPayload(
   // "Next up" per show — same chronological rule the Shows Hub row uses
   // (earliest aired-unwatched, else nearest future episode), not just "first
   // unwatched in array order". episode_id deep-links straight to the episode.
-  const watchlist: WidgetWatchlistItem[] = nextUpEntries.slice(0, WATCHLIST_CAP).map((entry) => {
-    const nextEp = pickNextEpisode(entry);
+  const watchlist: WidgetWatchlistItem[] = nextUpEntries
+    .map((entry) => ({ entry, nextEp: pickNextEpisode(entry) }))
+    .filter(({ entry, nextEp }) => nextEp !== null || entry.show.episodes.length === 0)
+    .slice(0, WATCHLIST_CAP).map(({ entry, nextEp }) => {
     return {
       id: entry.show.tmdb_id,
       episode_id: nextEp?.tmdb_id ?? null,
@@ -112,7 +114,7 @@ export function buildWidgetPayload(
   // has nowhere to put those, so the todayIso lower bound keeps them out.
   const todayIso = todayLocalIso(now);
   const windowEndIso = todayLocalIso(new Date(now.getTime() + UPCOMING_WINDOW_DAYS * 86400000));
-  const upcoming: WidgetUpcomingItem[] = buildUpcomingItems(allEntries)
+  const upcoming: WidgetUpcomingItem[] = buildUpcomingItems(allEntries, now)
     .filter((item) => {
       // Resolved display date, not the raw airDate string — an item whose
       // true air instant crosses local midnight relative to its show's own

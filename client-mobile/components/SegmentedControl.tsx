@@ -1,13 +1,9 @@
 import React from 'react';
+import * as Haptics from 'expo-haptics';
 import { StyleSheet, Text, View } from 'react-native';
 
 import PressableScale from './PressableScale';
 import { useAppTheme } from '../lib/theme';
-
-export interface Segment {
-  value: string;
-  label: string;
-}
 
 interface SegmentedControlProps<T extends string> {
   segments: { value: T; label: string }[];
@@ -34,7 +30,11 @@ export function SegmentedControl<T extends string>({
             accessibilityState={{ selected: isActive }}
             key={segment.value}
             style={[styles.segment, isActive && { backgroundColor: c.accentFill }]}
-            onPress={() => onValueChange(segment.value)}
+            onPress={() => {
+              if (isActive) return;
+              void Haptics.selectionAsync().catch(() => {});
+              onValueChange(segment.value);
+            }}
           >
             <Text style={[styles.segmentText, { color: isActive ? c.onAccent : c.textSecondary }]}>
               {segment.label}
@@ -51,18 +51,18 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     borderRadius: 12,
     borderWidth: StyleSheet.hairlineWidth,
-    padding: 4,
+    padding: 2,
   },
   segment: {
     flex: 1,
     minHeight: 48,
     justifyContent: 'center',
-    paddingVertical: 8,
+    paddingVertical: 6,
     borderRadius: 9,
     alignItems: 'center',
   },
   segmentText: {
-    fontSize: 13,
+    fontSize: 12,
     fontWeight: '600',
   },
 });

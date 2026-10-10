@@ -14,6 +14,7 @@ import React, {
 } from 'react';
 import {
   ActivityIndicator,
+  Linking,
   RefreshControl,
   StyleSheet,
   Text,
@@ -95,7 +96,7 @@ function AnimatedSegmentControl({
   const { theme } = useAppTheme();
   const c = theme.colors;
   const { width } = useWindowDimensions();
-  const segmentWidth = (width - 46) / 2;
+  const segmentWidth = (width - 44) / 2;
   const indicatorX = useSharedValue(value === 'tv' ? 0 : segmentWidth);
 
   useEffect(() => {
@@ -152,15 +153,15 @@ const seg = StyleSheet.create({
     marginHorizontal: 20,
     borderRadius: 14,
     borderWidth: StyleSheet.hairlineWidth,
-    padding: 3,
+    padding: 2,
     position: 'relative',
     overflow: 'hidden',
   },
   indicator: {
     position: 'absolute',
-    top: 3,
-    left: 3,
-    bottom: 3,
+    top: 2,
+    left: 2,
+    bottom: 2,
     borderRadius: 11,
   },
   tab: {
@@ -168,12 +169,12 @@ const seg = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     gap: 6,
-    paddingVertical: 12,
+    paddingVertical: 8,
     minHeight: 48,
     zIndex: 1,
   },
   tabText: {
-    fontSize: 14,
+    fontSize: 13,
     fontWeight: '700',
     letterSpacing: 0.2,
   },
@@ -678,7 +679,15 @@ function DiscoverFeedBodyComponent({
           into one shared list regardless of segment). */}
       <HorizontalMediaList title="For You" items={forYouItems} />
 
-      {releases && <HorizontalMediaList title={releases.title} subtitle={releases.subtitle} items={releases.items} />}
+      {releases && <HorizontalMediaList title={releases.title} subtitle={`${releases.subtitle}${releases.is_stale ? ' · Saved results' : ''}`} items={releases.items} />}
+      {!!releases?.sources?.some((source) => source !== 'tmdb') && <View style={{ flexDirection: 'row', paddingHorizontal: 20, gap: 12 }}>
+        {releases.sources.filter((source) => source !== 'tmdb').map((source) => <PressableScale key={source}
+          accessibilityRole="link" accessibilityLabel={`Data source: ${source === 'tvmaze' ? 'TVmaze' : 'Watchmode'}`}
+          style={{ minHeight: 48, justifyContent: 'center' }}
+          onPress={() => { void Linking.openURL(source === 'tvmaze' ? 'https://www.tvmaze.com' : 'https://www.watchmode.com').catch(() => {}); }}>
+          <Text style={{ fontSize: 11, color: c.textTertiary }}>Data: {source === 'tvmaze' ? 'TVmaze' : 'Watchmode'}</Text>
+        </PressableScale>)}
+      </View>}
       {releasesError && <PressableScale accessibilityRole="button" onPress={onRetryReleases} style={{ padding: 20 }}><Text style={{ color: c.textSecondary }}>Streaming releases unavailable. Tap to retry.</Text></PressableScale>}
 
       {/* Sections */}
@@ -732,6 +741,7 @@ export default function DiscoverScreen() {
   const releasesError = useDiscoverStore((s) => s.releasesError);
   const watchRegion = useDiscoverStore((s) => s.watchRegion);
   const selectedProviderIds = useDiscoverStore((s) => s.selectedProviderIds);
+  const recentReleases = useDiscoverStore((s) => s.recentReleases);
   const providers = useDiscoverStore((s) => s.providerOptions);
   const selectedGenreId = useDiscoverStore((s) => s.selectedGenreId);
   const searchError = useDiscoverStore((s) => s.searchError);
@@ -937,6 +947,7 @@ export default function DiscoverScreen() {
           <View style={{ paddingHorizontal: 20, paddingVertical: 12, flexDirection: 'row', gap: 12, alignItems: 'center' }}>
             <Text style={{ color: c.textSecondary, flex: 1, fontSize: 13 }}>{[
               activeSegment === 'movie' ? 'Movies' : 'Shows',
+              recentReleases ? 'New releases' : null,
               (activeSegment === 'movie' ? MOVIE_GENRES : TV_GENRES).find((genre) => genre.id === selectedGenreId)?.name,
               selectedProviderIds.length ? providers.filter((provider) => selectedProviderIds.includes(provider.provider_id)).map((provider) => provider.provider_name).join(' / ') || 'Selected platforms' : null,
               watchRegion,

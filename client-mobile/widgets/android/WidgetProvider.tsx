@@ -7,35 +7,7 @@ import { api } from '../../lib/api';
 import { buildWidgetPayload } from '../../lib/widgetPayload';
 import type { WidgetPayload } from '../../lib/widgetPayload';
 import type { WatchlistEntry } from '../../store/watchStore';
-
-// Attempt a safe import of SharedPreferences — the native module is only
-// available after a full native build (EAS / expo run:android), so during
-// Expo Go / dev-client sessions it may be null. We guard every access.
-let SharedPreferences: any = null;
-try {
-  // eslint-disable-next-line @typescript-eslint/no-var-requires
-  SharedPreferences = require('react-native-shared-preferences').default;
-} catch (_e) {
-  // not yet linked — silently continue without widget data persistence
-}
-
-async function readSharedPreferences(): Promise<WidgetPayload | null> {
-  if (!SharedPreferences) return null;
-  return new Promise<WidgetPayload | null>((resolve) => {
-    try {
-      SharedPreferences.getItem('widgetData', (val: string | null) => {
-        if (!val) return resolve(null);
-        try {
-          resolve(JSON.parse(val));
-        } catch {
-          resolve(null);
-        }
-      });
-    } catch {
-      resolve(null);
-    }
-  });
-}
+import { readWidgetSnapshot, writeWidgetSnapshot } from '../../lib/widgetStorage';
 
 /** Fallback source: the Zustand persist blob, which already holds the full
  *  watchlist and survives app kills independently of the SharedPreferences
@@ -64,11 +36,9 @@ async function readPersistedStore(): Promise<WidgetPayload | null> {
  *  never falls through — the stale watchlist behind it belongs to the
  *  previous account. */
 async function readWidgetData(): Promise<WidgetPayload | null> {
-  const cached = await readSharedPreferences();
-  if (cached && (cached.loggedOut || (cached.watchlist?.length ?? 0) + (cached.upcoming?.length ?? 0) > 0)) {
-    return cached;
-  }
-  return (await readPersistedStore()) ?? cached;
+  // An empty snapshot is also authoritative: falling through would restore
+  // releases removed by the latest watch mutation from an older store blob.
+  return (await readWidgetSnapshot()) ?? (await readPersistedStore());
 }
 
 interface WatchlistBucketsResponse {
@@ -84,21 +54,6 @@ interface WatchlistBucketsResponse {
 // read below instead of the whole redraw getting killed mid-request.
 const BACKGROUND_FETCH_TIMEOUT_MS = 15000;
 
-function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
-  return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error('widget background fetch timed out')), ms);
-    promise.then(
-      (value) => {
-        clearTimeout(timer);
-        resolve(value);
-      },
-      (err) => {
-        clearTimeout(timer);
-        reject(err);
-      }
-    );
-  });
-}
 
 /** Genuinely refreshes the widget's data over the network when the OS wakes
  *  this headless task. Previously widgetTaskHandler only ever re-rendered
@@ -112,20 +67,19 @@ function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
  *  tripping) so the caller falls back to the cached read instead of
  *  crashing the redraw. */
 async function fetchFreshWidgetData(): Promise<WidgetPayload | null> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), BACKGROUND_FETCH_TIMEOUT_MS);
   try {
-    const response = await withTimeout(
-      api.get<WatchlistBucketsResponse>('/watchlist/?page_size=all'),
-      BACKGROUND_FETCH_TIMEOUT_MS
-    );
+    const response = await api.get<WatchlistBucketsResponse>('/watchlist/?page_size=all', {
+      signal: controller.signal, timeout: BACKGROUND_FETCH_TIMEOUT_MS,
+    });
     const { to_watch, up_to_date } = response.data;
     const entries = [...to_watch.results, ...up_to_date.results];
-    const payload = buildWidgetPayload(to_watch.results, entries);
-    if (SharedPreferences) {
-      SharedPreferences.setItem('widgetData', JSON.stringify(payload));
-    }
-    return payload;
+    return buildWidgetPayload(to_watch.results, entries);
   } catch {
     return null;
+  } finally {
+    clearTimeout(timer);
   }
 }
 
@@ -147,7 +101,8 @@ export async function widgetTaskHandler(props: WidgetTaskHandlerProps) {
     // mid-drag), so it redraws from whatever's already cached rather than
     // adding a network round trip to every resize frame.
     const shouldRefetch = props.widgetAction === 'WIDGET_UPDATE' || props.widgetAction === 'WIDGET_ADDED';
-    const data = (shouldRefetch ? await fetchFreshWidgetData() : null) ?? (await readWidgetData());
+    const startedAt = Date.now();
+    const cached = await readWidgetData();
     const { widgetName } = props.widgetInfo;
 
     // props.renderWidget is the API that actually fulfils the pending render
@@ -156,16 +111,25 @@ export async function widgetTaskHandler(props: WidgetTaskHandlerProps) {
     // the specific instance the OS was waiting on — so a resize (which fires
     // WIDGET_RESIZED with the new dimensions) frequently left the widget
     // showing its old, wrongly-sized layout or nothing at all.
-    switch (widgetName) {
-      case 'WatchlistWidget':
-        props.renderWidget(<WatchlistWidget data={data} />);
-        break;
-      case 'UpcomingWidget':
-        props.renderWidget(<UpcomingWidget data={data} />);
-        break;
-      default:
-        break;
+    const render = (data: WidgetPayload | null) => {
+      if (widgetName === 'WatchlistWidget') props.renderWidget(<WatchlistWidget data={data} />);
+      if (widgetName === 'UpcomingWidget') props.renderWidget(<UpcomingWidget data={data} />);
+    };
+    // Resize always draws immediately from storage. Scheduled updates paint
+    // cached content before attempting a potentially cold backend request.
+    render(cached);
+    if (!shouldRefetch || cached?.loggedOut) return;
+    const fresh = await fetchFreshWidgetData();
+    if (!fresh) return;
+    const latest = await readWidgetSnapshot();
+    // A foreground watch mutation or logout can finish during the fetch.
+    // Never replace that newer snapshot with an older network response.
+    if (latest && (latest.loggedOut || Date.parse(latest.syncedAt) > startedAt)) {
+      render(latest);
+      return;
     }
+    await writeWidgetSnapshot(fresh);
+    render(fresh);
   } catch {
     // Called directly by the native module on every OS-triggered redraw
     // (resize, updatePeriodMillis tick) — a thrown/rejected step here must

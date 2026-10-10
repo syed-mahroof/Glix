@@ -8,6 +8,7 @@
 // mislabeling the right one.
 
 import { buildUpcomingItems, pickNextEpisode } from '../lib/upcoming';
+import { buildWidgetPayload } from '../lib/widgetPayload';
 import type { Episode, Show, WatchlistEntry } from '../store/watchStore';
 
 function makeEpisode(overrides: Partial<Episode>): Episode {
@@ -64,6 +65,17 @@ function makeEntry(episodes: Episode[], showOverrides: Partial<Show> = {}): Watc
 }
 
 describe('pickNextEpisode', () => {
+  it('never offers the watched finale even when season coverage or counts are stale', () => {
+    const entry = makeEntry([makeEpisode({ is_watched: true })], { total_seasons: 2, total_episodes: 8 });
+    expect(pickNextEpisode(entry)).toBeNull();
+    expect(buildWidgetPayload([entry]).watchlist).toEqual([]);
+  });
+
+  it('keeps an unwatched undated episode and genuinely missing-data shows visible', () => {
+    const entry = makeEntry([makeEpisode({ air_date: null })]);
+    expect(pickNextEpisode(entry)?.tmdb_id).toBe(1);
+    expect(buildWidgetPayload([makeEntry([])]).watchlist).toHaveLength(1);
+  });
   it('resolves the real air instant instead of trusting the raw air_date string — the actual bug fixed', () => {
     // Both episodes carry the SAME long-past raw air_date. Under the old
     // (buggy) comparison, both would qualify as "aired and unwatched",

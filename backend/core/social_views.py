@@ -12,7 +12,6 @@ following all 404 — deliberately indistinguishable from "user does not
 exist" so a private account can't be enumerated by response shape.
 """
 
-from collections import defaultdict
 from datetime import timedelta
 
 from django.contrib.auth import get_user_model

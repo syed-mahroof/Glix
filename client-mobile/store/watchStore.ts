@@ -39,25 +39,16 @@ let watchMutationVersion = 0;
 const pendingEpisodeIds = new Set<number>();
 let concurrentWatchMutations = false;
 let needsWatchReconciliation = false;
+let widgetWatchlistConfirmed = false;
+let widgetSignedOut = false;
+let yearReviewFetchSeq = 0;
 import { extractErrorMessage } from '../lib/errors';
 import { Platform } from 'react-native';
 import { requestWidgetUpdate } from 'react-native-android-widget';
 import { buildWidgetPayload } from '../lib/widgetPayload';
+import { writeWidgetSnapshot } from '../lib/widgetStorage';
 import { WatchlistWidget as AndroidWatchlistWidget } from '../widgets/android/WatchlistWidget';
 import { UpcomingWidget as AndroidUpcomingWidget } from '../widgets/android/UpcomingWidget';
-
-// The native module is only available after a full native build (EAS /
-// expo run:android) — null during Expo Go / dev-client sessions. Guarded
-// the same way as widgets/android/WidgetProvider.tsx's own safe require;
-// a plain top-level `import` here left this module's own setItem call
-// unguarded even though WidgetProvider.tsx's copy was already fixed.
-let SharedPreferences: any = null;
-try {
-  // eslint-disable-next-line @typescript-eslint/no-var-requires
-  SharedPreferences = require('react-native-shared-preferences').default;
-} catch (_e) {
-  // not yet linked — silently continue without widget data persistence
-}
 
 // iOS widgets (expo-widgets) push data via Widget.updateSnapshot() rather
 // than shared file storage — this only resolves on iOS after a native
@@ -392,6 +383,9 @@ export interface WatchTimeSummary {
 }
 
 export interface AnalyticsDashboard {
+  series_minutes_watched?: number;
+  series_hours_watched?: number;
+  series_daily_pace?: number;
   total_episodes_watched: number;
   total_shows_tracked: number;
   total_minutes_watched: number;
@@ -477,6 +471,52 @@ export interface YearReview {
   biggest_week: string | null;
   top_shows: TopShow[];
   top_genres: { genre: string; count: number }[];
+  timezone?: string;
+  is_year_to_date?: boolean;
+  available_years?: number[];
+  minutes_watched?: number;
+  series_hours?: number;
+  movie_hours?: number;
+  movies_watched?: number;
+  first_watch_episodes?: number;
+  first_watch_movies?: number;
+  episode_rewatches?: number;
+  movie_rewatches?: number;
+  unique_shows?: number;
+  unique_movies?: number;
+  active_days?: number;
+  minutes_per_active_day?: number;
+  unknown_runtime_watches?: number;
+  busiest_day?: { date: string; watches: number } | null;
+  favorite_weekday?: string | null;
+  rated_titles?: number;
+  average_rating?: number | null;
+  top_movies?: YearReviewTitle[];
+  watched_shows?: YearReviewTitle[];
+  watched_movies?: YearReviewTitle[];
+  months?: YearReviewMonth[];
+}
+
+export interface YearReviewTitle extends TopShow {
+  media_type: 'tv' | 'movie';
+  minutes_watched: number;
+  watches: number;
+  rewatches: number;
+  first_watched: string;
+  last_watched: string;
+  rating: number | null;
+}
+
+export interface YearReviewMonth {
+  month: number;
+  label: string;
+  series_minutes: number;
+  movie_minutes: number;
+  episodes: number;
+  movies: number;
+  rewatches: number;
+  top_show: { tmdb_id: number; title: string } | null;
+  top_movie: { tmdb_id: number; title: string } | null;
 }
 
 export interface MonthlySummaryItem {
@@ -564,6 +604,8 @@ export interface MovieAnalytics {
   movies_tracked: number;
   completion_pct: number;
   total_runtime_minutes: number;
+  rewatch_count?: number;
+  rewatch_minutes?: number;
   average_runtime_minutes: number;
   watched_this_year: number;
   longest_movie: LongestMovie | null;
@@ -601,6 +643,8 @@ interface AnalyticsSlice {
   isLoadingMovieAnalytics: boolean;
   streak: StreakData | null;
   yearReview: YearReview | null;
+  isLoadingYearReview: boolean;
+  yearReviewError: string | null;
   monthlyRecap: MonthlySummaryItem[];
   achievements: AchievementItem[];
   completion: CompletionData | null;
@@ -907,6 +951,8 @@ export const useWatchStore = create<WatchStoreState>()(
   isLoadingMovieAnalytics: false,
   streak: null,
   yearReview: null,
+  isLoadingYearReview: false,
+  yearReviewError: null,
   monthlyRecap: [],
   achievements: [],
   completion: null,
@@ -938,6 +984,8 @@ export const useWatchStore = create<WatchStoreState>()(
         return;
       }
       set({ watchlist: reconcileWatchlistBuckets(response.data), isLoadingWatchlist: false });
+      widgetWatchlistConfirmed = true;
+      widgetSignedOut = false;
       get().syncWidgetData();
     } catch (error) {
       if (seq !== watchlistFetchSeq) return;
@@ -1443,6 +1491,7 @@ export const useWatchStore = create<WatchStoreState>()(
       // A freshly-added show belongs in the "Next Up" widget immediately —
       // without this it silently stayed missing until some other action
       // happened to trigger a fetchWatchlist()/toggle elsewhere.
+      widgetWatchlistConfirmed = true;
       get().syncWidgetData();
       return true;
     } catch (error) {
@@ -1479,6 +1528,7 @@ export const useWatchStore = create<WatchStoreState>()(
         data: { show_id: showId },
       });
       get().fetchProfile();
+      widgetWatchlistConfirmed = true;
       get().syncWidgetData();
       const data = response.data;
       return {
@@ -1625,9 +1675,11 @@ export const useWatchStore = create<WatchStoreState>()(
     // this can only shrink the request, never silently drop a real one.
     const requestedIds = new Set(episodeIds);
     const alreadyMatching = new Set<number>();
+    const knownRequestedIds = new Set<number>();
     for (const bucket of Object.values(previousWatchlist)) {
       for (const entry of bucket.results) {
         for (const ep of entry.show.episodes) {
+          if (requestedIds.has(ep.tmdb_id)) knownRequestedIds.add(ep.tmdb_id);
           if (requestedIds.has(ep.tmdb_id) && ep.is_watched === watched) {
             alreadyMatching.add(ep.tmdb_id);
           }
@@ -1767,6 +1819,9 @@ export const useWatchStore = create<WatchStoreState>()(
         episode_ids: idsToSend,
         watched,
       });
+      // Catch-up can include predecessors the server cached after this
+      // screen loaded. Reconcile their counts/history from the server.
+      if (idsToSend.some((id) => !knownRequestedIds.has(id))) needsWatchReconciliation = true;
       if (response.data.skipped_unaired_ids?.length) {
         const skipped = new Set(response.data.skipped_unaired_ids);
         set((state: WatchStoreState) => ({ ...rollbackEpisodes(state, previousWatchlist, previousHistory, skipped, watchedAtIso), error: `${skipped.size} episode(s) haven't aired yet and were not marked watched.` }));
@@ -1844,13 +1899,18 @@ export const useWatchStore = create<WatchStoreState>()(
   },
 
   fetchYearReview: async (year?: number) => {
-    set({ isLoadingAnalytics: true, analyticsError: null });
+    const seq = ++yearReviewFetchSeq;
+    set({ isLoadingYearReview: true, yearReviewError: null });
     try {
-      const params = year ? { year } : {};
+      let timezone = 'UTC';
+      try { timezone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'; } catch { /* UTC fallback */ }
+      const params = { ...(year ? { year } : {}), timezone };
       const res = await api.get<YearReview>('/analytics/year-review/', { params });
-      set({ yearReview: res.data, isLoadingAnalytics: false });
+      if (seq !== yearReviewFetchSeq) return;
+      set({ yearReview: res.data, isLoadingYearReview: false });
     } catch (error) {
-      set({ analyticsError: extractErrorMessage(error), isLoadingAnalytics: false });
+      if (seq !== yearReviewFetchSeq) return;
+      set({ yearReviewError: extractErrorMessage(error), isLoadingYearReview: false });
     }
   },
 
@@ -1935,6 +1995,9 @@ export const useWatchStore = create<WatchStoreState>()(
       // episode the user is waiting on, and excluding that bucket is why the
       // widget could look empty for an otherwise-current watchlist.
       const entries = [...to_watch.results, ...up_to_date.results];
+      // Mount can precede Zustand hydration. An initializing/failed empty
+      // store must not erase the headless widget's last usable snapshot.
+      if (widgetSignedOut || (!widgetWatchlistConfirmed && (!useWatchStore.persist.hasHydrated() || !entries.length))) return;
 
       // Payload shape and every rule behind it (next-episode pick, 45-day
       // window, caps) live in lib/widgetPayload.ts, shared with the
@@ -1946,9 +2009,7 @@ export const useWatchStore = create<WatchStoreState>()(
       const widgetData = buildWidgetPayload(to_watch.results, entries);
 
       if (Platform.OS === 'android') {
-        if (SharedPreferences) {
-          SharedPreferences.setItem('widgetData', JSON.stringify(widgetData));
-        }
+        await writeWidgetSnapshot(widgetData);
         // Proactively redraw rather than waiting for Android's own
         // updatePeriodMillis interval — no-ops safely (empty widget list)
         // if the native module isn't linked yet (Expo Go / dev-client).
@@ -1972,6 +2033,8 @@ export const useWatchStore = create<WatchStoreState>()(
   },
 
   clearWidgetData: async () => {
+    widgetWatchlistConfirmed = false;
+    widgetSignedOut = true;
     try {
       // loggedOut distinguishes "signed out" from a genuinely empty
       // watchlist — both used to write the identical {watchlist: [],
@@ -1984,9 +2047,7 @@ export const useWatchStore = create<WatchStoreState>()(
         syncedAt: new Date().toISOString(),
       };
       if (Platform.OS === 'android') {
-        if (SharedPreferences) {
-          SharedPreferences.setItem('widgetData', JSON.stringify(emptyData));
-        }
+        await writeWidgetSnapshot(emptyData);
         requestWidgetUpdate({
           widgetName: 'WatchlistWidget',
           renderWidget: () => React.createElement(AndroidWatchlistWidget, { data: emptyData }),

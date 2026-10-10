@@ -1,5 +1,13 @@
 # Glix — Project Status
 
+## 2026-10-10 — Watch Next, widgets, release filters and yearly recap
+
+- Removed watched-finale fallbacks; successful catch-up of uncached predecessors reconciles authoritative watchlist/history. Android widget snapshots now support the native CommonJS module, use a small independent durable cache, paint before network work and survive unresolved hydration. Root lifecycle auth guards update after login/logout.
+- Compact top tabs retain 48dp targets, access filters use one picker, and the calculator has provider spacing. New releases combines with platform/genre/country/access. Release rails merge two TMDB pages with exact cached TVmaze evidence, query-specific backups and an optional region-limited Watchmode supplement.
+- Analytics separates series/movie time, includes movie repeat time, refreshes movie activity, adds backlog/pace insights, and guards partial season coverage. Year in Review now includes both media types, repeats, timezone-correct yearly streaks, monthly chapters, ratings, a full virtualized yearly library and a branded share card.
+- Fixed cold-token rotation/logout races and deferred OTA timer cleanup. Removed an orphaned chart, an unused tab type and unused Python imports; strengthened the ineffective TMDB proxy test. No migration, package update or separate deployment. Research, root causes, source limits and verification are in [REFINEMENTS_2026-10-10.md](REFINEMENTS_2026-10-10.md). Native launcher/hardware checks remain necessary.
+
+
 ## 2026-10-03 — Watch flow, discovery, and profile refinements
 
 - Watched cached episodes now suppress stale TMDB upcoming summaries. Computed watchlist statuses match their buckets; duplicate taps, stale fetches, and failed concurrent updates are reconciled. History totals update even when the affected episode is outside the loaded page. Queued release notifications exclude users who already watched every announced episode.

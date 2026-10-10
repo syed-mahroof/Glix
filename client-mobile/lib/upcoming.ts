@@ -13,8 +13,8 @@ import {
 import type { Episode, WatchlistEntry } from '../store/watchStore';
 
 /** Same "next episode" rule the Shows Hub row uses: earliest aired-unwatched,
- *  falling back to the nearest future episode, falling back to the last episode
- *  once everything is watched. Shared so the widget data bridge stays truthful
+ *  falling back to the nearest future or undated unwatched episode. Returns
+ *  null once everything cached is watched. Shared so the widget stays truthful
  *  to what the Shows Hub itself would show as "next up" for a given entry.
  *
  *  Bug fix (2026-08-21): used to compare the raw TMDB `air_date` (a
@@ -31,16 +31,16 @@ export function pickNextEpisode(entry: WatchlistEntry): Episode | null {
       ? resolveDisplayDateIso(ep.air_date, ep.air_datetime, entry.show.airs_time, entry.show.airs_timezone)
       : null;
   let future: Episode | null = null;
+  let undated: Episode | null = null;
   for (const ep of entry.show.episodes) {
     if (ep.is_watched) continue;
     const d = displayDate(ep);
     if (d !== null && d <= todayIso) return ep;
     if (d !== null && future === null) future = ep;
+    if (d === null && undated === null) undated = ep;
   }
   if (future) return future;
-  if (entry.show.episodes.length > 0)
-    return entry.show.episodes[entry.show.episodes.length - 1];
-  return null;
+  return undated;
 }
 
 export interface UpcomingItem {

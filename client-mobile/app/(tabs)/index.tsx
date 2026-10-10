@@ -140,6 +140,9 @@ function buildRows(entries: WatchlistEntry[], filter: FilterKey): ShowEpisodeRow
     // Computed once per entry — used both to categorize and to build the
     // row below, instead of the two separate calls this used to make.
     const episode = pickNextEpisode(entry);
+    // Incomplete season coverage must not turn a watched finale into a next
+    // episode. Keep genuinely missing episode data visible through ZombieRow.
+    if (!episode && entry.show.episodes.length > 0) continue;
 
     // Bug fix (2026-08-21, "Watch List shows a different weekday than
     // Upcoming for the same episode"): episode.air_date is TMDB's bare,

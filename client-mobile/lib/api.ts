@@ -83,6 +83,14 @@ export const api: AxiosInstance = axios.create({
 
 type SessionExpiredHandler = () => void;
 let sessionExpiredHandler: SessionExpiredHandler | null = null;
+const authChangeListeners = new Set<(authenticated: boolean) => void>();
+
+/** Keep root lifecycle guards current after login/logout without another
+ *  keychain read or an AppState listener per screen. */
+export function subscribeAuthChanges(listener: (authenticated: boolean) => void): () => void {
+  authChangeListeners.add(listener);
+  return () => { authChangeListeners.delete(listener); };
+}
 
 /**
  * Registered by the root layout so a definitive refresh failure can
@@ -103,21 +111,29 @@ export function setSessionExpiredHandler(handler: SessionExpiredHandler | null) 
 // Collapsing the two would make a logged-out app pay the keychain cost on
 // every request forever.
 let cachedAccessToken: string | null | undefined = undefined;
+let tokenCacheVersion = 0;
 let inFlightTokenRead: Promise<string | null> | null = null;
 
 const TOKEN_READ_TIMEOUT_MS = 2000;
 
 async function readAccessTokenFromStore(): Promise<string | null> {
+  const version = tokenCacheVersion;
   // Same timeout precedent as app/_layout.tsx's own boot-gate read —
   // SecureStore can hang indefinitely on Android/Expo Go.
-  const token = await Promise.race([
-    SecureStore.getItemAsync(ACCESS_TOKEN_KEY),
-    new Promise<never>((_, reject) =>
-      setTimeout(() => reject(new Error('SecureStore timeout')), TOKEN_READ_TIMEOUT_MS)
-    ),
-  ]);
-  cachedAccessToken = token;
-  return token;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const token = await Promise.race([
+      SecureStore.getItemAsync(ACCESS_TOKEN_KEY),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error('SecureStore timeout')), TOKEN_READ_TIMEOUT_MS);
+      }),
+    ]);
+    if (version === tokenCacheVersion) cachedAccessToken = token;
+    return cachedAccessToken ?? null;
+  } catch (error) {
+    if (version !== tokenCacheVersion) return cachedAccessToken ?? null;
+    throw error;
+  } finally { if (timer !== undefined) clearTimeout(timer); }
 }
 
 /**
@@ -145,7 +161,9 @@ export async function getAccessToken(): Promise<string | null> {
  * refresh-token rotation correct.
  */
 export async function setTokens(access: string, refresh?: string): Promise<void> {
+  tokenCacheVersion += 1;
   cachedAccessToken = access;
+  authChangeListeners.forEach((listener) => listener(true));
   await SecureStore.setItemAsync(ACCESS_TOKEN_KEY, access);
   if (refresh) {
     await SecureStore.setItemAsync(REFRESH_TOKEN_KEY, refresh);
@@ -153,7 +171,9 @@ export async function setTokens(access: string, refresh?: string): Promise<void>
 }
 
 export async function clearTokens(): Promise<void> {
+  tokenCacheVersion += 1;
   cachedAccessToken = null;
+  authChangeListeners.forEach((listener) => listener(false));
   await SecureStore.deleteItemAsync(ACCESS_TOKEN_KEY);
   await SecureStore.deleteItemAsync(REFRESH_TOKEN_KEY);
 }

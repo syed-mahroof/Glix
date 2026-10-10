@@ -186,6 +186,24 @@ def test_heatmap_days_range_still_dense_and_unaffected_by_range_all(api_client, 
 
 # ── Group H: movie_completion_pct fix + AnalyticsMoviesView ───────────────
 
+@pytest.mark.django_db(transaction=True)
+def test_completion_requires_full_season_coverage(api_client, create_user):
+    from django.core.cache import cache
+    user = create_user()
+    api_client.force_authenticate(user=user)
+    show = CachedShow.objects.create(tmdb_id=9201, title="Incomplete cached series", total_seasons=2)
+    ep = CachedEpisode.objects.create(tmdb_id=920100, show=show, season_number=1, episode_number=1, air_date="2020-01-01")
+    Watchlist.objects.create(user=user, show=show)
+    WatchState.objects.create(user=user, episode=ep)
+    for name in ["analytics-completion", "analytics-dashboard"]:
+        cache.clear()
+        assert api_client.get(reverse(name)).data["shows_completed"] == 0
+    show.total_seasons = 1
+    show.save()
+    for name in ["analytics-completion", "analytics-dashboard"]:
+        cache.clear()
+        assert api_client.get(reverse(name)).data["shows_completed"] == 1
+
 @pytest.mark.django_db
 def test_completion_view_movie_percentage_no_longer_hardcoded(api_client, create_user):
     user = create_user()

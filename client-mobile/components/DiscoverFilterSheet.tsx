@@ -11,7 +11,7 @@ import { type ActiveSegment, type DiscoverFilters, type Monetization, type SortO
 import { LANGUAGE_NAMES, languageDisplayName } from './LanguageFilterModal';
 import PressableScale from './PressableScale';
 
-const DEFAULT_FILTERS: DiscoverFilters = { selectedGenreId: null, sortOrder: 'trending', selectedLanguage: null, animeOnly: false, selectedProviderIds: [], monetization: 'flatrate|free|ads' };
+const DEFAULT_FILTERS: DiscoverFilters = { selectedGenreId: null, sortOrder: 'trending', selectedLanguage: null, animeOnly: false, selectedProviderIds: [], monetization: 'flatrate|free|ads', recentReleases: false };
 const SORTS: { key: SortOrder; label: string }[] = [
   { key: 'trending', label: 'Trending' }, { key: 'popular', label: 'Popular' },
   { key: 'top_rated', label: 'Top Rated' }, { key: 'critically_acclaimed', label: 'Critically Acclaimed' },
@@ -82,11 +82,11 @@ export default function DiscoverFilterSheet({ activeSegment }: { activeSegment: 
   const { height } = useWindowDimensions();
   const insets = useSafeAreaInsets();
   const [draft, setDraft] = useState<DiscoverFilters>(DEFAULT_FILTERS);
-  const [picker, setPicker] = useState<'platform' | 'region' | 'language' | null>(null);
+  const [picker, setPicker] = useState<'platform' | 'region' | 'language' | 'access' | null>(null);
   useEffect(() => {
     if (!visible) { setPicker(null); return; }
     const state = useDiscoverStore.getState();
-    setDraft({ selectedGenreId: state.selectedGenreId, sortOrder: state.sortOrder, selectedLanguage: state.selectedLanguage, animeOnly: state.animeOnly, selectedProviderIds: state.selectedProviderIds, monetization: state.monetization });
+    setDraft({ selectedGenreId: state.selectedGenreId, sortOrder: state.sortOrder, selectedLanguage: state.selectedLanguage, animeOnly: state.animeOnly, selectedProviderIds: state.selectedProviderIds, monetization: state.monetization, recentReleases: state.recentReleases });
     void fetchProviders(activeSegment);
   }, [visible, activeSegment, fetchProviders]);
   const genres = activeSegment === 'tv' ? TV_GENRES : MOVIE_GENRES;
@@ -95,7 +95,7 @@ export default function DiscoverFilterSheet({ activeSegment }: { activeSegment: 
   const selectedNames = providers.filter((provider) => draft.selectedProviderIds.includes(provider.provider_id)).map((provider) => provider.provider_name);
   const update = (value: Partial<DiscoverFilters>) => setDraft((current) => {
     const next = { ...current, ...value };
-    if ((next.selectedProviderIds.length || next.monetization !== 'flatrate|free|ads') && next.sortOrder === 'trending') next.sortOrder = 'popular';
+    if ((next.selectedProviderIds.length || next.monetization !== 'flatrate|free|ads' || next.recentReleases) && next.sortOrder === 'trending') next.sortOrder = 'popular';
     return next;
   });
   const labelStyle = [styles.label, { color: c.textSecondary }];
@@ -116,13 +116,18 @@ export default function DiscoverFilterSheet({ activeSegment }: { activeSegment: 
               <Globe color={c.textSecondary} size={20} /><Text style={[styles.optionText, { color: c.textPrimary }]}>{regions.find((item) => item.code === region)?.name ?? region}</Text><ChevronRight size={18} color={c.textSecondary} />
             </PressableScale>
             <PressableScale onPress={() => setPicker('platform')} disabled={loading || !!error} accessibilityRole="button" accessibilityLabel="Choose streaming platforms" accessibilityState={{ disabled: loading || !!error }} style={[styles.option, { borderBottomColor: c.hairline }]}>
-              <SlidersHorizontal color={c.textSecondary} size={20} /><Text style={[styles.optionText, { color: c.textPrimary }]}>{loading ? 'Loading platforms…' : selectedNames.join(', ') || 'All platforms'}</Text><ChevronRight size={18} color={c.textSecondary} />
+              <SlidersHorizontal color={c.textSecondary} size={20} /><Text numberOfLines={2} style={[styles.optionText, { color: c.textPrimary }]}>{loading ? 'Loading platforms…' : selectedNames.join(', ') || 'Select platforms'}</Text><ChevronRight size={18} color={c.textSecondary} />
             </PressableScale>
             {error && <PressableScale onPress={() => void fetchProviders(activeSegment)} accessibilityRole="button"><Text style={[styles.note, { color: c.negative }]}>{error} Tap to retry.</Text></PressableScale>}
-            <Text style={[styles.note, { color: c.textSecondary }]}>Choose up to 8 platforms. Matches any selected platform in this country. Availability by TMDB / JustWatch.</Text>
-            <View style={styles.pills}>{ACCESS.map((item) => <Pill key={item.key} label={item.label} selected={draft.monetization === item.key} onPress={() => update({ monetization: item.key })} />)}</View>
+            <PressableScale onPress={() => setPicker('access')} accessibilityRole="button" accessibilityLabel="Change access type" style={[styles.option, { borderBottomColor: c.hairline }]}>
+              <Text style={[styles.optionText, { color: c.textSecondary }]}>Access</Text><Text style={[styles.pillText, { color: c.textPrimary }]}>{ACCESS.find((item) => item.key === draft.monetization)?.label}</Text><ChevronRight size={18} color={c.textSecondary} />
+            </PressableScale>
+            <Text style={[styles.note, { color: c.textSecondary }]}>Choose up to 8 platforms.</Text>
+            <Text style={labelStyle}>Release window</Text>
+            <View style={styles.pills}><Pill label="Any time" selected={!draft.recentReleases} onPress={() => update({ recentReleases: false })} /><Pill label="New releases" selected={draft.recentReleases} onPress={() => update({ recentReleases: true })} /></View>
+            {draft.recentReleases && <Text style={[styles.note, { color: c.textSecondary }]}>{activeSegment === 'movie' ? 'Digital releases in the last 30 days.' : 'Series with episodes released in the last 30 days.'}</Text>}
             <Text style={labelStyle}>Sort by</Text>
-            <View style={styles.pills}>{SORTS.filter((item) => item.key !== 'trending' || (!draft.selectedProviderIds.length && draft.monetization === 'flatrate|free|ads')).map((item) => <Pill key={item.key} label={item.label} selected={draft.sortOrder === item.key || (item.key === 'popular' && draft.sortOrder === 'trending' && !!draft.selectedProviderIds.length)} onPress={() => update({ sortOrder: item.key })} />)}</View>
+            <View style={styles.pills}>{SORTS.filter((item) => item.key !== 'trending' || (!draft.selectedProviderIds.length && draft.monetization === 'flatrate|free|ads' && !draft.recentReleases)).map((item) => <Pill key={item.key} label={item.label} selected={draft.sortOrder === item.key} onPress={() => update({ sortOrder: item.key })} />)}</View>
             <Text style={labelStyle}>Genre</Text>
             <View style={styles.pills}><Pill label="Any genre" selected={draft.selectedGenreId === null} onPress={() => update({ selectedGenreId: null })} />{genres.map((genre) => <Pill key={genre.id} label={genre.name} selected={draft.selectedGenreId === genre.id} onPress={() => update({ selectedGenreId: draft.selectedGenreId === genre.id ? null : genre.id })} />)}</View>
             <Text style={labelStyle}>Language</Text>
@@ -140,6 +145,7 @@ export default function DiscoverFilterSheet({ activeSegment }: { activeSegment: 
         update({ selectedProviderIds: draft.selectedProviderIds.includes(id) ? draft.selectedProviderIds.filter((value) => value !== id) : draft.selectedProviderIds.length < 8 ? [...draft.selectedProviderIds, id] : draft.selectedProviderIds });
       }} />
       <Picker visible={picker === 'region'} title="Streaming country" items={regionItems} selected={[region]} onClose={() => setPicker(null)} onSelect={(key) => { setWatchRegion(key); update({ selectedProviderIds: [] }); setPicker(null); }} />
+      <Picker visible={picker === 'access'} title="Access type" items={ACCESS.map((item) => ({ key: item.key, label: item.label }))} selected={[draft.monetization]} onClose={() => setPicker(null)} onSelect={(key) => { update({ monetization: key as Monetization }); setPicker(null); }} />
       <Picker visible={picker === 'language'} title="Languages" items={[{ key: '*', label: 'Any language' }, ...Object.entries(LANGUAGE_NAMES).map(([key, label]) => ({ key, label }))]} selected={[draft.selectedLanguage ?? '*']} onClose={() => setPicker(null)} onSelect={(language) => { update({ selectedLanguage: language === '*' ? null : language, animeOnly: false }); setPicker(null); }} />
     </Modal>
   );

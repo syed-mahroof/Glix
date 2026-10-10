@@ -20,7 +20,7 @@ from collections import Counter, defaultdict
 from datetime import date, timedelta
 from decimal import Decimal
 
-from django.db.models import Avg, Count, Min, Sum
+from django.db.models import Avg, Count, F, Min, Q, Sum
 from django.db.models.functions import ExtractMonth, ExtractYear
 from django.utils import timezone
 from rest_framework.permissions import IsAuthenticated
@@ -71,16 +71,11 @@ from core.badge_constants import (
     THOUSAND_EPISODES_THRESHOLD,
     THOUSAND_HOURS_MINUTES,
     TIME_TITAN_MINUTES,
-    ANIME_GENRES,
     SCI_FI_GENRES,
-    HORROR_GENRES,
-    COMEDY_GENRES,
-    DOCUMENTARY_GENRES,
 )
 from core.models import (
     CachedEpisode,
     EpisodeInteraction,
-    MovieCache,
     MovieRewatch,
     MovieReview,
     MovieWatchlist,
@@ -509,6 +504,13 @@ def _compute_badge_progress(user, profile: UserProfile, streak: WatchStreak) -> 
 
 # ─── Views ────────────────────────────────────────────────────────────────
 
+def _fully_cached_show_ids(user):
+    """Match the mobile coverage guard before claiming a show is caught up."""
+    return set(Watchlist.objects.filter(user=user, show__total_seasons__gt=0)
+        .annotate(seasons=Count("show__episodes__season_number", distinct=True,
+                               filter=Q(show__episodes__season_number__gt=0)))
+        .filter(seasons__gte=F("show__total_seasons")).values_list("show_id", flat=True))
+
 class AnalyticsDashboardView(APIView):
     """
     GET /api/analytics/dashboard/
@@ -558,11 +560,11 @@ class AnalyticsDashboardView(APIView):
             .annotate(c=Count("id"))
             .values_list("episode__show_id", "c")
         )
-        # Simpler proxy: aired == watched for non-zero aired
+        fully_cached_ids = _fully_cached_show_ids(request.user)
         shows_completed = sum(
             1
             for show_id in show_ids
-            if aired_counts.get(show_id, 0) > 0
+            if show_id in fully_cached_ids and aired_counts.get(show_id, 0) > 0
             and watched_counts.get(show_id, 0) >= aired_counts.get(show_id, 0)
         )
         shows_archived = Watchlist.objects.filter(
@@ -571,12 +573,24 @@ class AnalyticsDashboardView(APIView):
 
         total_minutes = profile.total_time_watched
         total_rewatch_minutes = profile.total_rewatch_time_watched
+        # The profile counter includes movies. Preserve its existing API
+        # fields for Profile, and expose episode-only time for the Shows tab.
+        series_watches = WatchState.objects.filter(user=request.user).aggregate(
+            minutes=Sum("episode__runtime_minutes"),
+            recent=Count("pk", filter=Q(watched_at__gte=timezone.now() - timedelta(days=30), watched_at__lte=timezone.now())),
+        )
+        series_minutes = (series_watches["minutes"] or 0) + (
+            RewatchEpisodeState.objects.filter(rewatch__user=request.user).aggregate(minutes=Sum("episode__runtime_minutes"))["minutes"] or 0
+        )
         data = {
             "total_episodes_watched": total_episodes,
             "total_shows_tracked": total_shows,
             "total_minutes_watched": total_minutes,
             "total_hours_watched": round(total_minutes / 60, 1),
             "total_days_watched": round(total_minutes / 1440, 2),
+            "series_minutes_watched": series_minutes,
+            "series_hours_watched": round(series_minutes / 60, 1),
+            "series_daily_pace": round(series_watches["recent"] / 30, 1),
             "current_streak": streak.current_streak,
             "longest_streak": streak.longest_streak,
             "total_streak_days": streak.total_streak_days,
@@ -915,6 +929,7 @@ class AnalyticsCompletionView(APIView):
         total_watched = 0
         total_shows = 0
         completed_shows = 0
+        fully_cached_ids = _fully_cached_show_ids(request.user)
 
         for show_id in show_ids:
             aired = aired_counts.get(show_id, 0)
@@ -922,7 +937,7 @@ class AnalyticsCompletionView(APIView):
             total_aired += aired
             total_watched += watched
             total_shows += 1
-            if aired > 0 and watched >= aired:
+            if show_id in fully_cached_ids and aired > 0 and watched >= aired:
                 completed_shows += 1
 
         ep_pct = round((total_watched / total_aired) * 100, 1) if total_aired else 0.0
@@ -985,11 +1000,14 @@ class AnalyticsMoviesView(APIView):
 
         runtime_agg = MovieWatchState.objects.filter(user=user).aggregate(
             total=Sum("movie__runtime_minutes"),
-            avg=Avg("movie__runtime_minutes"),
+            avg=Avg("movie__runtime_minutes", filter=Q(movie__runtime_minutes__gt=0)),
             count=Count("id"),
         )
         movies_watched = runtime_agg["count"] or 0
         total_runtime = runtime_agg["total"] or 0
+        repeat_agg = MovieRewatch.objects.filter(user=user).aggregate(minutes=Sum("movie__runtime_minutes"), count=Count("pk"))
+        repeat_minutes = repeat_agg["minutes"] or 0
+        total_runtime += repeat_minutes
         avg_runtime = round(runtime_agg["avg"], 1) if runtime_agg["avg"] else 0.0
 
         watched_this_year = MovieWatchState.objects.filter(
@@ -1163,6 +1181,8 @@ class AnalyticsMoviesView(APIView):
             "movies_tracked": movies_tracked,
             "completion_pct": round((movies_watched / movies_tracked) * 100, 1) if movies_tracked else 0.0,
             "total_runtime_minutes": total_runtime,
+            "rewatch_count": repeat_agg["count"] or 0,
+            "rewatch_minutes": repeat_minutes,
             "average_runtime_minutes": avg_runtime,
             "watched_this_year": watched_this_year,
             "longest_movie": longest_movie,
@@ -1243,153 +1263,23 @@ class AnalyticsStreakView(APIView):
 
 
 class AnalyticsYearReviewView(APIView):
-    """GET /api/analytics/year-review/?year=2025"""
+    """GET /api/analytics/year-review/?year=2026&timezone=Asia/Kolkata"""
 
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        current_year = timezone.now().year
+        from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+        from core.year_review import build_year_review
+
         try:
+            zone = ZoneInfo(request.query_params.get("timezone", "UTC"))
+            current_year = timezone.now().astimezone(zone).year
             year = int(request.query_params.get("year", current_year))
-        except (ValueError, TypeError):
-            year = current_year
-
-        # Episode watches in the year
-        year_qs = WatchState.objects.filter(
-            user=request.user, watched_at__year=year
-        )
-        total_episodes = year_qs.count()
-        total_minutes = year_qs.aggregate(
-            m=Sum("episode__runtime_minutes")
-        )["m"] or 0
-
-        # Most watched show
-        top_show_qs = (
-            year_qs.values(
-                "episode__show__tmdb_id",
-                "episode__show__title",
-                "episode__show__poster_path",
-            )
-            .annotate(c=Count("id"))
-            .order_by("-c")
-        )
-        most_watched_show = None
-        if top_show_qs:
-            ts = top_show_qs[0]
-            most_watched_show = {
-                "tmdb_id": ts["episode__show__tmdb_id"],
-                "title": ts["episode__show__title"],
-                "poster_path": ts["episode__show__poster_path"],
-                "episodes_watched": ts["c"],
-            }
-
-        top_shows = [
-            {
-                "tmdb_id": r["episode__show__tmdb_id"],
-                "title": r["episode__show__title"],
-                "poster_path": r["episode__show__poster_path"],
-                "episodes_watched": r["c"],
-            }
-            for r in top_show_qs[:5]
-        ]
-
-        # Favorite genre
-        genre_counter: Counter = Counter()
-        for ws in year_qs.select_related("episode__show").order_by():
-            for g in (ws.episode.show.genres or []):
-                genre_counter[g] += 1
-        favorite_genre = genre_counter.most_common(1)[0][0] if genre_counter else None
-
-        top_genres = [
-            {"genre": g, "count": c} for g, c in genre_counter.most_common(5)
-        ]
-
-        # Favorite actor (most MVP votes in the year)
-        actor_qs = (
-            EpisodeInteraction.objects.filter(user=request.user, created_at__year=year)
-            .exclude(mvp_character_name="")
-            .values("mvp_character_name")
-            .annotate(c=Count("id"))
-            .order_by("-c")
-        )
-        favorite_actor = actor_qs[0]["mvp_character_name"] if actor_qs else None
-
-        # Shows *currently* finished (all-time, not year-scoped) — no
-        # per-show "completed on" date is stored anywhere in this schema,
-        # only the live watched/aired counts, so this can only answer "is
-        # this show fully caught up as of today", not "did the user finish
-        # it specifically during `year`". Same honest limitation as
-        # longest_streak below. Scoping it correctly would need a new
-        # completed_at column written the moment a show's last episode is
-        # marked watched — out of scope here.
-        today = timezone.now().date()
-        # Two flat grouped queries joined in Python (Phase 75.8) — see
-        # AnalyticsDashboardView's identical fix for the full reasoning.
-        year_review_show_ids = list(
-            Watchlist.objects.filter(user=request.user).values_list("show_id", flat=True)
-        )
-        year_review_aired_counts = dict(
-            CachedEpisode.objects.filter(show_id__in=year_review_show_ids, air_date__lte=today)
-            .values("show_id")
-            # CachedEpisode's primary key is `tmdb_id`, not `id` — Count("id")
-            # raises FieldError on this model. Count("pk") is PK-name-agnostic.
-            .annotate(c=Count("pk"))
-            .values_list("show_id", "c")
-        )
-        year_review_watched_counts = dict(
-            WatchState.objects.filter(user=request.user, episode__show_id__in=year_review_show_ids)
-            .values("episode__show_id")
-            .annotate(c=Count("id"))
-            .values_list("episode__show_id", "c")
-        )
-        shows_finished = sum(
-            1
-            for show_id in year_review_show_ids
-            if year_review_aired_counts.get(show_id, 0) > 0
-            and year_review_watched_counts.get(show_id, 0) >= year_review_aired_counts.get(show_id, 0)
-        )
-
-        # Biggest month (most minutes)
-        biggest_month_qs = (
-            year_qs.values("watched_at__month")
-            .annotate(m=Sum("episode__runtime_minutes"))
-            .order_by("-m")
-        )
-        biggest_month = None
-        if biggest_month_qs:
-            bm = biggest_month_qs[0]["watched_at__month"]
-            biggest_month = calendar.month_name[bm]
-
-        # Biggest week
-        biggest_week_qs = (
-            year_qs.values("watched_at__week", "watched_at__year")
-            .annotate(m=Sum("episode__runtime_minutes"))
-            .order_by("-m")
-        )
-        biggest_week = None
-        if biggest_week_qs:
-            bw = biggest_week_qs[0]
-            biggest_week = f"Week {bw['watched_at__week']}, {bw['watched_at__year']}"
-
-        # Longest streak (all-time; year-scoped streak is complex, use profile value)
-        streak = _get_streak(request.user)
-
-        data = {
-            "year": year,
-            "hours_watched": round(total_minutes / 60, 1),
-            "episodes_watched": total_episodes,
-            "shows_finished": shows_finished,
-            "most_watched_show": most_watched_show,
-            "favorite_genre": favorite_genre,
-            "favorite_actor": favorite_actor,
-            "longest_streak": streak.longest_streak,
-            "biggest_month": biggest_month,
-            "biggest_week": biggest_week,
-            "top_shows": top_shows,
-            "top_genres": top_genres,
-        }
-        serializer = YearReviewSerializer(data)
-        return Response(serializer.data)
+            if not 1900 <= year <= current_year:
+                raise ValueError
+        except (ValueError, TypeError, ZoneInfoNotFoundError):
+            return Response({"detail": "Choose a valid year and time zone."}, status=400)
+        return Response(YearReviewSerializer(build_year_review(request.user, year, zone)).data)
 
 
 class AnalyticsMonthlySummaryView(APIView):

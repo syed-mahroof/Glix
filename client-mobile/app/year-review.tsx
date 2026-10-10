@@ -1,433 +1,217 @@
-// client-mobile/app/year-review.tsx
-// Phase 12: theme-aware + Aura-structure polish — ambient glow behind the
-// hero hours-watched number and an entrance stagger on the stat carousel
-// and the top-shows/top-genres rows, matching analytics.tsx's dashboard
-// treatment. No TrendChip: this screen doesn't fetch a prior-year figure to
-// compare hours against, so a verdict chip would have nothing real to show.
+import { FlashList } from '@shopify/flash-list';
 import { Image } from 'expo-image';
-import * as Sharing from 'expo-sharing';
 import { useRouter } from 'expo-router';
-import {
-  Activity,
-  ArrowLeft,
-  Calendar,
-  Film,
-  Flame,
-  Share2,
-  Star,
-  Trophy,
-} from 'lucide-react-native';
-import React, { useEffect, useRef, useState } from 'react';
-import {
-  ActivityIndicator,
-  ScrollView,
-  StyleSheet,
-  Text,
-  View,
-} from 'react-native';
+import * as Sharing from 'expo-sharing';
+import { ArrowLeft, Calendar, Film, Flame, Share2, Star, Trophy, X } from 'lucide-react-native';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { ActivityIndicator, Modal, RefreshControl, ScrollView, StyleSheet, Text, View } from 'react-native';
 import Animated from 'react-native-reanimated';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { captureRef } from 'react-native-view-shot';
+import { captureRef, releaseCapture } from 'react-native-view-shot';
 
 import AmbientGlow from '../components/AmbientGlow';
 import ErrorState from '../components/ErrorState';
 import PressableScale from '../components/PressableScale';
+import { SegmentedControl } from '../components/SegmentedControl';
 import Snackbar from '../components/Snackbar';
 import YearReviewCard from '../components/YearReviewCard';
 import { extractErrorMessage } from '../lib/errors';
 import { staggerEntering, usePrefersReducedMotion } from '../lib/motion';
+import { useScreenActive } from '../lib/useScreenActive';
 import { useAppTheme } from '../lib/theme';
-import { useWatchStore } from '../store/watchStore';
-
-// Pre-existing non-token accent hues used to give each Year-in-Review card
-// its own identity across the carousel — not new colors introduced by the
-// Phase 12 migration, kept as-is per AI_RULES.md verification guidance for
-// "pre-existing non-token colors unrelated to light/dark."
-const ACCENT_CORAL = '#FF6B6B';
-const ACCENT_BLUE = '#4ECDC4';
-const ACCENT_PURPLE = '#C77DFF';
+import { useWatchStore, type YearReviewTitle } from '../store/watchStore';
 
 const CURRENT_YEAR = new Date().getFullYear();
-
 const TMDB_IMAGE = 'https://image.tmdb.org/t/p/w185';
+const shortDate = (iso: string) => new Date(`${iso}T12:00:00`).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+const countLabel = (count: number, noun: string) => `${count} ${noun}${count === 1 ? '' : /(?:s|x|z|ch|sh)$/.test(noun) ? 'es' : 's'}`;
 
 export default function YearReviewScreen() {
   const router = useRouter();
   const { theme } = useAppTheme();
   const c = theme.colors;
   const reduceMotion = usePrefersReducedMotion();
+  const screenActive = useScreenActive();
   const fetchYearReview = useWatchStore((s) => s.fetchYearReview);
-  const yearReview = useWatchStore((s) => s.yearReview);
-  const isLoading = useWatchStore((s) => s.isLoadingAnalytics);
-  const analyticsError = useWatchStore((s) => s.analyticsError);
-
-  const shareCardRef = useRef<View>(null);
+  const storedReview = useWatchStore((s) => s.yearReview);
+  const isLoading = useWatchStore((s) => s.isLoadingYearReview);
+  const error = useWatchStore((s) => s.yearReviewError);
+  const dirtyAt = useWatchStore((s) => s.analyticsDirtyAt);
+  const [year, setYear] = useState(CURRENT_YEAR);
+  const [month, setMonth] = useState(new Date().getMonth() + 1);
+  const [library, setLibrary] = useState<'tv' | 'movie' | null>(null);
   const [isSharing, setIsSharing] = useState(false);
-  const [shareErrorMsg, setShareErrorMsg] = useState<string | null>(null);
+  const [shareError, setShareError] = useState<string | null>(null);
+  const shareCardRef = useRef<View>(null);
+  const lastFetch = useRef<{ year: number; at: number } | null>(null);
+  const review = storedReview?.year === year ? storedReview : null;
+  const years = useMemo(() => [...new Set([CURRENT_YEAR, ...(storedReview?.available_years ?? []), year])].sort((a, b) => b - a), [storedReview?.available_years, year]);
 
   useEffect(() => {
-    fetchYearReview(CURRENT_YEAR);
-  }, [fetchYearReview]);
+    if (!screenActive) return;
+    if (lastFetch.current?.year === year && lastFetch.current.at >= dirtyAt && Date.now() - lastFetch.current.at < 60_000) return;
+    lastFetch.current = { year, at: Date.now() };
+    void fetchYearReview(year);
+  }, [year, dirtyAt, screenActive, fetchYearReview]);
 
   const handleShare = async () => {
-    if (isSharing || !shareCardRef.current) return;
+    if (isSharing || !shareCardRef.current || !review || isLoading) return;
     setIsSharing(true);
+    let uri: string | undefined;
     try {
-      const available = await Sharing.isAvailableAsync();
-      if (!available) {
-        setShareErrorMsg('Sharing is not available on this device.');
+      if (!await Sharing.isAvailableAsync()) {
+        setShareError('Sharing is not available on this device.');
         return;
       }
-      const uri = await captureRef(shareCardRef, { format: 'png', quality: 1 });
-      await Sharing.shareAsync(uri, {
-        mimeType: 'image/png',
-        dialogTitle: `My ${CURRENT_YEAR} on Glix`,
-      });
+      uri = await captureRef(shareCardRef, { format: 'png', quality: 1 });
+      await Sharing.shareAsync(uri, { mimeType: 'image/png', dialogTitle: `My ${year} on GLIX` });
     } catch (err) {
-      setShareErrorMsg(extractErrorMessage(err));
+      setShareError(extractErrorMessage(err));
     } finally {
+      if (uri) releaseCapture(uri);
       setIsSharing(false);
     }
   };
 
+  const openTitle = (item: YearReviewTitle) => {
+    setLibrary(null);
+    router.push(item.media_type === 'movie' ? `/movie/${item.tmdb_id}` : `/show/${item.tmdb_id}`);
+  };
+  const titleRow = (item: YearReviewTitle, rank: number) => (
+    <PressableScale key={`${item.media_type}-${item.tmdb_id}`} onPress={() => openTitle(item)}
+      accessibilityRole="button" accessibilityLabel={`View ${item.title}`} style={styles.titleRow}>
+      <Text style={[styles.rank, { color: c.accentInk }]}>{rank + 1}</Text>
+      {item.poster_path ? <Image source={{ uri: `${TMDB_IMAGE}${item.poster_path}` }} style={styles.poster} contentFit="cover" cachePolicy="memory-disk" recyclingKey={`${item.media_type}-${item.tmdb_id}`} />
+        : <View style={[styles.poster, { backgroundColor: c.trackRing }]} />}
+      <View style={styles.titleMeta}>
+        <Text style={[styles.titleName, { color: c.textPrimary }]} numberOfLines={2}>{item.title}</Text>
+        <Text style={[styles.detail, { color: c.textSecondary }]}>
+          {item.media_type === 'tv' ? `${item.episodes_watched} episodes` : `${item.watches} ${item.watches === 1 ? 'watch' : 'watches'}`} · {Math.round(item.minutes_watched / 60 * 10) / 10}h
+          {item.rating !== null ? ` · ★ ${item.rating}/5` : ''}
+        </Text>
+        {library !== null && <Text style={[styles.detail, { color: c.textTertiary }]}>
+          {shortDate(item.first_watched)} – {shortDate(item.last_watched)}{item.rewatches ? ` · ${item.rewatches} repeats` : ''}
+        </Text>}
+      </View>
+    </PressableScale>
+  );
+  const selectedMonth = review?.months?.find((m) => m.month === month);
+  const peak = Math.max(1, ...(review?.months ?? []).map((m) => m.series_minutes + m.movie_minutes));
+  const hasActivity = !!review && (review.episodes_watched + (review.movies_watched ?? 0) > 0);
+
   return (
     <SafeAreaView style={[styles.container, { backgroundColor: c.bg }]} edges={['top']}>
-      <ScrollView contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
-        {/* Header */}
-        <View style={styles.headerRow}>
-          <PressableScale onPress={() => router.back()} hitSlop={8}>
-            <ArrowLeft color={c.textPrimary} size={22} />
+      <ScrollView contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}
+        refreshControl={<RefreshControl refreshing={isLoading && !!review} onRefresh={() => { lastFetch.current = { year, at: Date.now() }; void fetchYearReview(year); }} tintColor={c.accentInk} />}>
+        <View style={styles.header}>
+          <PressableScale style={styles.iconButton} onPress={() => router.back()} accessibilityRole="button" accessibilityLabel="Go back"><ArrowLeft color={c.textPrimary} size={22} /></PressableScale>
+          <View style={styles.center}><Text style={[styles.heading, { color: c.textPrimary }]}>{year} in Review</Text><Text style={[styles.detail, { color: c.textSecondary }]}>{year === CURRENT_YEAR ? 'Your year so far' : 'Your viewing year'}</Text></View>
+          <PressableScale style={styles.iconButton} onPress={handleShare} disabled={!hasActivity || isLoading || isSharing} accessibilityRole="button" accessibilityLabel="Share your year in review">
+            {isSharing ? <ActivityIndicator color={c.accentInk} /> : <Share2 color={hasActivity ? c.textPrimary : c.textTertiary} size={22} />}
           </PressableScale>
-          <View style={styles.headerCenter}>
-            <Text style={[styles.headerTitle, { color: c.textPrimary }]}>{CURRENT_YEAR}</Text>
-            <Text style={[styles.headerSub, { color: c.textTertiary }]}>Year in Review</Text>
-          </View>
-          {isLoading ? (
-            <ActivityIndicator color={c.accentInk} size="small" />
-          ) : yearReview ? (
-            <PressableScale onPress={handleShare} hitSlop={8} disabled={isSharing}>
-              {isSharing ? (
-                <ActivityIndicator color={c.accentInk} size="small" />
-              ) : (
-                <Share2 color={c.textPrimary} size={20} />
-              )}
-            </PressableScale>
-          ) : (
-            <View style={{ width: 22 }} />
-          )}
         </View>
-
-        {isLoading && !yearReview ? (
-          <View style={styles.loadingState}>
-            <ActivityIndicator color={c.accentInk} size="large" />
-            <Text style={[styles.loadingText, { color: c.textTertiary }]}>Crunching your year...</Text>
-          </View>
-        ) : analyticsError ? (
-          <ErrorState message={analyticsError} onRetry={() => fetchYearReview(CURRENT_YEAR)} />
-        ) : !yearReview ? (
-          <View style={styles.emptyState}>
-            <Text style={styles.emptyEmoji}>🎬</Text>
-            <Text style={[styles.emptyTitle, { color: c.textPrimary }]}>Nothing to review yet</Text>
-            <Text style={[styles.emptyDesc, { color: c.textTertiary }]}>Start watching to build your year in review.</Text>
-          </View>
-        ) : (
-          <>
-            {/* Hero — hours watched. Also the share-card capture target:
-                collapsable={false} is required on Android or the view can
-                be optimized out of the native tree with nothing to snapshot,
-                a well-known react-native-view-shot gotcha. Brand label + the
-                two brag lines only render inside this card so the shared
-                image reads on its own outside the app (an Instagram Story,
-                no header/chrome around it) — same reason this uses the
-                opaque c.bg instead of the translucent c.glassFill token:
-                glassFill is designed to composite over the screen behind
-                it, which isn't there once captured standalone. */}
-            <View
-              ref={shareCardRef}
-              collapsable={false}
-              style={[styles.heroCard, { backgroundColor: c.bg, borderColor: c.accentDim }]}
-            >
+        {years.length > 1 && <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.yearOptions}>
+          {years.map((value) => <PressableScale key={value} accessibilityRole="tab" accessibilityState={{ selected: value === year }} accessibilityLabel={`Review ${value}`}
+            style={[styles.yearPill, { backgroundColor: value === year ? c.accentFill : c.glassFill }]} onPress={() => setYear(value)}>
+            <Text style={[styles.pillText, { color: value === year ? c.onAccent : c.textSecondary }]}>{value}</Text>
+          </PressableScale>)}
+        </ScrollView>}
+        {error && <ErrorState message={error} onRetry={() => fetchYearReview(year)} />}
+        {isLoading && !review ? <View style={styles.empty}><ActivityIndicator size="large" color={c.accentInk} /><Text style={{ color: c.textSecondary }}>Putting your year together…</Text></View>
+          : !hasActivity ? <View style={styles.empty}><Film color={c.accentInk} size={40} /><Text style={[styles.sectionTitle, { color: c.textPrimary }]}>Your story starts with a watch</Text><Text style={[styles.detail, { color: c.textSecondary }]}>No movies or episodes logged in {year} yet.</Text></View>
+          : review && <>
+            <View ref={shareCardRef} collapsable={false} style={[styles.hero, { backgroundColor: c.bg, borderColor: c.accentDim }]}>
               <AmbientGlow size={240} />
-              <Text style={[styles.shareBrand, { color: c.accentInk }]}>GLIX</Text>
-              <Text style={[styles.heroLabel, { color: c.textSecondary }]}>You watched</Text>
-              <Text style={[styles.heroValue, { color: c.accentInk }]}>{yearReview.hours_watched}h</Text>
-              <Text style={[styles.heroSub, { color: c.textSecondary }]}>
-                across {yearReview.episodes_watched} episodes
-              </Text>
-              {(yearReview.most_watched_show || yearReview.favorite_genre) && (
-                <View style={[styles.shareBragRow, { borderTopColor: c.hairline }]}>
-                  {yearReview.most_watched_show && (
-                    <Text style={[styles.shareBragText, { color: c.textPrimary }]} numberOfLines={1}>
-                      Most watched: {yearReview.most_watched_show.title}
-                    </Text>
-                  )}
-                  {yearReview.favorite_genre && (
-                    <Text style={[styles.shareBragText, { color: c.textPrimary }]} numberOfLines={1}>
-                      Favourite genre: {yearReview.favorite_genre}
-                    </Text>
-                  )}
-                </View>
-              )}
-              <Text style={[styles.shareYear, { color: c.textTertiary }]}>{CURRENT_YEAR}</Text>
+              <Text style={[styles.brand, { color: c.accentInk }]}>GLIX · {year}</Text>
+              <Text style={[styles.heroLabel, { color: c.textSecondary }]}>{review.is_year_to_date ? 'MY YEAR SO FAR' : 'MY YEAR IN WATCHES'}</Text>
+              <Text style={[styles.heroValue, { color: c.accentInk }]} adjustsFontSizeToFit numberOfLines={1}>{review.hours_watched}h</Text>
+              <Text style={[styles.heroSub, { color: c.textPrimary }]}>{countLabel(review.episodes_watched, 'episode')} · {countLabel(review.movies_watched ?? 0, 'movie watch')}</Text>
+              <View style={[styles.split, { borderColor: c.hairline }]}>
+                <View style={styles.center}><Text style={[styles.splitValue, { color: c.textPrimary }]}>{review.series_hours ?? review.hours_watched}h</Text><Text style={[styles.detail, { color: c.textSecondary }]}>Series</Text></View>
+                <View style={styles.center}><Text style={[styles.splitValue, { color: c.textPrimary }]}>{review.movie_hours ?? 0}h</Text><Text style={[styles.detail, { color: c.textSecondary }]}>Movies</Text></View>
+              </View>
+              <Text style={[styles.detail, { color: c.textSecondary }]}>{countLabel(review.unique_shows ?? review.top_shows.length, 'show')} · {countLabel(review.unique_movies ?? 0, 'film')} · {countLabel(review.active_days ?? 0, 'active day')}</Text>
+              {review.most_watched_show && <Text style={[styles.highlight, { color: c.textPrimary }]} numberOfLines={2}>Most watched: {review.most_watched_show.title}</Text>}
+              {!!review.top_movies?.length && <Text style={[styles.detail, { color: c.textPrimary }]} numberOfLines={2}>{review.top_movies[0].rating != null ? 'Highest rated film' : 'Movie highlight'}: {review.top_movies[0].title}</Text>}
+              {review.favorite_genre && <Text style={[styles.detail, { color: c.accentInk }]}>Your genre: {review.favorite_genre}</Text>}
             </View>
-
-            {/* Horizontal card carousel — sequenced entrance */}
-            <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.carousel}>
+            <Text style={[styles.note, { color: c.textTertiary }]}>Based on logged watch dates. Time includes rewatches and known runtimes.{review.unknown_runtime_watches ? ` ${review.unknown_runtime_watches} watches have no runtime yet.` : ''}</Text>
+            <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.storyCards}>
               {[
-                yearReview.most_watched_show && (
-                  <YearReviewCard
-                    key="most-watched"
-                    label="Most Watched Show"
-                    value={yearReview.most_watched_show.title}
-                    sublabel={`${yearReview.most_watched_show.episodes_watched} episodes`}
-                    Icon={Star}
-                  />
-                ),
-                yearReview.favorite_genre && (
-                  <YearReviewCard
-                    key="favorite-genre"
-                    label="Favourite Genre"
-                    value={yearReview.favorite_genre}
-                    Icon={Film}
-                    accentColor={ACCENT_CORAL}
-                  />
-                ),
-                <YearReviewCard
-                  key="shows-finished"
-                  label="Shows Finished"
-                  value={String(yearReview.shows_finished)}
-                  Icon={Trophy}
-                  accentColor={ACCENT_BLUE}
-                />,
-                yearReview.longest_streak > 0 && (
-                  <YearReviewCard
-                    key="longest-streak"
-                    label="Longest Streak"
-                    value={`${yearReview.longest_streak} days`}
-                    Icon={Flame}
-                    accentColor={ACCENT_CORAL}
-                  />
-                ),
-                yearReview.biggest_month && (
-                  <YearReviewCard
-                    key="biggest-month"
-                    label="Biggest Month"
-                    value={yearReview.biggest_month}
-                    Icon={Calendar}
-                    accentColor={ACCENT_PURPLE}
-                  />
-                ),
-                yearReview.favorite_actor && (
-                  <YearReviewCard
-                    key="favorite-actor"
-                    label="Favourite Character"
-                    value={yearReview.favorite_actor}
-                    Icon={Activity}
-                    accentColor={ACCENT_BLUE}
-                  />
-                ),
-              ]
-                .filter((card): card is React.ReactElement => Boolean(card))
-                .map((card, index) => (
-                  <Animated.View key={card.key} entering={reduceMotion ? undefined : staggerEntering(index)}>
-                    {card}
-                  </Animated.View>
-                ))}
+                { label: 'New to your diary', value: countLabel(review.first_watch_movies ?? 0, 'film'), sublabel: countLabel(review.first_watch_episodes ?? review.episodes_watched, 'first-watch episode'), Icon: Film },
+                { label: 'Worth watching again', value: `${(review.episode_rewatches ?? 0) + (review.movie_rewatches ?? 0)} repeats`, sublabel: `${review.episode_rewatches ?? 0} episodes · ${review.movie_rewatches ?? 0} films`, Icon: Star },
+                { label: 'Your longest streak', value: countLabel(review.longest_streak, 'day'), sublabel: `Within ${year} · movies and series`, Icon: Flame },
+                { label: 'Shows finished', value: String(review.shows_finished), sublabel: `Finalised series completed in ${year}`, Icon: Trophy },
+                { label: 'Your busiest month', value: review.biggest_month ?? '—', sublabel: review.biggest_week ?? undefined, Icon: Calendar },
+              ].map((card, index) => <Animated.View key={card.label} entering={reduceMotion ? undefined : staggerEntering(index)}><YearReviewCard {...card} /></Animated.View>)}
             </ScrollView>
-
-            {/* Top 5 shows */}
-            {yearReview.top_shows.length > 0 && (
-              <View style={[styles.listCard, { backgroundColor: c.glassFill, borderColor: c.hairline }]}>
-                <Text style={[styles.listTitle, { color: c.textPrimary }]}>Top 5 Shows This Year</Text>
-                {yearReview.top_shows.map((show, idx) => (
-                  <View key={show.tmdb_id} style={styles.showRow}>
-                    <Text style={[styles.showRank, { color: c.accentInk }]}>{idx + 1}</Text>
-                    {show.poster_path ? (
-                      <Image
-                        source={{ uri: `${TMDB_IMAGE}${show.poster_path}` }}
-                        style={[styles.showPoster, { backgroundColor: c.trackRing }]}
-                        contentFit="cover"
-                        transition={150}
-                        cachePolicy="memory-disk"
-                      />
-                    ) : (
-                      <View style={[styles.showPosterPlaceholder, { backgroundColor: c.trackRing }]} />
-                    )}
-                    <View style={styles.showMeta}>
-                      <Text style={[styles.showTitle, { color: c.textPrimary }]} numberOfLines={1}>{show.title}</Text>
-                      <Text style={[styles.showEps, { color: c.textTertiary }]}>{show.episodes_watched} episodes</Text>
-                    </View>
-                  </View>
-                ))}
-              </View>
-            )}
-
-            {/* Top genres */}
-            {yearReview.top_genres.length > 0 && (
-              <View style={[styles.listCard, { backgroundColor: c.glassFill, borderColor: c.hairline }]}>
-                <Text style={[styles.listTitle, { color: c.textPrimary }]}>Top Genres</Text>
-                {yearReview.top_genres.map((g, idx) => (
-                  <View key={g.genre} style={styles.genreRow}>
-                    <Text style={[styles.showRank, { color: c.accentInk }]}>{idx + 1}</Text>
-                    <Text style={[styles.showTitle, { color: c.textPrimary }]} numberOfLines={1}>{g.genre}</Text>
-                    <Text style={[styles.showEps, { color: c.textTertiary }]}>{g.count} eps</Text>
-                  </View>
-                ))}
-              </View>
-            )}
-          </>
-        )}
+            <View style={[styles.card, { backgroundColor: c.glassFill, borderColor: c.hairline }]}>
+              <Text style={[styles.sectionTitle, { color: c.textPrimary }]}>Your watching rhythm</Text>
+              <Text style={[styles.body, { color: c.textSecondary }]}>{review.minutes_per_active_day ?? 0} minutes per active day{review.favorite_weekday ? ` · ${review.favorite_weekday} was your most active day of the week.` : ''}</Text>
+              {review.busiest_day && <Text style={[styles.body, { color: c.textPrimary }]}>Biggest watch day: {shortDate(review.busiest_day.date)} · {review.busiest_day.watches} watches</Text>}
+              {review.favorite_actor && <Text style={[styles.body, { color: c.textPrimary }]}>Your MVP character: {review.favorite_actor}</Text>}
+              {review.average_rating != null && <Text style={[styles.body, { color: c.textPrimary }]}>Your average rating: ★ {review.average_rating}/5 across {review.rated_titles} titles</Text>}
+            </View>
+            {!!review.months?.length && <View style={[styles.card, { backgroundColor: c.glassFill, borderColor: c.hairline }]}>
+              <Text style={[styles.sectionTitle, { color: c.textPrimary }]}>The chapters of your year</Text>
+              <Text style={[styles.detail, { color: c.textSecondary }]}>Series in accent · Movies in grey · Tap a month</Text>
+              <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.chart}>
+                {review.months.map((m) => <PressableScale key={m.month} style={[styles.monthColumn, { borderColor: month === m.month ? c.accentInk : 'transparent' }]}
+                  accessibilityRole="button" accessibilityState={{ selected: month === m.month }} accessibilityLabel={`${m.label}: ${m.episodes} episodes, ${m.movies} movie watches`} onPress={() => setMonth(m.month)}>
+                  <View style={styles.barSpace}><View style={{ width: 20, height: 88 * m.movie_minutes / peak, backgroundColor: c.textSecondary, borderTopLeftRadius: 4, borderTopRightRadius: 4 }} /><View style={{ width: 20, height: 88 * m.series_minutes / peak, backgroundColor: c.accentInk }} /></View>
+                  <Text style={[styles.detail, { color: c.textSecondary }]}>{m.label.slice(0, 3)}</Text>
+                </PressableScale>)}
+              </ScrollView>
+              {selectedMonth && <View style={styles.monthDetail}>
+                <Text style={[styles.titleName, { color: c.textPrimary }]}>{selectedMonth.label} · {Math.round((selectedMonth.series_minutes + selectedMonth.movie_minutes) / 60 * 10) / 10}h</Text>
+                <Text style={[styles.body, { color: c.textSecondary }]}>{selectedMonth.episodes} episodes · {selectedMonth.movies} movie watches · {selectedMonth.rewatches} repeats</Text>
+                {selectedMonth.top_show && <Text style={[styles.body, { color: c.textPrimary }]}>Series highlight: {selectedMonth.top_show.title}</Text>}
+                {selectedMonth.top_movie && <Text style={[styles.body, { color: c.textPrimary }]}>Movie highlight: {selectedMonth.top_movie.title}</Text>}
+              </View>}
+            </View>}
+            {([['tv', 'The series that stayed with you', review.watched_shows], ['movie', 'Your movie highlights', review.watched_movies]] as const).map(([kind, title, items]) => !!items?.length &&
+              <View key={kind} style={[styles.card, { backgroundColor: c.glassFill, borderColor: c.hairline }]}>
+                <Text style={[styles.sectionTitle, { color: c.textPrimary }]}>{title}</Text>
+                <Text style={[styles.detail, { color: c.textSecondary }]}>{kind === 'tv' ? 'Ranked by time watched' : 'Your ratings first, then repeat watches'}</Text>
+                {items.slice(0, 5).map(titleRow)}
+                <PressableScale onPress={() => setLibrary(kind)} style={[styles.libraryButton, { borderColor: c.hairline }]} accessibilityRole="button"><Text style={[styles.pillText, { color: c.accentInk }]}>See all {kind === 'tv' ? 'shows' : 'movies'} · {items.length}</Text></PressableScale>
+              </View>)}
+            {!!review.top_genres.length && <View style={[styles.card, { backgroundColor: c.glassFill, borderColor: c.hairline }]}>
+              <Text style={[styles.sectionTitle, { color: c.textPrimary }]}>Your taste this year</Text>
+              {review.top_genres.map((g) => <View key={g.genre} style={styles.genreRow}><Text style={[styles.body, { color: c.textPrimary }]}>{g.genre}</Text><Text style={[styles.detail, { color: c.textSecondary }]}>{g.count} watches</Text></View>)}
+              <Text style={[styles.note, { color: c.textTertiary }]}>A watch can belong to several genres. Ratings shown are your current personal ratings.</Text>
+            </View>}
+          </>}
       </ScrollView>
-      <Snackbar
-        visible={!!shareErrorMsg}
-        message={shareErrorMsg ?? ''}
-        onDismiss={() => setShareErrorMsg(null)}
-      />
+      <Modal visible={library !== null} animationType={reduceMotion ? 'none' : 'slide'} onRequestClose={() => setLibrary(null)}>
+        <SafeAreaView style={[styles.container, { backgroundColor: c.bg }]}>
+          <View style={[styles.header, styles.modalHeader]}><Text style={[styles.heading, { color: c.textPrimary }]}>{year} · Your library</Text><PressableScale style={styles.iconButton} onPress={() => setLibrary(null)} accessibilityRole="button" accessibilityLabel="Close library"><X size={22} color={c.textPrimary} /></PressableScale></View>
+          <View style={styles.modalHeader}><SegmentedControl segments={[{ value: 'tv', label: 'Shows' }, { value: 'movie', label: 'Movies' }]} selectedValue={library ?? 'tv'} onValueChange={setLibrary} /></View>
+          <FlashList data={library === 'movie' ? review?.watched_movies ?? [] : review?.watched_shows ?? []} keyExtractor={(item) => `${item.media_type}-${item.tmdb_id}`} renderItem={({ item, index }) => titleRow(item, index)} contentContainerStyle={styles.libraryContent} ListEmptyComponent={<Text style={[styles.note, { color: c.textSecondary }]}>No watches logged in this category this year.</Text>} />
+        </SafeAreaView>
+      </Modal>
+      <Snackbar visible={!!shareError} message={shareError ?? ''} onDismiss={() => setShareError(null)} />
     </SafeAreaView>
   );
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1 },
-  content: {
-    paddingHorizontal: 20,
-    paddingBottom: 48,
-    gap: 16,
-  },
-  headerRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingTop: 8,
-  },
-  headerCenter: { alignItems: 'center' },
-  headerTitle: {
-    fontSize: 18,
-    fontWeight: '800',
-    letterSpacing: -0.5,
-  },
-  headerSub: {
-    fontSize: 11,
-    fontWeight: '600',
-  },
-  loadingState: {
-    flex: 1,
-    alignItems: 'center',
-    justifyContent: 'center',
-    paddingVertical: 80,
-    gap: 16,
-  },
-  loadingText: {
-    fontSize: 14,
-    fontWeight: '500',
-  },
-  emptyState: {
-    alignItems: 'center',
-    justifyContent: 'center',
-    paddingVertical: 80,
-    gap: 10,
-  },
-  emptyEmoji: { fontSize: 48 },
-  emptyTitle: { fontSize: 18, fontWeight: '700' },
-  emptyDesc: {
-    fontSize: 13,
-    textAlign: 'center',
-  },
-  heroCard: {
-    borderWidth: StyleSheet.hairlineWidth,
-    borderRadius: 20,
-    padding: 32,
-    alignItems: 'center',
-    gap: 6,
-    overflow: 'hidden',
-  },
-  heroLabel: {
-    fontSize: 14,
-    fontWeight: '600',
-    textTransform: 'uppercase',
-    letterSpacing: 1.5,
-  },
-  heroValue: {
-    fontSize: 80,
-    fontWeight: '900',
-    letterSpacing: -3,
-    lineHeight: 84,
-  },
-  heroSub: {
-    fontSize: 14,
-    fontWeight: '500',
-  },
-  shareBrand: {
-    fontSize: 13,
-    fontWeight: '900',
-    letterSpacing: 3,
-    marginBottom: 4,
-  },
-  shareBragRow: {
-    marginTop: 14,
-    paddingTop: 14,
-    borderTopWidth: StyleSheet.hairlineWidth,
-    alignItems: 'center',
-    gap: 4,
-    width: '100%',
-  },
-  shareBragText: {
-    fontSize: 13,
-    fontWeight: '600',
-  },
-  shareYear: {
-    fontSize: 12,
-    fontWeight: '700',
-    marginTop: 14,
-    letterSpacing: 1,
-  },
-  carousel: {
-    marginHorizontal: -20,
-    paddingHorizontal: 20,
-  },
-  listCard: {
-    borderWidth: StyleSheet.hairlineWidth,
-    borderRadius: 16,
-    padding: 16,
-    gap: 12,
-  },
-  listTitle: {
-    fontSize: 15,
-    fontWeight: '700',
-    marginBottom: 4,
-  },
-  showRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 10,
-  },
-  showRank: {
-    fontSize: 15,
-    fontWeight: '800',
-    width: 20,
-    textAlign: 'center',
-  },
-  showPoster: {
-    width: 36,
-    height: 52,
-    borderRadius: 6,
-  },
-  showPosterPlaceholder: {
-    width: 36,
-    height: 52,
-    borderRadius: 6,
-  },
-  showMeta: { flex: 1, gap: 2 },
-  showTitle: {
-    fontSize: 13,
-    fontWeight: '600',
-  },
-  showEps: {
-    fontSize: 11,
-  },
-  genreRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 10,
-  },
+  container: { flex: 1 }, content: { paddingHorizontal: 20, paddingBottom: 48, gap: 20 },
+  header: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingTop: 4 },
+  iconButton: { minWidth: 48, minHeight: 48, alignItems: 'center', justifyContent: 'center' },
+  center: { alignItems: 'center', gap: 4 }, heading: { fontSize: 18, fontWeight: '800', letterSpacing: -0.4 },
+  detail: { fontSize: 12, lineHeight: 18 }, body: { fontSize: 14, lineHeight: 22 }, note: { fontSize: 11, lineHeight: 17 },
+  empty: { alignItems: 'center', paddingVertical: 72, gap: 16 }, yearOptions: { gap: 8 },
+  yearPill: { minHeight: 48, paddingHorizontal: 20, borderRadius: 24, justifyContent: 'center' }, pillText: { fontSize: 13, fontWeight: '700' },
+  hero: { borderWidth: StyleSheet.hairlineWidth, borderRadius: 24, padding: 24, alignItems: 'center', gap: 8, overflow: 'hidden' },
+  brand: { fontSize: 13, fontWeight: '900', letterSpacing: 3 }, heroLabel: { fontSize: 11, letterSpacing: 1.8, fontWeight: '600', marginTop: 12 },
+  heroValue: { fontSize: 76, fontWeight: '900', letterSpacing: -3, lineHeight: 90 }, heroSub: { fontSize: 14, fontWeight: '600', textAlign: 'center' },
+  split: { width: '100%', flexDirection: 'row', justifyContent: 'space-evenly', borderTopWidth: StyleSheet.hairlineWidth, paddingTop: 16, marginTop: 8 },
+  splitValue: { fontSize: 24, fontWeight: '800' }, highlight: { fontSize: 15, fontWeight: '700', textAlign: 'center', marginTop: 8 },
+  storyCards: { gap: 8 }, card: { borderWidth: StyleSheet.hairlineWidth, borderRadius: 20, padding: 16, gap: 12 }, sectionTitle: { fontSize: 17, fontWeight: '800', letterSpacing: -0.3 },
+  titleRow: { flexDirection: 'row', alignItems: 'center', gap: 12, minHeight: 76, paddingVertical: 8 }, rank: { fontSize: 15, fontWeight: '800', width: 22, textAlign: 'center' },
+  poster: { width: 40, height: 60, borderRadius: 6 }, titleMeta: { flex: 1, gap: 3 }, titleName: { fontSize: 14, fontWeight: '700' },
+  libraryButton: { minHeight: 48, borderTopWidth: StyleSheet.hairlineWidth, justifyContent: 'center', alignItems: 'center' }, genreRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 16 },
+  chart: { gap: 4 }, monthColumn: { minWidth: 48, paddingVertical: 6, alignItems: 'center', gap: 8, borderWidth: 1, borderRadius: 8 }, barSpace: { height: 88, justifyContent: 'flex-end' },
+  monthDetail: { gap: 6 }, modalHeader: { marginHorizontal: 20, marginBottom: 16 }, libraryContent: { paddingHorizontal: 20, paddingBottom: 32 },
 });

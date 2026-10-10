@@ -104,7 +104,7 @@ def test_show_remove_full_delete(api_client, create_user):
         tmdb_id=2022, show=show, season_number=1, episode_number=2,
         title="E2", air_date="2020-01-08", runtime_minutes=45,
     )
-    entry = Watchlist.objects.create(
+    Watchlist.objects.create(
         user=user, show=show, status=Watchlist.Status.UP_TO_DATE,
         is_favorite=True, ignore_catchup=True,
     )

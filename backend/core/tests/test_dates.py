@@ -10,7 +10,6 @@ test-run time, which is deterministic without needing to freeze it.
 
 from datetime import timedelta
 
-import pytest
 from django.utils import timezone
 
 from core.dates import AIRED_DATE_GRACE, aired_cutoff_date, has_released

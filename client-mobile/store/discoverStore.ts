@@ -78,16 +78,18 @@ export interface DiscoverFilters {
   animeOnly: boolean;
   selectedProviderIds: number[];
   monetization: Monetization;
+  recentReleases: boolean;
 }
 export function hasDiscoverFilters(state: DiscoverFilters): boolean {
-  return state.selectedGenreId !== null || state.sortOrder !== 'trending' || state.selectedLanguage !== null || state.animeOnly || state.selectedProviderIds.length > 0 || state.monetization !== 'flatrate|free|ads';
+  return state.selectedGenreId !== null || state.sortOrder !== 'trending' || state.selectedLanguage !== null || state.animeOnly || state.selectedProviderIds.length > 0 || state.monetization !== 'flatrate|free|ads' || state.recentReleases;
 }
 function filterParams(state: DiscoverState, page = 1): Record<string, string> {
   const params: Record<string, string> = { type: state.activeSegment, sort: state.sortOrder, page: String(page) };
   if (state.selectedGenreId !== null) params.genre = String(state.selectedGenreId);
   if (state.selectedLanguage) params.language = state.selectedLanguage;
   if (state.animeOnly) params.anime = 'true';
-  if (state.selectedProviderIds.length || state.monetization !== 'flatrate|free|ads') {
+  if (state.recentReleases) params.recent = 'true';
+  if (state.selectedProviderIds.length || state.monetization !== 'flatrate|free|ads' || state.recentReleases) {
     params.providers = state.selectedProviderIds.join(',');
     params.region = state.watchRegion;
     params.monetization = state.monetization;
@@ -112,6 +114,9 @@ export interface FeedSection {
   id: string;
   title: string;
   subtitle?: string;
+  sources?: string[];
+  is_stale?: boolean;
+  fetched_at?: string;
   items: DiscoverMediaItem[];
 }
 
@@ -154,6 +159,7 @@ interface DiscoverState extends DiscoverFilters {
   providersError: string | null;
   releases: Record<ActiveSegment, FeedSection | null>;
   releasesKey: string | null;
+  releasesFetchedAt: Record<ActiveSegment, number>;
   isLoadingReleases: boolean;
   releasesError: string | null;
   applyFilters: (filters: Partial<DiscoverFilters>) => void;
@@ -260,6 +266,7 @@ export const useDiscoverStore = create<DiscoverState>()(
   activeSegment: 'tv',
   selectedProviderIds: [],
   monetization: 'flatrate|free|ads',
+  recentReleases: false,
   watchRegion: 'IN',
   providerOptions: [],
   availableRegions: [],
@@ -268,6 +275,7 @@ export const useDiscoverStore = create<DiscoverState>()(
   providersError: null,
   releases: { tv: null, movie: null },
   releasesKey: null,
+  releasesFetchedAt: { tv: 0, movie: 0 },
   isLoadingReleases: false,
   releasesError: null,
   searchQuery: '',
@@ -315,7 +323,7 @@ export const useDiscoverStore = create<DiscoverState>()(
     filteredAbortController?.abort();
     loadMoreFilteredAbortController?.abort();
     set({ ...filters, filteredResults: [], filteredError: null, filteredPage: 1, filteredTotalPages: 1, isLoadingFiltered: false, isLoadingMoreFiltered: false });
-    if ((get().selectedProviderIds.length || get().monetization !== 'flatrate|free|ads') && get().sortOrder === 'trending') set({ sortOrder: 'popular' });
+    if ((get().selectedProviderIds.length || get().monetization !== 'flatrate|free|ads' || get().recentReleases) && get().sortOrder === 'trending') set({ sortOrder: 'popular' });
     if (get().isFilterActive()) void get().fetchFilteredResults();
   },
   setActiveSegment: (segment) => {
@@ -368,14 +376,14 @@ export const useDiscoverStore = create<DiscoverState>()(
   },
   fetchReleases: async (segment, force = false) => {
     const region = get().watchRegion;
-    if (!force && get().releases[segment] && get().releasesKey === region) return;
+    if (!force && get().releases[segment] && get().releasesKey === region && Date.now() - get().releasesFetchedAt[segment] < 30 * 60_000) return;
     releasesAbortController?.abort();
     const controller = new AbortController(); releasesAbortController = controller;
     set({ isLoadingReleases: true, releasesError: null });
     try {
       const response = await api.get<FeedSection>('/discover/releases/', { params: { type: segment, region }, signal: controller.signal });
       if (controller.signal.aborted) return;
-      set((state) => ({ releases: { ...state.releases, [segment]: response.data }, releasesKey: region, isLoadingReleases: false }));
+      set((state) => ({ releases: { ...state.releases, [segment]: response.data }, releasesKey: region, releasesFetchedAt: { ...state.releasesFetchedAt, [segment]: Date.now() }, isLoadingReleases: false }));
     } catch (error) {
       if (controller.signal.aborted) return;
       set({ releasesError: extractErrorMessage(error), isLoadingReleases: false });
@@ -602,7 +610,7 @@ export const useDiscoverStore = create<DiscoverState>()(
     }
   },
 
-  resetFilters: () => get().applyFilters({ selectedGenreId: null, sortOrder: 'trending', selectedLanguage: null, animeOnly: false, selectedProviderIds: [], monetization: 'flatrate|free|ads' }),
+  resetFilters: () => get().applyFilters({ selectedGenreId: null, sortOrder: 'trending', selectedLanguage: null, animeOnly: false, selectedProviderIds: [], monetization: 'flatrate|free|ads', recentReleases: false }),
 
   fetchGenreCovers: async (segment) => {
     // Skip if already fetched live this session — same C13 reasoning as

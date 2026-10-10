@@ -44,13 +44,13 @@ from core.serializers import (
     DiscoverAvailabilitySerializer,
     EpisodeInteractionSerializer,
     ImportJobSerializer,
-    MovieCacheSerializer,
     MovieWatchlistSerializer,
     WatchlistSerializer,
     NotificationPreferenceSerializer,
     WatchHistorySerializer,
 )
 from core.services import ANIME_GENRE_ID, ANIME_ORIGINAL_LANGUAGE, TMDBService, TMDBServiceError
+from core.release_sources import recent_release_items
 from core.tasks import (
     cache_next_missing_season,
     recalculate_user_badges,
@@ -117,16 +117,16 @@ class DiscoverReleasesView(APIView):
             return Response({"detail": "Choose shows or movies."}, status=400)
         tmdb = TMDBService()
         try:
-            discover = tmdb.discover_movies if media_type == "movie" else tmdb.discover_tv
             access = values["monetization"]
             if media_type == "movie" and "monetization" not in request.query_params:
                 access = "flatrate|free|ads|rent|buy"
-            data = discover(watch_region=values["region"], provider_ids=values.get("providers", ()), monetization=access, recent_releases=True)
+            data = recent_release_items(tmdb, media_type, values["region"], values.get("providers", ()), access)
         except TMDBServiceError:
             return Response({"detail": "Recent streaming releases are temporarily unavailable."}, status=502)
         # A capped rail, not an unbounded catalogue. TV dates describe recent
         # episodes; TMDB does not supply dates when a series joins a platform.
-        return Response({"id": "new_streaming", "title": "New Digital Releases" if media_type == "movie" else "New on Streaming", "subtitle": f'{"Includes streaming, rent and buy" if media_type == "movie" else "Series with recent episodes"} · {values["region"]} · Last 30 days', "items": data["results"][:15]})
+        sources = sorted({item.get("release_source", "tmdb") for item in data["items"]})
+        return Response({"id": "new_streaming", "title": "New Digital Releases" if media_type == "movie" else "New on Streaming", "subtitle": f'{"Includes streaming, rent and buy" if media_type == "movie" else "Series with recent episodes"} · {values["region"]} · Last 30 days', **data, "sources": sources})
 
 
 def build_discover_feed_payload(media_type: str) -> dict:
@@ -339,8 +339,9 @@ class DiscoverFilterView(APIView):
         tmdb = TMDBService()
 
         availability = discover_availability(request)
+        recent_releases = request.query_params.get("recent", "").lower() in ("true", "1")
         provider_ids = availability.get("providers", ())
-        availability_active = bool(provider_ids or "monetization" in request.query_params)
+        availability_active = bool(provider_ids or "monetization" in request.query_params or recent_releases)
         page = max(1, min(page, 500))
 
         try:
@@ -407,6 +408,8 @@ class DiscoverFilterView(APIView):
                 )
                 if availability_active:
                     discover_kwargs.update(provider_ids=provider_ids, watch_region=availability["region"], monetization=availability["monetization"])
+                if recent_releases:
+                    discover_kwargs["recent_releases"] = True
                 if media_type == "tv":
                     data = tmdb.discover_tv(**discover_kwargs)
                 else:

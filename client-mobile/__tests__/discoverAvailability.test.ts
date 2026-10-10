@@ -21,6 +21,18 @@ it('combines platform, genre, media type, country, and access on every page', as
   ]);
 });
 
+it('combines New releases with platform and genre on every page, then resets it', async () => {
+  (api.get as jest.Mock).mockResolvedValue({ data: { results: [], page: 1, total_pages: 2 } });
+  useDiscoverStore.setState({ selectedProviderIds: [8], selectedGenreId: 35, recentReleases: true, sortOrder: 'popular' });
+  await useDiscoverStore.getState().fetchFilteredResults();
+  await useDiscoverStore.getState().loadMoreFilteredResults();
+  for (const [, config] of (api.get as jest.Mock).mock.calls) {
+    expect(config.params).toEqual(expect.objectContaining({ recent: 'true', providers: '8', genre: '35', region: 'IN' }));
+  }
+  useDiscoverStore.getState().resetFilters();
+  expect(useDiscoverStore.getState().recentReleases).toBe(false);
+});
+
 it('does not restore obsolete filters when a canceled request resolves late', async () => {
   let resolve: (value: unknown) => void = () => {};
   (api.get as jest.Mock).mockImplementationOnce(() => new Promise((done) => { resolve = done; }));

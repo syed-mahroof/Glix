@@ -3,6 +3,7 @@ jest.mock('../lib/api', () => ({
 }));
 
 import { api } from '../lib/api';
+import { pickNextEpisode } from '../lib/upcoming';
 import { isShowComplete, useWatchStore, type Show, type WatchlistEntry } from '../store/watchStore';
 
 describe('watchStore', () => {
@@ -39,6 +40,22 @@ describe('optimistic episode mutations', () => {
     jest.spyOn(useWatchStore.getState(), 'syncWidgetData').mockImplementation(async () => {});
   });
   afterEach(() => { jest.restoreAllMocks(); jest.useRealTimers(); });
+
+  it('moves a final-episode cascade out of Watch Next while keeping watched history', async () => {
+    (api.post as jest.Mock).mockResolvedValue({ data: { total_time_watched: 60 } });
+    await useWatchStore.getState().bulkToggleWatchState([1, 2], true);
+    const state = useWatchStore.getState();
+    expect(state.watchlist.to_watch.results).toHaveLength(0);
+    expect(pickNextEpisode(state.watchlist.up_to_date.results[0])).toBeNull();
+    expect(state.history.results).toHaveLength(2);
+  });
+
+  it('reconciles server-cached predecessor episodes after a successful cascade', async () => {
+    (api.post as jest.Mock).mockResolvedValue({ data: { total_time_watched: 90 } });
+    await useWatchStore.getState().bulkToggleWatchState([1, 2, 3], true);
+    expect(api.get).toHaveBeenCalledWith('/watchlist/?page_size=all');
+    expect((api.get as jest.Mock).mock.calls.some(([url]) => url.startsWith('/watch-history'))).toBe(true);
+  });
 
   it('rejects a duplicate pending tap and advances only once', async () => {
     let resolve: (value: unknown) => void = () => {};

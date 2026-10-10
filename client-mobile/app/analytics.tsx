@@ -42,6 +42,7 @@ import WatchStreakCard from '../components/WatchStreakCard';
 import { staggerEntering, usePrefersReducedMotion } from '../lib/motion';
 import { useAppTheme } from '../lib/theme';
 import { monoLabelStyle } from '../lib/typography';
+import { useScreenActive } from '../lib/useScreenActive';
 import { useWatchStore } from '../store/watchStore';
 
 function NavRow({ label, onPress }: { label: string; onPress: () => void }) {
@@ -88,12 +89,17 @@ export default function AnalyticsScreen() {
   const movieAnalytics = useWatchStore((s) => s.movieAnalytics);
   const isLoadingMovieAnalytics = useWatchStore((s) => s.isLoadingMovieAnalytics);
   const fetchMovieAnalytics = useWatchStore((s) => s.fetchMovieAnalytics);
+  const screenActive = useScreenActive();
+  const lastMovieFetch = useRef({ at: 0, dirtyAt: -1 });
 
   useEffect(() => {
-    if (segment === 'movies' && !movieAnalytics) {
-      fetchMovieAnalytics();
-    }
-  }, [segment, movieAnalytics, fetchMovieAnalytics]);
+    if (!screenActive || segment !== 'movies') return;
+    const now = Date.now();
+    const previous = lastMovieFetch.current;
+    if (previous.dirtyAt === analyticsDirtyAt && now - previous.at < 60_000) return;
+    lastMovieFetch.current = { at: now, dirtyAt: analyticsDirtyAt };
+    void fetchMovieAnalytics();
+  }, [segment, screenActive, analyticsDirtyAt, fetchMovieAnalytics]);
 
   // This screen's stack lives inside the Profile tab and is frozen (not
   // unmounted) when the user switches tabs — a mount-only fetch left every
@@ -156,7 +162,8 @@ export default function AnalyticsScreen() {
     ])
   );
 
-  const totalHoursWhole = Math.floor(dashboard?.total_hours_watched ?? 0);
+  const seriesMinutes = dashboard?.series_minutes_watched ?? dashboard?.total_minutes_watched ?? 0;
+  const totalHoursWhole = Math.floor(seriesMinutes / 60);
 
   // Trend verdict on hours watched vs. the previous month — reuses data
   // already fetched for Year in Review / Monthly Summary, no new endpoint.
@@ -230,6 +237,13 @@ export default function AnalyticsScreen() {
                 <StatsCard label="Tracked" value={movieAnalytics.movies_tracked} Icon={Clapperboard} />
                 <StatsCard label="This Year" value={movieAnalytics.watched_this_year} Icon={Clapperboard} />
               </View>
+
+              <View style={styles.statsRow}>
+                <StatsCard label="Left to watch" value={Math.max(0, movieAnalytics.movies_tracked - movieAnalytics.movies_watched)} Icon={Clapperboard} />
+                <StatsCard label="Average length" value={movieAnalytics.average_runtime_minutes > 0 ? `${Math.round(movieAnalytics.average_runtime_minutes)}m` : '—'} Icon={Activity} />
+                <StatsCard label="This month" value={movieAnalytics.by_month.find((month) => month.month === new Date().getMonth() + 1)?.count ?? 0} Icon={Clapperboard} />
+              </View>
+              {!!movieAnalytics.rewatch_count && <Text style={{ color: c.textSecondary, fontSize: 12 }}>Includes {movieAnalytics.rewatch_count} rewatches · {Math.round((movieAnalytics.rewatch_minutes ?? 0) / 60 * 10) / 10}h revisiting favourites</Text>}
 
               {(movieAnalytics.longest_movie || movieAnalytics.shortest_movie) && (
                 <View style={styles.runtimeExtremesRow}>
@@ -381,9 +395,9 @@ export default function AnalyticsScreen() {
 
             {/* Time breakdown */}
             <TimeWatchedCard
-              days={Math.floor((dashboard?.total_minutes_watched ?? 0) / 1440)}
-              hours={Math.floor(((dashboard?.total_minutes_watched ?? 0) % 1440) / 60)}
-              minutes={(dashboard?.total_minutes_watched ?? 0) % 60}
+              days={Math.floor(seriesMinutes / 1440)}
+              hours={Math.floor((seriesMinutes % 1440) / 60)}
+              minutes={seriesMinutes % 60}
             />
 
             {/* Quick stats row — sequenced entrance, not a dump */}
@@ -398,6 +412,13 @@ export default function AnalyticsScreen() {
                 </Animated.View>
               ))}
             </View>
+
+            {completion && <View style={styles.statsRow}>
+              <StatsCard label="Episodes left" value={Math.max(0, completion.episodes_aired - completion.episodes_watched)} Icon={Clapperboard} />
+              <StatsCard label="Shows caught up" value={completion.shows_completed} Icon={Trophy} />
+              <StatsCard label="Episodes / day" value={dashboard?.series_daily_pace ?? '—'} Icon={Activity} />
+            </View>}
+            {completion && <Text style={{ color: c.textTertiary, fontSize: 11 }}>Daily pace uses first-watch episodes from the last 30 days.</Text>}
 
             {/* Streak card */}
             {streak && (
